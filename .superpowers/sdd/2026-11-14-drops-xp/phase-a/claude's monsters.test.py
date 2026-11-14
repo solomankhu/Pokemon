@@ -1,0 +1,7621 @@
+"""Headless test suite for "claude's monsters.py" (MONSTER TRAIL).
+
+    .venv/Scripts/python.exe "claude's monsters.test.py"
+
+The game's lower three layers (DATA / ENGINE / STATE) never touch the display,
+and main() sits behind an ``if __name__ == "__main__"`` guard, so the module
+can be imported and driven without opening a window.  Exits non-zero on
+failure.
+"""
+
+import importlib.util
+import json
+import os
+import random
+import sys
+import tempfile
+
+# Render checks drive real pygame surfaces, so force the headless drivers
+# before anything touches a display or an audio device.
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+GAME_PATH = os.path.join(HERE, "claude's monsters.py")
+
+_spec = importlib.util.spec_from_file_location("monster_trail", GAME_PATH)
+mt = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(mt)          # must not open a window
+
+# Keep saves out of the repo while testing.
+mt.SAVE_PATH = os.path.join(tempfile.gettempdir(), "monster-trail-test-save-%d.json" % os.getpid())
+if os.path.exists(mt.SAVE_PATH):
+    os.remove(mt.SAVE_PATH)
+
+# Battle conditions roll from the player's position. Every pre-existing test
+# expects today's clear-weather behaviour, so force CLEAR for the whole suite;
+# the CONDITIONS tests opt out locally and restore it (try/finally).
+mt.FORCE_CONDITION = "clear"
+# Likewise force today's look (day, no weather, layout 0, camera 0): RENDER pixel
+# tests (e.g. the white-flash count) and MT_FRAME_DIR dumps assume it.
+mt.FORCE_SCENE = dict(mt.DEFAULT_SCENE)
+
+FAILURES = []
+PASSED = 0
+
+
+def ok(cond, msg):
+    global PASSED
+    if cond:
+        PASSED += 1
+    else:
+        FAILURES.append(msg)
+        print("  FAIL: " + msg)
+
+
+def section(title):
+    print("\n== " + title)
+
+
+# Title actions must never overwrite progress without an explicit second choice.
+section("TITLE - existing save protection")
+_title_path = mt.SAVE_PATH
+with tempfile.TemporaryDirectory() as td:
+    try:
+        mt.SAVE_PATH = os.path.join(td, "save.json")
+        seed = mt.Game()
+        seed.party = [mt.make_mon("tidecoil", 40)]
+        seed.coins = 9000
+        seed.flags["gym"] = True
+        seed.save_game()
+        original = open(mt.SAVE_PATH, "rb").read()
+        title = mt.Game()
+        title.confirm()
+        ok(title.mode == "title" and getattr(title, "new_game_confirm", False)
+           and title.cursor == 0, "NEW GAME asks with KEEP SAVE selected")
+        title.confirm()
+        ok(title.mode == "title" and open(mt.SAVE_PATH, "rb").read() == original,
+           "KEEP SAVE preserves the exact saved bytes")
+        title.confirm()
+        title.move_cursor(0, 1)
+        title.cancel()
+        ok(title.mode == "title" and not getattr(title, "new_game_confirm", False)
+           and open(mt.SAVE_PATH, "rb").read() == original, "cancel preserves the save")
+        title.cursor = 0
+        title.confirm()
+        title.move_cursor(0, 1)
+        title.confirm()
+        ok(title.mode == "dialogue" and title.party == [] and title.coins == mt.START_COINS,
+           "only explicit START NEW starts fresh")
+        with open(mt.SAVE_PATH, "w") as fh:
+            fh.write("{broken save")
+        broken = open(mt.SAVE_PATH, "rb").read()
+        title = mt.Game()
+        title.move_cursor(0, 1)
+        title.confirm()
+        ok(title.mode == "title" and title.toast and open(mt.SAVE_PATH, "rb").read() == broken,
+           "failed CONTINUE reports an error without replacing the save")
+    finally:
+        mt.SAVE_PATH = _title_path
+
+
+# Exercise the actual pygame event dispatcher, not just Game.cancel().
+section("TITLE - pygame confirmation cancel")
+_title_path = mt.SAVE_PATH
+with tempfile.TemporaryDirectory() as td:
+    try:
+        mt.SAVE_PATH = os.path.join(td, "save.json")
+        seed = mt.Game()
+        seed.party = [mt.make_mon("tidecoil", 40)]
+        seed.save_game()
+        original = open(mt.SAVE_PATH, "rb").read()
+        shell = mt.Shell()
+        shell.game.confirm()
+        frames = []
+        def title_frame():
+            frames.append((shell.game.mode, shell.game.new_game_confirm))
+            mt.pygame.event.post(mt.pygame.event.Event(mt.pygame.QUIT))
+        shell.render = title_frame
+        mt.pygame.event.clear()
+        mt.pygame.event.post(mt.pygame.event.Event(mt.pygame.KEYDOWN, key=mt.pygame.K_ESCAPE))
+        shell.run()
+        ok(len(frames) == 2 and all(frame == ("title", False) for frame in frames),
+           "pygame Escape closes confirmation and keeps running until QUIT")
+        ok(open(mt.SAVE_PATH, "rb").read() == original, "pygame confirmation cancel preserves exact saved bytes")
+    finally:
+        mt.pygame.quit()
+        mt.SAVE_PATH = _title_path
+
+
+# ------------------------------------------------------------------- MAP
+section("MAP - geometry, legend, connectivity")
+
+widths = {len(r) for r in mt.MAP}
+ok(widths == {mt.MAP_W}, "every map row is %d wide, saw %s" % (mt.MAP_W, sorted(widths)))
+for i, row in enumerate(mt.MAP):
+    if len(row) != mt.MAP_W:
+        print("    row %d len %d |%s|" % (i, len(row), row))
+
+legend = set("#.,;_~=sfBCcHDGSovKT")
+stray = {c for row in mt.MAP for c in row} - legend
+ok(not stray, "unknown map characters: %s" % sorted(stray))
+
+START = (43, 107)
+ok(tuple(mt.START_TILE) == START, "START_TILE is %s" % (mt.START_TILE,))
+
+# Flood fill that models the rules the player actually moves under: ledges are
+# enterable only downward and drop you a further tile; unpicked balls are solid.
+seen = {START}
+queue = [START]
+while queue:
+    x, y = queue.pop(0)
+    for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+        nx, ny = x + dx, y + dy
+        if not (0 <= nx < mt.MAP_W and 0 <= ny < mt.MAP_H):
+            continue
+        t = mt.tile_at(nx, ny)
+        if t == "v":
+            if dy != 1:
+                continue
+            land = (nx, ny + 1)
+            if mt.tile_at(*land) in mt.SOLID or land in seen:
+                continue
+            seen.add(land)
+            queue.append(land)
+            continue
+        if (nx, ny) in seen or t in mt.SOLID:
+            continue
+        seen.add((nx, ny))
+        queue.append((nx, ny))
+
+
+def adjacent_to_open(x, y):
+    return any((x + dx, y + dy) in seen for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)))
+
+
+ok(mt.tile_at(*START) not in mt.SOLID, "player start tile is walkable")
+print("  %dx%d map, %d reachable tiles" % (mt.MAP_W, mt.MAP_H, len(seen)))
+
+
+# Gated reachability.  `seen` above is the world with nothing mined, and every
+# required thing (NPC, door, sign, trainer) must sit in it - that is the proof
+# that nothing the trail needs is behind a mineable tile.  `seen_mined` is the
+# same fill with every authored_only gate broken (K seams, T thick trees).  The
+# only tiles it may add are the GATED_REGIONS rects plus the gates, and anything
+# reachable only in `seen_mined` (an item, a zone) is "gated" and must lie
+# inside one GATED_REGIONS rect.
+def flood_fill(edits):
+    out, q = {START}, [START]
+    while q:
+        x, y = q.pop(0)
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            nx, ny = x + dx, y + dy
+            if not (0 <= nx < mt.MAP_W and 0 <= ny < mt.MAP_H):
+                continue
+            t = mt.tile_at(nx, ny, edits)
+            if t == "v":
+                if dy != 1:
+                    continue
+                land = (nx, ny + 1)
+                if mt.tile_at(*land, edits) in mt.SOLID or land in out:
+                    continue
+                out.add(land)
+                q.append(land)
+                continue
+            if (nx, ny) in out or t in mt.SOLID:
+                continue
+            out.add((nx, ny))
+            q.append((nx, ny))
+    return out
+
+
+# The rule is generalised over mt.GATED_REGIONS: every authored_only block in
+# MAP is a gate (K seams on the GEODE, T thick trees on the DEEPWOOD glades),
+# and each gated region is a bounded rect that its gates alone open.
+GATES = sorted((x, y) for y, r in enumerate(mt.MAP) for x, c in enumerate(r)
+               if mt.BLOCKS.get(c, {}).get("authored_only"))
+SEAMS = [p for p in GATES if mt.tile_at(*p) == mt.SEAM]
+TREES = [p for p in GATES if mt.tile_at(*p) == mt.TREE]
+ALL_MINED = {p: mt.BLOCKS[mt.tile_at(*p)]["leaves"] for p in GATES}
+seen_mined = flood_fill(ALL_MINED)
+GX1, GY1, GX2, GY2 = mt.GEODE
+
+
+def in_geode(x, y):
+    return GX1 <= x <= GX2 and GY1 <= y <= GY2
+
+
+def region_of(x, y):
+    return next((r for r in mt.GATED_REGIONS if r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
+
+
+def in_gated(x, y):
+    return region_of(x, y) is not None
+
+
+def adjacent_to_mined(x, y):
+    return any((x + dx, y + dy) in seen_mined for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)))
+
+
+def gated(x, y):
+    """Reachable only once a gate is broken, and inside a gated region."""
+    return not adjacent_to_open(x, y) and adjacent_to_mined(x, y) and in_gated(x, y)
+
+
+def open_tiles(r):
+    return {(x, y) for y in range(r[1], r[3] + 1) for x in range(r[0], r[2] + 1)
+            if mt.tile_at(x, y) not in mt.SOLID or (x, y) in ALL_MINED}
+
+
+GATED_OPEN = set().union(*(open_tiles(r) for r in mt.GATED_REGIONS))
+ok(flood_fill({}) == seen, "the gated fill with no edits is exactly the plain fill")
+ok(mt.GATED_REGIONS[0] == mt.GEODE, "the GEODE is the first gated region")
+ok(len(SEAMS) == 2 and all(region_of(*p) == mt.GEODE for p in SEAMS),
+   "exactly 2 cracked seams, both on the GEODE: %s" % SEAMS)
+ok(len(TREES) == len(mt.GATED_REGIONS) - 1 and all(region_of(*p) not in (None, mt.GEODE) for p in TREES),
+   "one thick tree per glade, each inside its glade: %s" % TREES)
+ok(len(GATES) == len(SEAMS) + len(TREES), "every gate is a seam or a thick tree: %s" % GATES)
+ok(seen <= seen_mined, "breaking a gate only ever adds ground")
+ok(seen_mined - seen == GATED_OPEN,
+   "breaking every gate opens exactly the gated regions (extra %s, missing %s)"
+   % (sorted((seen_mined - seen) - GATED_OPEN)[:4], sorted(GATED_OPEN - (seen_mined - seen))[:4]))
+for r in mt.GATED_REGIONS:
+    ok(not open_tiles(r) & seen, "gated region %s is sealed until its gate breaks" % (r,))
+ok(all(any(adjacent_to_open(*p) for p in GATES if region_of(*p) == r) for r in mt.GATED_REGIONS),
+   "every gated region has a gate that can be faced from the open world")
+ok(all(adjacent_to_mined(*p) for p in GATES), "every gate can be faced once its region is open")
+ok(not any(mt.in_sandbox(*p) for p in SEAMS) and all(mt.in_cave(p[1]) for p in SEAMS),
+   "the seams sit in the DARK CAVE, outside ROCKY PASS")
+ok(all(mt.region_name(y) == "DEEPWOOD" and not mt.in_sandbox(x, y) for x, y in TREES),
+   "thick trees stand in DEEPWOOD")
+ok(all(mt.tile_at(x + dx, y + dy) != "_" for x, y in GATES for dx, dy in mt.DIRS4)
+   and not any(x in (42, 43) for x, _ in GATES), "no gate touches the trunk road")
+print("  gated: %d gates (%d seams, %d trees) open %d tiles in %d regions (%d reachable with every gate broken)"
+      % (len(GATES), len(SEAMS), len(TREES), len(GATED_OPEN) - len(GATES), len(mt.GATED_REGIONS),
+         len(seen_mined)))
+for r in mt.GATED_REGIONS:
+    print("    region %s: %d open tiles behind %d gate(s)"
+          % (r, len(open_tiles(r) - set(GATES)), sum(1 for p in GATES if region_of(*p) == r)))
+
+# --- the two DEEPWOOD glades (Part B): MOSS HOLLOW and OLD GROVE, each behind a THICK TREE ---
+ok(mt.MOSS_HOLLOW == (4, 81, 19, 87) and mt.OLD_GROVE == (71, 81, 84, 87), "the glade rects are pinned")
+ok(mt.GATED_REGIONS == (mt.GEODE, mt.MOSS_HOLLOW, mt.OLD_GROVE), "three gated regions")
+ok(TREES == [(19, 84), (71, 84)], "the thick trees stand at (19,84) and (71,84): %s" % TREES)
+ok((20, 84) in seen and (70, 84) in seen, "both trees are faced from open ground")
+for z, rect, lv in (("MOSS", (6, 84, 16, 86), (12, 16)), ("GROVE", (74, 83, 82, 85), (16, 18))):
+    zz = next((q for q in mt.ZONES if (q["x1"], q["y1"], q["x2"], q["y2"]) == rect), None)
+    ok(zz is not None and (zz["min"], zz["max"]) == lv, "%s zone %s at L%d-%d" % (z, rect, lv[0], lv[1]))
+    ok(zz and all(mt.tile_at(x, y) == ";" for y in range(rect[1], rect[3] + 1) for x in range(rect[0], rect[2] + 1)),
+       "%s zone is all dark grass" % z)
+ok(mt.ZONES[-2]["x1"] == 6 and mt.ZONES[-1]["x1"] == 74, "the glade zones are appended last, MOSS then GROVE")
+ok(mt.ITEMS.get((5, 82)) == 6 and mt.ITEMS.get((83, 82)) == 8, "glade item balls: 6 and 8")
+ok(any("AXE" in l for l in mt.SIGNS[(24, 91)]), "the DEEPWOOD sign hints at the AXE")
+
+doors = {}
+for y, row in enumerate(mt.MAP):
+    for x, c in enumerate(row):
+        if c in "HDG":
+            doors.setdefault(c, []).append((x, y))
+for c, label in (("H", "heal centre"), ("D", "lab"), ("G", "gym")):
+    ok(c in doors, "at least one %s exists on the map" % label)
+    for pos in doors.get(c, []):
+        ok(adjacent_to_open(*pos), "%s at %s can be stood next to" % (label, pos))
+ok(len(doors.get("H", [])) >= 2, "the bigger world has more than one heal centre")
+print("  doors: %d heal, %d lab, %d gym"
+      % (len(doors.get("H", [])), len(doors.get("D", [])), len(doors.get("G", []))))
+
+for n in mt.NPCS:
+    ok(mt.tile_at(n["x"], n["y"]) not in mt.SOLID,
+       "NPC %s is not embedded in a wall" % n["id"])
+    ok(mt.tile_at(n["x"], n["y"]) != "v", "NPC %s is not standing on a ledge" % n["id"])
+    ok(adjacent_to_open(n["x"], n["y"]),
+       "NPC %s at %d,%d is reachable" % (n["id"], n["x"], n["y"]))
+spots = [(n["x"], n["y"]) for n in mt.NPCS]
+ok(len(spots) == len(set(spots)), "no two NPCs start on the same tile")
+
+trainers = [n for n in mt.NPCS if n["kind"] == "trainer"]
+ok(len(trainers) >= mt.GYM_REQUIREMENT,
+   "enough trainers exist (%d) to meet the gym requirement (%d)"
+   % (len(trainers), mt.GYM_REQUIREMENT))
+print("  cast: %d NPCs, %d of them trainers" % (len(mt.NPCS), len(trainers)))
+
+GRASS = (",", ";")          # ordinary tall grass and the cave/ruins dark grass
+
+ok(tuple(mt.GRASS) == GRASS, "the game's GRASS (what try_encounter rolls on) is %s" % (GRASS,))
+gated_zones = []
+for z in mt.ZONES:
+    rect = [(x, y) for y in range(z["y1"], z["y2"] + 1) for x in range(z["x1"], z["x2"] + 1)]
+    count = sum(1 for p in rect if mt.tile_at(*p) in GRASS and p in seen)
+    if count == 0 and all(in_gated(*p) for p in rect) and len({region_of(*p) for p in rect}) == 1:
+        gated_zones.append(region_of(*rect[0]))              # gated: only behind its region's gate
+        count = sum(1 for p in rect if mt.tile_at(*p) in GRASS and p in seen_mined)
+    ok(count > 0, "encounter zone %s has reachable grass (gated zones: with every gate broken)"
+       % [z["x1"], z["y1"], z["x2"], z["y2"]])
+ok(sorted(gated_zones) == sorted(mt.GATED_REGIONS),
+   "exactly one encounter zone is gated per gated region: %s" % gated_zones)
+
+orphan = sum(1 for y, row in enumerate(mt.MAP) for x, c in enumerate(row)
+             if c in mt.GRASS and not mt.zone_at(x, y))
+ok(orphan == 0, "%d grass tiles (any of %s) sit outside every encounter zone" % (orphan, "".join(mt.GRASS)))
+
+path_cols = {x for row in mt.MAP for x, c in enumerate(row) if c == "_"}
+ok(len(path_cols) == 2,
+   "the trunk road occupies exactly 2 columns, saw %s" % sorted(path_cols))
+
+# --- the new interactive furniture ---
+sign_tiles = {(x, y) for y, r in enumerate(mt.MAP) for x, c in enumerate(r) if c == "S"}
+item_tiles = {(x, y) for y, r in enumerate(mt.MAP) for x, c in enumerate(r) if c == "o"}
+ledges = [(x, y) for y, r in enumerate(mt.MAP) for x, c in enumerate(r) if c == "v"]
+water = [(x, y) for y, r in enumerate(mt.MAP) for x, c in enumerate(r) if c == "~"]
+
+ok(set(mt.SIGNS) == sign_tiles,
+   "every S tile has sign text and vice versa (map %d, table %d)"
+   % (len(sign_tiles), len(mt.SIGNS)))
+for pos, lines in mt.SIGNS.items():
+    ok(lines and all(isinstance(l, str) and l for l in lines), "sign %s has text" % (pos,))
+    ok(adjacent_to_open(*pos), "sign %s can be read from somewhere" % (pos,))
+
+ok(set(mt.ITEMS) == item_tiles,
+   "every o tile has an item amount and vice versa (map %d, table %d)"
+   % (len(item_tiles), len(mt.ITEMS)))
+gated_items = [pos for pos in mt.ITEMS if gated(*pos)]
+for pos, amount in mt.ITEMS.items():
+    ok(isinstance(amount, int) and amount > 0, "item %s gives a positive amount" % (pos,))
+    ok(adjacent_to_open(*pos) or gated(*pos),
+       "item %s can be reached (a gated one: with every gate broken, inside a gated region)" % (pos,))
+ok((75, 30) in gated_items and sorted(region_of(*p) for p in gated_items) == sorted(mt.GATED_REGIONS),
+   "exactly one item is gated per gated region (the GEODE's at (75,30)): %s" % gated_items)
+
+ok(ledges, "the map has ledges")
+for x, y in ledges:
+    ok(mt.tile_at(x, y + 1) not in mt.SOLID and mt.tile_at(x, y + 1) != "v",
+       "ledge %s has a clear landing below" % ((x, y),))
+    ok(mt.tile_at(x, y - 1) not in mt.SOLID,
+       "ledge %s can be approached from above" % ((x, y),))
+
+fishable = [pos for pos in water if adjacent_to_open(*pos)]
+ok(len(fishable) >= 10, "at least 10 water tiles are fishable from shore, got %d"
+   % len(fishable))
+for w in mt.WATER_ZONES:
+    inside = [pos for pos in fishable
+              if w["x1"] <= pos[0] <= w["x2"] and w["y1"] <= pos[1] <= w["y2"]]
+    ok(inside, "water zone %s covers reachable water"
+       % [w["x1"], w["y1"], w["x2"], w["y2"]])
+    for sid, _ in w["pool"]:
+        ok(sid in mt.SPECIES, "water zone references unknown species %s" % sid)
+print("  furniture: %d signs, %d item balls, %d ledges, %d fishable water tiles"
+      % (len(sign_tiles), len(item_tiles), len(ledges), len(fishable)))
+
+# --- the expanded terrain ---
+dark_grass = {(x, y) for y, r in enumerate(mt.MAP) for x, c in enumerate(r) if c == ";"}
+cave_floor = {(x, y) for y, r in enumerate(mt.MAP) for x, c in enumerate(r) if c == "c"}
+sand = {(x, y) for y, r in enumerate(mt.MAP) for x, c in enumerate(r) if c == "s"}
+bridge = {(x, y) for y, r in enumerate(mt.MAP) for x, c in enumerate(r) if c == "="}
+for name, tiles in (("dark grass", dark_grass), ("cave floor", cave_floor),
+                    ("sand", sand), ("bridge", bridge)):
+    ok(tiles, "the world has %s" % name)
+    ok(any(t in seen for t in tiles), "%s is reachable" % name)
+
+orphan_dark = sum(1 for pos in dark_grass if pos in seen_mined and not mt.zone_at(*pos))
+ok(orphan_dark == 0,
+   "%d reachable dark-grass tiles sit outside every encounter zone" % orphan_dark)
+geode_grass = {p for p in dark_grass if in_geode(*p)}
+GEODE_ZONE = next((z for z in mt.ZONES if (z["x1"], z["y1"], z["x2"], z["y2"]) == (66, 31, 74, 32)), None)
+ok(GEODE_ZONE is not None and (GEODE_ZONE["min"], GEODE_ZONE["max"]) == (24, 28)
+   and GEODE_ZONE["pool"] == [("boulderon", 30), ("ironclad", 25), ("voltbloom", 15),
+                              ("emberling", 15), ("sprigling", 15)],
+   "the GEODE zone is x66..74, y31..32, L24-28 with the creature-designer's pool")
+gi = mt.ZONES.index(GEODE_ZONE) if GEODE_ZONE else -1
+ok(gi > 0 and (mt.ZONES[gi - 1]["x1"], mt.ZONES[gi - 1]["y1"], mt.ZONES[gi - 1]["min"]) == (64, 27, 23),
+   "the GEODE zone sits right after the DARK CAVE 23-27 zone")
+ok(geode_grass and all(66 <= x <= 74 and 31 <= y <= 32 for x, y in geode_grass)
+   and all(mt.zone_at(*p) is GEODE_ZONE for p in geode_grass),
+   "every GEODE dark-grass tile lies in the GEODE zone x66..74, y31..32 (%d)" % len(geode_grass))
+
+# a bridge must join two walkable places, not dead-end in open sea
+land_ends = [pos for pos in bridge
+             if any((pos[0] + dx, pos[1]) in seen
+                    and mt.tile_at(pos[0] + dx, pos[1]) != "="
+                    for dx in (-1, 1))]
+ok(len(land_ends) >= 2, "the bridge meets land at both ends, saw %d" % len(land_ends))
+
+named = sum(1 for y in range(mt.MAP_H) if mt.region_name(y) != "THE TRAIL")
+ok(named > mt.MAP_H * 0.75,
+   "most rows belong to a named region (%d/%d)" % (named, mt.MAP_H))
+ok(mt.in_cave(sum(mt.CAVE_BAND) // 2), "the cave band reports itself as cave")
+ok(not mt.in_cave(mt.START_TILE[1]), "the start tile is not in the cave")
+print("  terrain: %d dark grass, %d cave floor, %d sand, %d bridge"
+      % (len(dark_grass), len(cave_floor), len(sand), len(bridge)))
+
+# ---------------------------------------------------------------- ENGINE
+section("ENGINE - data integrity, damage, xp, catching")
+
+for sid, sp in mt.SPECIES.items():
+    for _, move_id in sp["learn"]:
+        ok(move_id in mt.MOVES, "%s references unknown move %s" % (sid, move_id))
+    ok(any(lvl == 1 for lvl, _ in sp["learn"]), "%s has no level-1 move" % sid)
+    if sp["evo"]:
+        ok(sp["evo"][0] in mt.SPECIES,
+           "%s evolves into unknown species %s" % (sid, sp["evo"][0]))
+    for t in sp["types"]:
+        ok(t in mt.TYPE_CHART, "%s has unknown type %s" % (sid, t))
+    ok(set(sp["base"]) == set(mt.STAT_KEYS), "%s base stats keys %s" % (sid, sorted(sp["base"])))
+    for lvl in range(1, 61):
+        got = mt.moves_for_level(sid, lvl)
+        ok(1 <= len(got) <= 4, "%s at L%d knows %d moves" % (sid, lvl, len(got)))
+
+for mid, mv in mt.MOVES.items():
+    ok(mv["type"] in mt.TYPE_CHART, "move %s has unknown type" % mid)
+    if mv["cat"] == "status":
+        ok("eff" in mv, "status move %s has no effect" % mid)
+        ok(mv["eff"][0] in mt.STAT_LABEL, "status move %s targets unknown stat" % mid)
+
+ok(mt.type_effectiveness("Water", ["Fire"]) == 2, "water beats fire")
+ok(mt.type_effectiveness("Fire", ["Grass"]) == 2, "fire beats grass")
+ok(mt.type_effectiveness("Grass", ["Water"]) == 2, "grass beats water")
+ok(mt.type_effectiveness("Electric", ["Water", "Flying"]) == 4, "dual weakness stacks to 4x")
+ok(mt.type_effectiveness("Grass", ["Bug", "Flying"]) == 0.25, "dual resistance stacks to 0.25x")
+
+
+def fixed():
+    return 0.5
+
+
+fire = mt.make_mon("emberling", 5)
+grass = mt.make_mon("sprigling", 5)
+ok(fire.maxhp > 0 and fire.hp == fire.maxhp, "a new monster starts at full HP")
+
+super_eff = mt.damage_calc(fire, grass, "ember", {}, {}, fixed)
+ok(not super_eff["missed"] and super_eff["dmg"] > 0 and super_eff["eff"] == 2,
+   "ember vs grass is super effective")
+ok(super_eff["dmg"] < grass.maxhp,
+   "a level-5 hit does not one-shot (%d/%d)" % (super_eff["dmg"], grass.maxhp))
+ok(mt.damage_calc(grass, fire, "vinewhip", {}, {}, fixed)["eff"] == 0.5,
+   "vine whip is resisted by fire")
+ok(mt.damage_calc(fire, grass, "growl", {}, {}, fixed)["dmg"] == 0,
+   "status moves deal no damage")
+
+missed = sum(1 for _ in range(500)
+             if mt.damage_calc(fire, grass, "aerialace", {}, {})["missed"])
+ok(missed == 0, "a never-miss move never missed in 500 tries (missed %d)" % missed)
+
+miss90 = sum(1 for _ in range(5000)
+             if mt.damage_calc(fire, grass, "rockthrow", {}, {})["missed"])
+ok(0.06 < miss90 / 5000 < 0.14,
+   "90%%-accuracy move missed %.1f%% of the time" % (100 * miss90 / 5000))
+
+boosted = mt.damage_calc(fire, grass, "ember", {"spa": 2}, {}, fixed)["dmg"]
+lowered = mt.damage_calc(fire, grass, "ember", {"spa": -2}, {}, fixed)["dmg"]
+ok(boosted > super_eff["dmg"] > lowered,
+   "stat stages scale damage (%d < %d < %d)" % (lowered, super_eff["dmg"], boosted))
+
+evolver = mt.make_mon("emberling", 5)
+events = mt.gain_xp(evolver, mt.xp_for_level(17) - evolver.xp)
+ok(evolver.level >= 16, "gained levels, reached %d" % evolver.level)
+ok(evolver.id == "pyrelash", "evolved into pyrelash, got %s" % evolver.id)
+ok(any(e["t"] == "evolve" for e in events), "an evolve event was emitted")
+ok(len(evolver.moves) <= 4, "moveset stays capped at 4, got %d" % len(evolver.moves))
+ok(evolver.hp <= evolver.maxhp, "HP stays within max after level-ups")
+
+nicknamed = mt.make_mon("emberling", 15, "SPARKY")
+mt.gain_xp(nicknamed, mt.xp_for_level(17))
+ok(nicknamed.name == "SPARKY", "a nickname survives evolution, got %s" % nicknamed.name)
+
+hurt = mt.make_mon("nibbit", 5)
+caught_weak = 0
+for _ in range(2000):
+    hurt.hp = 1
+    if mt.catch_roll(hurt, 1.5)["caught"]:
+        caught_weak += 1
+ok(caught_weak / 2000 > 0.7,
+   "a nearly-fainted nibbit is caught %d%% of the time" % (100 * caught_weak / 2000))
+
+healthy = mt.make_mon("nibbit", 5)
+caught_full = sum(1 for _ in range(2000) if mt.catch_roll(healthy, 1.5)["caught"])
+ok(caught_full < caught_weak, "a healthy monster is harder to catch than a hurt one")
+
+for sid in mt.SPECIES:
+    mon = mt.make_mon(sid, 10)
+    mon.hp = 1
+    res = mt.catch_roll(mon, 1.5)
+    ok(0 <= res["shakes"] <= 4, "%s produced %d shakes (must be 0..4)" % (sid, res["shakes"]))
+
+for z in mt.ZONES:
+    for sid, _ in z["pool"]:
+        ok(sid in mt.SPECIES, "encounter table references unknown species %s" % sid)
+for n in mt.NPCS:
+    for sid, _ in n.get("team", []):
+        ok(sid in mt.SPECIES, "trainer %s uses unknown species %s" % (n["id"], sid))
+for sid, _ in mt.GYM_LEADER["team"]:
+    ok(sid in mt.SPECIES, "gym leader uses unknown species %s" % sid)
+
+probe = mt.make_mon("dripling", 14)
+probe_foe = mt.make_mon("zapmote", 12)
+per_hit = mt.damage_calc(probe, probe_foe, "waterpulse", {}, {}, fixed)["dmg"]
+hits = -(-probe_foe.maxhp // per_hit)
+ok(2 <= hits <= 8, "gym lead takes a sane number of hits to fell (%d)" % hits)
+print("  balance probe: L14 dripling needs ~%d water pulses for L12 zapmote" % hits)
+
+# ---------------------------------------------------------------- BATTLE
+section("BATTLE - full fights driven to completion")
+
+
+def run_battle(choose_action):
+    """Play a battle the way a person would: tick the clock, press through
+    every message, and choose an action whenever the game asks for one."""
+    log = []
+    guard = 0
+    # Commands and full preparation/contact/recovery now consume real time.
+    # Permit ~200 two-action turns, including low-damage/status-heavy fights,
+    # while retaining a finite runaway guard independent of rendered frames.
+    tick_budget = 60000
+    while g.battle and g.battle.phase != "over" and guard < tick_budget:
+        guard += 1
+        b = g.battle
+        g.update_battle(1 / 60)
+        b.disp_mine = float(b.mine.hp)          # settle HP bars instantly
+        b.disp_foe = float(b.foe.hp)
+        if b.step and b.step["t"] == "msg":
+            log.append(b.step["s"])
+            b.step = None
+            continue
+        if b.step:
+            continue
+        if b.phase == "menu":
+            g.take_turn(choose_action(b))
+        elif b.phase == "swap" and b.forced_swap:
+            nxt = g.first_alive()
+            if not nxt:
+                break
+            b.forced_swap = False
+            b.mine = nxt
+            b.disp_mine = float(nxt.hp)
+            b.stages_mine = {}
+            b.phase = "menu"
+    ok(guard < tick_budget, "battle terminated instead of spinning (%d ticks)" % guard)
+    return log
+
+
+def fresh_battle(mine, foe, trainer=None):
+    g.party = mine if isinstance(mine, list) else [mine]
+    g.balls = 20
+    g.fade_dir = 0
+    g.fade_cb = None
+    g.mode = "overworld"
+    g.start_battle(foe, trainer)
+
+
+g = mt.Game()
+
+# Message ordering. Steps queued from inside a running `do` must splice in at
+# the current position - if they appended, the faint would be narrated before
+# the attack that caused it.
+fresh_battle(mt.make_mon("emberling", 40), mt.make_mon("sprigling", 3))
+log = run_battle(lambda b: dict(t="attack", move="ember"))
+print("  one-shot KO transcript:")
+for line in log:
+    print("    " + line)
+
+
+def index_of(sub):
+    for i, s in enumerate(log):
+        if sub in s:
+            return i
+    return -1
+
+
+i_used, i_faint, i_exp = index_of("used EMBER"), index_of("fainted"), index_of("EXP")
+ok(i_used >= 0, "the attack was narrated")
+ok(i_faint > i_used, "the faint is narrated after the attack that caused it")
+ok(i_exp > i_faint, "EXP is narrated after the faint")
+
+ids = list(mt.SPECIES)
+for i in range(200):
+    mine = mt.make_mon(ids[i % len(ids)], 20)
+    foe = mt.make_mon(ids[(i * 7 + 3) % len(ids)], 20)
+    fresh_battle(mine, foe)
+    run_battle(lambda b, i=i: dict(t="attack", move=b.mine.moves[i % len(b.mine.moves)]))
+    ok(0 <= mine.hp <= mine.maxhp, "HP stayed in range for %s" % mine.id)
+print("  200 randomised even fights resolved")
+
+maya = mt.npc_by_id("t2")
+fresh_battle(mt.make_mon("tidecoil", 45),
+             mt.make_mon(maya["team"][0][0], maya["team"][0][1]), maya)
+log = run_battle(lambda b: dict(t="attack", move="aquatail"))
+ok(sum(1 for s in log if "sent out" in s) == len(maya["team"]),
+   "trainer worked through all %d of their monsters" % len(maya["team"]))
+ok(any(maya["defeat"] in s for s in log), "trainer spoke their defeat line")
+ok(g.beaten.get("t2") is True, "trainer was recorded as beaten")
+
+joined = 0
+for _ in range(60):
+    fresh_battle(mt.make_mon("dripling", 30), mt.make_mon("nibbit", 4))
+    before = len(g.party)
+
+
+    def weaken_then_throw(b):
+        b.foe.hp = 1
+        return dict(t="ball")
+
+
+    run_battle(weaken_then_throw)
+    if len(g.party) > before:
+        joined += 1
+ok(joined > 40, "a weakened wild monster joined the party %d/60 times" % joined)
+ok(g.balls < 20, "balls were actually consumed (%d left)" % g.balls)
+
+escaped = 0
+for _ in range(60):
+    fresh_battle(mt.make_mon("zapmote", 30), mt.make_mon("pebblit", 5))
+    if any("Got away" in s for s in run_battle(lambda b: dict(t="run"))):
+        escaped += 1
+ok(escaped > 30, "a much faster monster escaped %d/60 times" % escaped)
+
+fresh_battle(mt.make_mon("sprigling", 3), mt.make_mon("pyrelash", 50))
+run_battle(lambda b: dict(t="attack", move="tackle"))
+ok(g.battle is None or g.battle.phase == "over", "a lost battle still ends cleanly")
+ok(not g.party_alive(), "the party is wiped after a loss")
+
+g.party = [mt.make_mon("emberling", 20), mt.make_mon("dripling", 20)]
+g.fade_dir = 0
+g.mode = "overworld"
+g.start_battle(mt.make_mon("nibbit", 5))
+state = {"swapped": False}
+
+
+def swap_then_fight(b):
+    if not state["swapped"]:
+        state["swapped"] = True
+        return dict(t="swap", index=1)
+    return dict(t="attack", move=b.mine.moves[0])
+
+
+log = run_battle(swap_then_fight)
+ok(any("Come back" in s for s in log), "swapping mid-fight was narrated")
+
+# A status-only fight must still terminate, and the -6 stage floor must report.
+fresh_battle(mt.make_mon("thornmane", 40), mt.make_mon("nibbit", 3))
+log = run_battle(lambda b: dict(t="attack", move="growl"))
+ok(any("ATTACK" in s for s in log), "growl reported a stat change")
+ok(any("won't go lower" in s for s in log),
+   "the -6 stat-stage floor was reached and reported")
+
+# -- the DARK CAVE hunt battle (GLOOMSTALK) ------------------------------------
+sp = mt.SPECIES["gloomstalk"]
+ok(sp["name"] == "GLOOMSTALK" and sp["types"] == ["Dark"], "GLOOMSTALK is pure Dark")
+ok([sp["base"][k] for k in mt.STAT_KEYS] == [75, 100, 60, 40, 60, 75]
+   and sum(sp["base"].values()) == 410, "GLOOMSTALK base stats 75/100/60/40/60/75 (BST 410)")
+ok(sp["catch_rate"] == 3 and sp["base_exp"] == 190 and sp["evo"] is None,
+   "GLOOMSTALK: catch rate 3, base EXP 190, no evolution")
+ok(sp["art"]["kind"] == "quad" and sp["art"].get("big") and sp["art"].get("mane"),
+   "GLOOMSTALK reuses the quad silhouette (big + mane): no new draw branch")
+ok(mt.HUNT["species"] == "gloomstalk" and mt.HUNT["species"] in mt.SPECIES,
+   "HUNT names an existing species")
+ok(all(sid != "gloomstalk" for z in list(mt.ZONES) + list(mt.WATER_ZONES) for sid, _ in z["pool"]),
+   "GLOOMSTALK is in no grass or fishing pool, so it can never be caught")
+ok(all(sid != "gloomstalk" for n in mt.NPCS if n["kind"] == "trainer" for sid, _ in n["team"])
+   and all(sid != "gloomstalk" for sid, _ in mt.GYM_LEADER["team"]),
+   "no trainer or the gym carries GLOOMSTALK")
+ok(all(mt.moves_for_level("gloomstalk", lv) == ["bite", "quickattack", "howl", "crunch"]
+       for lv in range(mt.HUNT["lv_min"], mt.HUNT["lv_max"] + 1)),
+   "across the whole hunt band GLOOMSTALK knows BITE, QUICK ATTACK, HOWL, CRUNCH")
+
+ok(mt.hunt_level([1]) == 22 and mt.hunt_level([23]) == 22 and mt.hunt_level([24]) == 23,
+   "hunt_level: best level - 1, floored at 22")
+ok(mt.hunt_level([29]) == 28 and mt.hunt_level([100]) == 28, "hunt_level is capped at 28")
+ok(mt.hunt_level([5, 26, 12]) == 25, "hunt_level reads the party's best level, not the lead's")
+lv_curve = [mt.hunt_level([lv]) for lv in range(1, 101)]
+ok(all(22 <= v <= 28 for v in lv_curve) and lv_curve == sorted(lv_curve),
+   "hunt_level stays in 22..28 and never falls as the party levels up")
+ok([mt.hunt_count(v) for v in (None, "3", -4, True, float("nan"), [], 0, 2, 2.9)]
+   == [0, 0, 0, 0, 0, 0, 0, 2, 2], "hunt_count cleans a saved win count to a non-negative int")
+
+
+def fresh_hunt(mine, lv=25):
+    g.party = mine if isinstance(mine, list) else [mine]
+    g.balls = 20
+    g.fade_dir, g.fade_cb, g.mode = 0, None, "overworld"
+    g.start_battle(mt.make_mon("gloomstalk", lv), hunt=True)
+    return g.battle
+
+
+def to_menu_log(events=None):
+    """Press through the queue until the battle asks for an action."""
+    out = []
+    guard = 0
+    while g.battle and g.battle.phase not in ("menu", "over") and guard < 5000:
+        guard += 1
+        b = g.battle
+        g.update_battle(1 / 60)
+        b.disp_mine, b.disp_foe = float(b.mine.hp), float(b.foe.hp)
+        if b.step and b.step["t"] == "msg":
+            out.append(b.step["s"])
+            if events is not None:
+                events.append(("msg", b.step["s"], b.scare))
+            b.step = None
+    return out
+
+
+# The jumpscare intro: its order, its phases, one reveal - all through the queue.
+events = []
+fx_calls = []
+g.sfx = lambda name: events.append(("sfx", name, None)) if name != "text" else None
+g.fx_scare = lambda calm: (fx_calls.append(calm), events.append(("fx", calm, g.battle.scare)))
+random.seed(77)
+rng_before = random.getstate()
+b = fresh_hunt(mt.make_mon("pyrelash", 26))
+ok(b.hunt is True and b.trainer is None and b.scare == "dark",
+   "start_battle(hunt=True) stores Battle.hunt and starts with the foe hidden")
+ok(g.mode == "battle", "a hunt battle starts as a hard cut (no fade) with motion on")
+ok(not any(s["t"] == "wait" for s in b.queue), "no held frame with motion on")
+intro = to_menu_log(events)
+ok(intro == ["Something was breathing right behind you...", "GLOOMSTALK lunged out of the dark!",
+             "It's hunting you. There's no time to aim a BALL!", "Go, PYRELASH!"],
+   "the scare intro narrates in order: %s" % intro)
+ok(not any("A wild" in s for s in intro), "a hunt never announces 'A wild ... appeared'")
+seq = [(e[0], e[2]) for e in events]
+ok(seq == [("sfx", None), ("msg", "dark"), ("fx", "reveal"), ("msg", "reveal"),
+           ("msg", "reveal"), ("msg", None)],
+   "scare sfx, then the dark line, then ONE reveal, then the lunge lines, then 'Go': %s" % seq)
+ok(fx_calls == [False], "fx_scare fires exactly once, with motion on (calm=False)")
+ok(g.battle.phase == "menu" and g.battle.scare is None, "the intro ends at the menu with the scare over")
+ok(random.getstate() == rng_before, "the scare intro never touches the global random stream")
+
+# BALL is refused without using a turn.
+b = g.battle
+hp_mine, hp_foe = b.mine.hp, b.foe.hp
+random.seed(5)
+g.take_turn(dict(t="ball"))
+refused = to_menu_log()
+state_refused = random.getstate()
+random.seed(5)
+random.choice(b.foe.moves)
+ok(refused == ["It melts into the dark before the BALL can land!"],
+   "BALL in a hunt is refused with one line: %s" % refused)
+ok(g.balls == 20 and b.ball_anim is None, "the refused BALL was not spent or thrown")
+ok(b.mine.hp == hp_mine and b.foe.hp == hp_foe and b.phase == "menu",
+   "no turn was used: no foe attack, straight back to the menu")
+ok(state_refused == random.getstate(),
+   "the refusal draws only the usual foe-move pick from the global random stream")
+
+# RUN uses the fixed HUNT odds, whatever the speeds.
+real_random = random.random
+hunt_log = []
+real_hunt_over = g.hunt_over
+g.hunt_over = lambda result: (hunt_log.append(result), real_hunt_over(result))
+try:
+    for mine_id, mine_lv in (("pebblit", 22), ("galebeak", 60)):     # very slow / very fast
+        normal = mt.clamp(0.35 + (mt.make_mon(mine_id, mine_lv).spe
+                                  - mt.make_mon("gloomstalk", 25).spe) * 0.02, 0.2, 0.95)
+        ok(abs(normal - mt.HUNT["run_odds"]) > 0.2,
+           "%s L%d would run at %.2f in the wild" % (mine_id, mine_lv, normal))
+        for roll, should in ((mt.HUNT["run_odds"] - 0.01, True), (mt.HUNT["run_odds"] + 0.01, False)):
+            fresh_hunt(mt.make_mon(mine_id, mine_lv))
+            to_menu_log()
+            b = g.battle
+            hp0 = b.mine.hp
+            del hunt_log[:]
+            random.random = lambda r=roll: r
+            try:
+                g.take_turn(dict(t="run"))
+                log = to_menu_log()
+            finally:
+                random.random = real_random
+            tag = "%s L%d, roll %.2f" % (mine_id, mine_lv, roll)
+            if should:
+                ok(log[0] == "You bolted into the dark... it lost your scent. For now.",
+                   "%s: RUN succeeds under the fixed odds" % tag)
+                ok(b.phase == "over" and b.result == "run" and hunt_log == ["run"],
+                   "%s: the run ends the battle and calls hunt_over('run') once" % tag)
+            else:
+                ok(log[0] == "It cut you off!", "%s: RUN fails above the fixed odds" % tag)
+                ok(any(s.startswith("Foe GLOOMSTALK used") for s in log[1:]),
+                   "%s: a failed RUN gives the foe its free attack" % tag)
+                ok(b.phase == "menu" and hunt_log == [] and b.mine.hp <= hp0,
+                   "%s: the fight goes on after a failed RUN" % tag)
+    escapes = 0
+    random.seed(3)
+    for _ in range(400):
+        fresh_hunt(mt.make_mon("pebblit", 22))
+        to_menu_log()
+        g.take_turn(dict(t="run"))
+        if any("bolted" in s for s in to_menu_log()):
+            escapes += 1
+    ok(150 <= escapes <= 250, "a slow monster still escapes the hunt about half the time (%d/400)" % escapes)
+
+    # hunt_over rewards: first win vs repeat, conserved in materials.
+    g.flags["hunt_beaten"] = 0
+    g.materials = {k: 0 for k in mt.MATERIALS}
+    g.materials["stone"] = 5
+    totals = []
+    for n in (1, 2, 3):
+        b = fresh_hunt(mt.make_mon("pyrelash", 60))
+        del hunt_log[:]
+        log = run_battle(lambda b: dict(t="attack", move="infernofang"))
+        totals.append(dict(g.materials))
+        want = mt.HUNT["reward_first"]["ore"] if n == 1 else mt.HUNT["reward_repeat"]["ore"]
+        i_faint = next((i for i, s in enumerate(log) if "Wild GLOOMSTALK fainted" in s), -1)
+        i_exp = next((i for i, s in enumerate(log) if "EXP" in s), -1)
+        i_ore = next((i for i, s in enumerate(log) if "behind in the dark" in s), -1)
+        ok(0 <= i_faint < i_exp < i_ore and log[i_ore] == "It left %d ORE behind in the dark." % want,
+           "win %d: faint, then EXP, then the %d-ORE reward line (splice order kept)" % (n, want))
+        ok(hunt_log == ["win"] and b.result == "win", "win %d: hunt_over('win') called exactly once" % n)
+        ok(g.flags["hunt_beaten"] == n, "win %d: the win count is %d" % (n, n))
+    ok([t["ore"] for t in totals] == [3, 4, 5], "ORE: +3 on the first win, +1 after (%s)"
+       % [t["ore"] for t in totals])
+    ok(all(t["stone"] == 5 and sum(t.values()) == 5 + t["ore"] for t in totals),
+       "the reward adds only ORE; every other material is conserved")
+
+    # Losing is the normal whiteout and pays nothing.
+    g.flags["hunt_beaten"] = 0
+    ore0 = g.materials["ore"]
+    b = fresh_hunt(mt.make_mon("nibbit", 5), lv=28)
+    del hunt_log[:]
+    run_battle(lambda b: dict(t="attack", move="tackle"))
+    ok(hunt_log == ["lose"] and b.result == "lose", "a lost hunt calls hunt_over('lose') once")
+    ok(g.materials["ore"] == ore0 and g.flags["hunt_beaten"] == 0, "a lost hunt pays nothing")
+    cb, g.fade_cb = g.fade_cb, None
+    cb()
+    ok(g.mode == "dialogue" and g.party[0].hp == g.party[0].maxhp
+       and (g.player.tx, g.player.ty) == tuple(g.last_centre),
+       "a lost hunt whites out to the centre, healed, exactly like any loss")
+    g.mode, g.dialogue = "overworld", None
+finally:
+    random.random = real_random
+    g.hunt_over = real_hunt_over
+    g.sfx = lambda name: None
+    g.fx_scare = lambda calm: None
+
+# REDUCED_MOTION: a held dark frame and the normal fade, the same words and sound.
+try:
+    mt.REDUCED_MOTION = True
+    calm_calls = []
+    g.fx_scare = lambda calm: calm_calls.append(calm)
+    g.party = [mt.make_mon("pyrelash", 26)]
+    g.fade_dir, g.fade_cb, g.mode, g.battle = 0, None, "overworld", None
+    g.start_hunt(mt.make_mon("gloomstalk", 25))
+    ok(g.battle is None and g.fade_dir == 1 and g.fade_cb, "reduced motion: start_hunt fades in normally")
+    cb, g.fade_cb = g.fade_cb, None
+    cb()
+    b = g.battle
+    kinds = [(s["t"], s.get("ms")) for s in b.queue[:3]]
+    ok(kinds == [("do", None), ("wait", 0.4), ("msg", None)],
+       "reduced motion: sfx, a held 0.4 s dark frame, then the first line: %s" % kinds)
+    calm_intro = to_menu_log()
+    ok(calm_intro == intro, "reduced motion: the intro text is identical")
+    ok(calm_calls == [True], "reduced motion: fx_scare still fires once, told to stay calm")
+finally:
+    mt.REDUCED_MOTION = False
+    g.fx_scare = lambda calm: None
+g.party = [mt.make_mon("pyrelash", 26)]
+g.fade_dir, g.fade_cb, g.mode, g.battle = 0, None, "overworld", None
+g.start_hunt(mt.make_mon("gloomstalk", 25))
+ok(g.mode == "battle" and g.battle.hunt and g.fade_dir == 0, "motion on: start_hunt is a hard cut")
+g.battle, g.mode = None, "overworld"
+ok(mt.Game().flags.get("hunt_beaten") == 0, "a new game starts with no hunt wins")
+
+# ----------------------------------------------------------------- WORLD
+section("WORLD - trainer sight lines, save/load round-trip")
+
+
+def route(sx, sy, tx, ty):
+    """BFS over tiles that are genuinely walkable, NPC bodies included."""
+    prev = {(sx, sy): None}
+    queue = [(sx, sy)]
+    while queue:
+        x, y = queue.pop(0)
+        if (x, y) == (tx, ty):
+            out, cur = [], (x, y)
+            while cur:
+                out.insert(0, cur)
+                cur = prev[cur]
+            return out
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            nxt = (x + dx, y + dy)
+            if nxt in prev:
+                continue
+            if mt.tile_at(*nxt) == "v":
+                if dy != 1:
+                    continue
+                land = (nxt[0], nxt[1] + 1)
+                if land in prev or g.blocked_for(land[0], land[1], "down"):
+                    continue
+                prev[land] = (x, y)
+                queue.append(land)
+                continue
+            if g.blocked_for(nxt[0], nxt[1]):
+                continue
+            prev[nxt] = (x, y)
+            queue.append(nxt)
+    return None
+
+
+def walk_to(tx, ty):
+    p = g.player
+    legs = route(p.tx, p.ty, tx, ty)
+    if not legs:
+        return dict(unreachable=True)
+    for x, y in legs[1:]:
+        p.dir = ("up" if y < p.ty else "down" if y > p.ty
+                 else "left" if x < p.tx else "right")
+        p.tx, p.ty = x, y
+        g.check_trainer_sight()
+        if g.mode != "overworld":
+            return dict(engaged=True, at=(x, y))
+    return dict(arrived=True, steps=len(legs))
+
+
+ALL_TRAINERS = [n for n in mt.NPCS if n["kind"] == "trainer"]
+GYM_DOOR = [(x, y) for y, r in enumerate(mt.MAP)
+            for x, c in enumerate(r) if c == "G"][0]
+APPROACH = (GYM_DOOR[0], GYM_DOOR[1] + 1)
+
+g.flags["starter"] = True
+g.party = [mt.make_mon("tidecoil", 40)]
+g.beaten = {}
+g.mode = "overworld"
+g.fade_dir = 0
+g.player.tx, g.player.ty = mt.START_TILE
+
+r = walk_to(*APPROACH)
+ok(r.get("engaged"), "walking the trail runs into a trainer: %s" % r)
+if r.get("at"):
+    print("  first trainer sees you at %s (%s)"
+          % (r["at"], mt.region_name(r["at"][1])))
+
+g.beaten = {n["id"]: True for n in ALL_TRAINERS}
+g.mode = "overworld"
+g.player.tx, g.player.ty = mt.START_TILE
+r = walk_to(*APPROACH)
+ok(r.get("arrived"),
+   "the trail is walkable end to end once trainers are beaten: %s" % r)
+if r.get("arrived"):
+    print("  full traverse: %d tiles from CEDAR TOWN to the gym door" % r["steps"])
+ok(mt.tile_at(*GYM_DOOR) == "G", "the gym door is where the walk ends")
+
+# every trainer must be reachable, or the gym requirement is unmeetable
+g.beaten = {n["id"]: True for n in ALL_TRAINERS}
+reachable_trainers = 0
+for n in ALL_TRAINERS:
+    found = False
+    for dx, dy in ((0, 1), (0, -1), (-1, 0), (1, 0)):
+        if route(mt.START_TILE[0], mt.START_TILE[1], n["x"] + dx, n["y"] + dy):
+            found = True
+            break
+    if found:
+        reachable_trainers += 1
+    else:
+        ok(False, "trainer %s cannot be reached from the start" % n["id"])
+ok(reachable_trainers >= mt.GYM_REQUIREMENT,
+   "at least %d trainers are reachable (found %d)"
+   % (mt.GYM_REQUIREMENT, reachable_trainers))
+print("  %d/%d trainers reachable; gym needs %d"
+      % (reachable_trainers, len(ALL_TRAINERS), mt.GYM_REQUIREMENT))
+
+# the gym refuses you until the requirement is met, then opens
+g.beaten = {}
+g.mode = "overworld"
+g.player.tx, g.player.ty = APPROACH
+g.player.dir = "up"
+g.dialogue = None
+g.interact()
+refused = g.mode == "dialogue" and any("budge" in l or "rule" in l.lower()
+                                       for l in g.dialogue["lines"])
+ok(refused, "the gym turns you away before the requirement is met")
+g.dialogue, g.mode = None, "overworld"
+g.beaten = {n["id"]: True for n in ALL_TRAINERS}
+g.interact()
+ok(g.mode == "dialogue" and "slide open" in " ".join(g.dialogue["lines"]),
+   "the gym opens once enough trainers are beaten")
+g.dialogue, g.mode = None, "overworld"
+
+# --- save / load round-trip, now carrying picked items and the last centre ---
+g.mode = "overworld"
+g.beaten = {"t1": True}
+g.party = [mt.make_mon("umbrawing", 26), mt.make_mon("ironclad", 24)]
+g.party[0].hp = 7
+g.balls = 13
+g.picked = {(20, 89), (52, 68)}
+g.last_centre = (12, 59)
+g.flags = dict(starter=True, gym=False)
+g.player.tx, g.player.ty, g.player.dir = 44, 60, "left"
+
+ok(g.save_game(), "save_game reported success")
+snapshot = [(m.id, m.level, m.hp, tuple(m.moves)) for m in g.party]
+g.party, g.balls, g.beaten, g.picked = [], 0, {}, set()
+g.flags = dict(starter=False, gym=False)
+g.last_centre = mt.START_TILE
+
+ok(g.load_game(), "load_game reported success")
+ok([(m.id, m.level, m.hp, tuple(m.moves)) for m in g.party] == snapshot,
+   "the party round-tripped exactly")
+ok(g.balls == 13, "ball count round-tripped, got %d" % g.balls)
+ok(g.beaten.get("t1") is True, "beaten-trainer flags round-tripped")
+ok(g.picked == {(20, 89), (52, 68)}, "picked items round-tripped, got %s" % g.picked)
+ok(tuple(g.last_centre) == (12, 59), "last heal centre round-tripped")
+ok((g.player.tx, g.player.ty) == (44, 60), "map position round-tripped")
+ok(g.player.px == 44 * 32, "pixel position was rebuilt from the tile position")
+
+# --- picking an item is one-way and credits the pouch ---
+g.picked = set()
+g.balls = 0
+pos = next(iter(mt.ITEMS))
+g.dialogue = None
+g.pick_up(pos[0], pos[1])
+ok(g.balls == mt.ITEMS[pos], "picking up %s gave %d balls" % (pos, mt.ITEMS[pos]))
+ok(pos in g.picked, "the item is marked as taken")
+ok(not g.blocked_for(pos[0], pos[1]), "a taken item stops blocking its tile")
+before = g.balls
+g.dialogue = None
+g.pick_up(pos[0], pos[1])
+ok(g.balls == before, "picking the same item twice gives nothing more")
+
+# --- ledges only yield downward ---
+led = [(x, y) for y, r in enumerate(mt.MAP)
+       for x, c in enumerate(r) if c == "v"][0]
+ok(g.blocked_for(led[0], led[1], "up"), "a ledge blocks you going up")
+ok(g.blocked_for(led[0], led[1], "left"), "a ledge blocks you going sideways")
+ok(not g.blocked_for(led[0], led[1], "down"), "a ledge lets you drop south")
+
+with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+    fh.write('{"party": [{"id": "NOPE", "level": 5}], "balls": 3}')
+ok(g.load_game() is True, "a save naming an unknown species still loads")
+ok(len(g.party) == 0, "the unknown species was dropped rather than crashing")
+with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+    fh.write("not json at all")
+ok(g.load_game() is False, "a corrupt save is rejected cleanly")
+os.remove(mt.SAVE_PATH)
+
+# --------------------------------------------------------------- SANDBOX
+section("SANDBOX - mining, crafting, building in ROCKY PASS, the seam and the GEODE")
+
+MAP_BEFORE = list(mt.MAP)
+ROCK = mt.ROCK_BAND
+BOULDERS = [(x, y) for y in range(ROCK[0], ROCK[1] + 1) for x in range(2, mt.MAP_W - 2)
+            if mt.MAP[y][x] == "#"]
+ORE_TILES = sorted(b for b in BOULDERS if mt.mine_drop("#", *b).get("ore"))
+
+# --- tables ---
+ok(mt.WALL not in "".join(mt.MAP), "the WALL glyph is never authored into MAP")
+ok(mt.WALL in mt.SOLID and "#" in mt.SOLID and mt.SEAM in mt.SOLID and mt.TREE in mt.SOLID,
+   "walls, boulders, seams and thick trees are solid")
+ok(set(mt.BLOCKS) == {"#", mt.WALL, mt.SEAM, mt.TREE}, "only boulders, walls, the seam and thick trees can be broken")
+ok(mt.BLOCKS["#"]["tier"] == 1 and mt.BLOCKS[mt.WALL]["tier"] == 1 and mt.BLOCKS[mt.SEAM]["tier"] == 2
+   and mt.BLOCKS[mt.TREE]["tier"] == 1, "boulders and walls need PICK 1, the seam PICK 2, a thick tree AXE 1")
+ok(all(mt.BLOCKS[k].get("tool") == "pick" for k in ("#", mt.WALL, mt.SEAM))
+   and mt.BLOCKS[mt.TREE]["tool"] == "axe", "every block names its tool")
+ok({k for k, b in mt.BLOCKS.items() if b.get("authored_only")} == {mt.SEAM, mt.TREE},
+   "only the seam and the thick tree are authored_only")
+ok(mt.BLOCKS[mt.TREE]["drops"] == {} and mt.BLOCKS[mt.TREE]["leaves"] == ".", "a thick tree drops nothing and leaves ground")
+ok("C" not in mt.BLOCKS, "cave wall (C) is never mineable")
+for r in mt.RECIPES:
+    ok(r["out"] in mt.MATERIALS or r["out"] == "balls" or r.get("sets_tier") or r.get("sets_tool")
+       or r["out"] in mt.GOODS or (r["out"] in ("lantern", "pulse") and "cap" in r),
+       "recipe %s makes a known thing" % r["id"])
+    ok(mt.craft_label(r["out"]), "recipe %s has a label" % r["id"])
+    ok(r["count"] > 0 and all((k in mt.MATERIALS or mt.GOODS.get(k, {}).get("kind") == "loot") and n > 0
+                              for k, n in r["needs"].items()), "recipe %s needs known materials or loot" % r["id"])
+for t, b in mt.BLOCKS.items():
+    ok(all(k in mt.MATERIALS for k in b["drops"]), "block %r drops known materials" % t)
+wall_recipe = next(r for r in mt.RECIPES if r["out"] == "wall")
+ok(mt.BLOCKS[mt.WALL]["drops"] == wall_recipe["needs"],
+   "mining a WALL refunds exactly what it cost to craft")
+ok(mt.MENU_ITEMS[3] == "CRAFT", "CRAFT sits in the overworld menu")
+
+# --- mine_drop: deterministic, ore ~1 in 4, only boulders ---
+ok(all(mt.mine_drop("#", *b) == mt.mine_drop("#", *b) for b in BOULDERS),
+   "mine_drop is a pure function of the tile")
+ok(all(mt.mine_drop("#", *b).get("stone") == 1 for b in BOULDERS), "every boulder gives 1 STONE")
+ok(len(BOULDERS) >= 40, "ROCKY PASS has plenty of boulders (%d)" % len(BOULDERS))
+ok(len(BOULDERS) // 8 <= len(ORE_TILES) <= len(BOULDERS) // 2,
+   "ORE turns up in roughly 1 in 4 boulders (%d of %d)" % (len(ORE_TILES), len(BOULDERS)))
+ok(not any(mt.mine_drop(mt.WALL, *b).get("ore") for b in ORE_TILES),
+   "a WALL built on an ore spot never yields ORE again")
+ok(mt.mine_drop(".", 30, 45) == {} and mt.mine_drop("_", 42, 45) == {}, "ground drops nothing")
+print("  %d boulders, %d hold ORE: %s" % (len(BOULDERS), len(ORE_TILES), ORE_TILES))
+
+# --- can_mine: only ROCKY PASS boulders/walls, only with a pick ---
+ok(all(mt.can_mine("#", x, y, True) for x, y in BOULDERS), "every pass boulder is mineable")
+ok(not any(mt.can_mine("#", x, y, False) for x, y in BOULDERS), "nothing breaks without a PICK")
+outside = [(x, y) for y, row in enumerate(mt.MAP) for x, c in enumerate(row)
+           if c == "#" and not (ROCK[0] <= y <= ROCK[1])]
+ok(outside and not any(mt.can_mine("#", x, y, True) for x, y in outside),
+   "trees and rock outside ROCKY PASS stay solid (%d checked)" % len(outside))
+border = [(x, y) for y in range(ROCK[0], ROCK[1] + 1) for x in (0, 1, mt.MAP_W - 2, mt.MAP_W - 1)]
+ok(not any(mt.can_mine("#", x, y, True) for x, y in border), "the world-edge columns can't be dug")
+ok(not mt.can_mine("#", 43, ROCK[0] - 1, True) and not mt.can_mine("#", 10, ROCK[1] + 1, True),
+   "the band's bounding rows of rock stay solid")
+for glyph in "CB~.,_S":
+    ok(not mt.can_mine(glyph, 30, 45, True), "%r is not mineable even in the pass" % glyph)
+
+# --- the overlay never mutates MAP ---
+e = mt.with_edit({}, *BOULDERS[0], ".")
+ok(mt.tile_at(*BOULDERS[0], e) == "." and mt.tile_at(*BOULDERS[0]) == "#",
+   "tile_at reads the overlay only when it is passed")
+e2 = mt.with_edit(e, *BOULDERS[0], "#")
+ok(e2 == {} and e == {BOULDERS[0]: "."}, "restoring the authored glyph drops the diff; with_edit copies")
+ok(mt.tile_at(-1, 45, {(-1, 45): "."}) == "#", "off-map is rock whatever the overlay says")
+
+# --- craft conserves exactly and refuses when short ---
+inv = dict(stone=7, ore=3, wall=1, balls=7,           # Part B: loot needs come from the BAG
+           twig=3, flint=3, leaf=3, dewdrop=3, copperwire=3, emberdust=3, shadowsilk=3)
+frozen = dict(inv)
+for r in mt.RECIPES:
+    after = mt.craft(inv, r, 1)
+    ok(inv == frozen, "craft(%s) does not mutate its input" % r["id"])
+    ok(after is not None, "craft(%s) succeeds with enough" % r["id"])
+    delta = {k: after.get(k, 0) - inv.get(k, 0) for k in set(after) | set(inv)}
+    want = {k: -n for k, n in r["needs"].items()}
+    if not (r.get("sets_tier") or r.get("sets_tool")):   # a tool raises a flag, not a counter
+        want[r["out"]] = want.get(r["out"], 0) + r["count"]
+    ok({k: v for k, v in delta.items() if v} == {k: v for k, v in want.items() if v},
+       "craft(%s) moves exactly the recipe: %s" % (r["id"], delta))
+    short = {k: n - 1 for k, n in r["needs"].items()}
+    ok(mt.craft(short, r) is None and mt.craft({}, r) is None,
+       "craft(%s) refuses when short" % r["id"])
+    ok(mt.craft(dict(r["needs"]), r) is not None, "craft(%s) works with exactly enough" % r["id"])
+
+# --- PICK tiers, the seam, the IRON PICK, load_edits and the backstop ---
+for v, want in ((True, 1), (False, 0), (None, 0), (0, 0), (1, 1), (2, 2), (3, 2), (-1, 0), ("2", 0), (2.0, 0)):
+    ok(mt.pick_tier(v) == want, "pick_tier(%r) is %d" % (v, want))
+for sx_, sy_ in SEAMS:
+    ok(not mt.can_mine(mt.SEAM, sx_, sy_, 0) and not mt.can_mine(mt.SEAM, sx_, sy_, 1)
+       and not mt.can_mine(mt.SEAM, sx_, sy_, True), "seam %s does not break at tier 0/1" % ((sx_, sy_),))
+    ok(mt.can_mine(mt.SEAM, sx_, sy_, 2), "seam %s breaks with the IRON PICK" % ((sx_, sy_),))
+    ok(mt.mine_drop(mt.SEAM, sx_, sy_) == {"ore": 2}, "seam %s always drops exactly 2 ORE" % ((sx_, sy_),))
+ok(not mt.can_mine(mt.SEAM, 70, 35, 2) and not mt.can_mine(mt.SEAM, 30, 45, 2),
+   "K breaks only where MAP authored it, not on cave floor or in the pass")
+ok(not mt.can_mine("c", 70, 34, 2), "a mined seam's floor is not mineable again")
+cave_walls = [(x, y) for y, row in enumerate(mt.MAP) for x, c in enumerate(row) if c == "C"]
+ok(not any(mt.can_mine("C", x, y, 2) for x, y in cave_walls),
+   "no cave wall (C) breaks even with the IRON PICK (%d checked)" % len(cave_walls))
+ok(all(mt.can_mine("#", x, y, 2) for x, y in BOULDERS) and mt.can_mine(mt.WALL, 30, 44, 2),
+   "the IRON PICK still breaks boulders and walls")
+ok(not any(mt.can_mine("#", x, y, 2) for x, y in outside), "the IRON PICK still can't fell trees")
+ok(len(set(mt.mine_drop(mt.SEAM, x, y)["ore"] for x in range(88) for y in range(110))) == 1,
+   "the seam's drop never depends on where it is")
+
+IRON = next(r for r in mt.RECIPES if r["id"] == "iron_pick")
+ok(IRON["sets_tier"] == mt.PICK_MAX == 2 and IRON["needs"] == {"ore": 3, "stone": 6},
+   "the IRON PICK is 3 ORE + 6 STONE and sets the PICK to tier 2")
+have = dict(stone=6, ore=3, wall=1, balls=5)
+got_iron = mt.craft(have, IRON, 1)
+ok(got_iron == dict(stone=0, ore=0, wall=1, balls=5), "crafting the IRON PICK takes exactly its needs: %s" % got_iron)
+ok("iron_pick" not in (got_iron or {}), "the IRON PICK is never stored in materials")
+ok(have == dict(stone=6, ore=3, wall=1, balls=5), "craft(iron_pick) does not mutate its input")
+ok(mt.craft(have, IRON, 2) is None and mt.craft(dict(stone=99, ore=99), IRON, 2) is None,
+   "the IRON PICK can't be crafted a second time")
+ok(mt.craft(dict(stone=5, ore=3), IRON, 1) is None and mt.craft(dict(stone=6, ore=2), IRON, 1) is None,
+   "the IRON PICK refuses when short of either material")
+ok(mt.craft(dict(stone=4), next(r for r in mt.RECIPES if r["id"] == "wall"), 2) == dict(stone=2, wall=1),
+   "ordinary recipes ignore the tier")
+
+ok(mt.load_edits({"70,34": "c", "65,33": "c"}) == {(70, 34): "c", (65, 33): "c"},
+   "load_edits keeps both authored seams mined to cave floor")
+for bad_k, bad_v, why in (("70,34", ".", "a seam mined to grass"), ("70,34", "W", "a wall on the seam"),
+                          ("70,34", "K", "the seam as itself"), ("64,33", "c", "a cave wall opened"),
+                          ("71,34", "c", "a cave wall beside the seam opened"),
+                          ("70,35", "K", "a seam painted onto floor"), ("30,45", "K", "a seam in the pass"),
+                          ("69,31", "c", "geode grass rewritten")):
+    ok(mt.load_edits({bad_k: bad_v}) == {}, "load_edits drops %s (%s=%s)" % (why, bad_k, bad_v))
+
+ok(len(mt.ORE_DEPOSITS) == len(ORE_TILES) and set(mt.ORE_DEPOSITS) == set(ORE_TILES),
+   "ORE_DEPOSITS is every ORE boulder (%d)" % len(mt.ORE_DEPOSITS))
+ALL_DUG = {p: "." for p in mt.ORE_DEPOSITS}
+ok(mt.quarry_backstop(dict(stone=4, ore=1, wall=0), 1, ALL_DUG) == dict(stone=4, ore=4, wall=0),
+   "the backstop gives 3 ORE to a tier-1 player with < 3 ORE once every deposit is gone")
+ok(mt.quarry_backstop(dict(ore=0), True, {**ALL_DUG, mt.ORE_DEPOSITS[0]: mt.WALL}) == dict(ore=3),
+   "a WALL built on a dug deposit still counts as dug; an old True pick is tier 1")
+for args, why in (((dict(ore=0), 0, ALL_DUG), "no PICK at all"),
+                  ((dict(ore=0), 2, ALL_DUG), "already has the IRON PICK"),
+                  ((dict(ore=3), 1, ALL_DUG), "already has enough ORE"),
+                  ((dict(ore=0), 1, {}), "ORE still in the ground"),
+                  ((dict(ore=0), 1, {p: "." for p in mt.ORE_DEPOSITS[1:]}), "one deposit left")):
+    ok(mt.quarry_backstop(*args) is None, "no backstop when %s" % why)
+frozen_m = dict(ore=1)
+mt.quarry_backstop(frozen_m, 1, ALL_DUG)
+ok(frozen_m == dict(ore=1), "quarry_backstop does not mutate its input")
+
+# --- placement: every forbidden case ---
+NPC_T = {(n["x"], n["y"]) for n in mt.NPCS}
+P0 = (30, 44)                                   # open scree in the pass
+ok(mt.placement_ok(30, 43, {}, set(), NPC_T, P0)[0], "a wall goes on open scree next to you")
+cases = [
+    ((30, 44), {}, "the player's own tile"),
+    ((42, 44), {}, "the trunk road"),
+    ((43, 46), {}, "the trunk road (east column)"),
+    ((10, 42), {}, "tall grass"),
+    ((24, 41), {}, "a boulder"),
+    ((30, 60), {}, "outside ROCKY PASS"),
+    ((2, 39), {}, "the band's edge row"),
+    ((1, 45), {}, "the world-edge column"),
+    ((28, 41), {}, "right beside the pass sign"),
+    ((50, 50), {}, "right beside the item ball"),
+    ((34, 46), {}, "right beside the QUARRY HAND"),
+]
+for (x, y), ed, why in cases:
+    ok(not mt.placement_ok(x, y, ed, set(), NPC_T, P0)[0], "no wall on %s %s" % (why, (x, y)))
+quarry = mt.npc_by_id("quarry")
+ok(not mt.placement_ok(quarry["x"], quarry["y"], {}, set(), NPC_T, P0)[0], "no wall on an NPC")
+ok(mt.tile_at(*cases[1][0]) == "_" and mt.tile_at(*cases[2][0]) == "_", "road cases really are road")
+
+# A constructed pocket: walls ring the player at (30, 44) except one gap at
+# (31, 44).  Closing that gap would seal the player in.
+ring = {(x, y) for x in range(29, 32) for y in range(43, 46)} - {(30, 44), (31, 44)}
+ring_edits = {pos: mt.WALL for pos in ring}
+gap_ok, gap_why = mt.placement_ok(31, 44, ring_edits, set(), NPC_T, (30, 44))
+ok(not gap_ok and "wall off" in gap_why, "closing the last gap around the player is refused (%s)" % gap_why)
+# Same pocket with the player outside, around open ground: still refused, it
+# would cut that ground off.
+gap2_ok, _ = mt.placement_ok(31, 44, ring_edits, set(), NPC_T, (32, 44))
+ok(not gap2_ok, "walling off an empty pocket of ground is refused")
+# A required target: the pass's item ball at (50, 51).  Build a pen around
+# it at distance 2 with one gap, and closing the gap is refused.
+ix, iy = 50, 51
+ok(mt.tile_at(ix, iy) == "o", "the ROCKY PASS item ball is where the test expects")
+pen = set()
+for x in range(ix - 2, ix + 3):
+    pen.add((x, iy - 2))
+for y in range(iy - 2, iy + 1):
+    pen.add((ix - 2, y))
+    pen.add((ix + 2, y))
+pen = {p for p in pen if mt.tile_at(*p) == "."} - {(ix + 2, iy - 1)}
+pen_edits = {p: mt.WALL for p in pen}
+before = mt.reachable((40, 45), pen_edits, set(), NPC_T)
+ok(any((ix + dx, iy + dy) in before for dx, dy in mt.DIRS4), "the pen still lets you reach the ball")
+seal_ok, seal_why = mt.placement_ok(ix + 2, iy - 1, pen_edits, set(), NPC_T, (ix + 3, iy - 1))
+ok(not seal_ok, "sealing the item ball inside a pen is refused (%s)" % seal_why)
+# Long wall right across the pass west of the road, leaving a 1-tile door:
+# filling the door would cut off the west side and its sign, so it's refused.
+west = {(30, y): mt.WALL for y in range(40, 52) if mt.tile_at(30, y) == "." and y != 45}
+ok(not mt.placement_ok(30, 45, west, set(), NPC_T, (31, 45))[0],
+   "closing the only door through a dividing wall is refused")
+ok(mt.placement_ok(31, 44, west, set(), NPC_T, (31, 45))[0],
+   "but a wall beside that door, which cuts nothing off, is allowed")
+
+# Every tile that passes placement_ok really keeps every target reachable.
+seen_before = mt.reachable(P0, {}, set(), NPC_T)
+targets = [(x, y) for y in range(mt.MAP_H) for x in range(mt.MAP_W)
+           if mt.tile_at(x, y) in mt.INTERACTIVE] + sorted(NPC_T)
+sample = [(x, y) for y in range(ROCK[0], ROCK[1] + 1) for x in range(2, mt.MAP_W - 2)
+          if (x + 2 * y) % 5 == 0]
+allowed = [pos for pos in sample if mt.placement_ok(pos[0], pos[1], {}, set(), NPC_T, P0)[0]]
+ok(len(allowed) > len(sample) // 3,
+   "most sampled pass tiles are buildable (%d of %d)" % (len(allowed), len(sample)))
+bad = []
+for pos in allowed[::4]:
+    after = mt.reachable(P0, {pos: mt.WALL}, set(), NPC_T)
+    for tx, ty in targets:
+        was = any((tx + dx, ty + dy) in seen_before for dx, dy in mt.DIRS4)
+        now = any((tx + dx, ty + dy) in after for dx, dy in mt.DIRS4)
+        if was and not now:
+            bad.append((pos, (tx, ty)))
+ok(not bad, "no allowed wall cuts off a sign/item/door/NPC: %s" % bad[:3])
+print("  placement: %d/%d sampled pass tiles buildable, %d re-verified against %d targets"
+      % (len(allowed), len(sample), len(allowed[::4]), len(targets)))
+
+# --- Game: scripted playthrough: pick -> pass -> mine -> craft BALL -> place ---
+g = mt.Game()
+g.new_game()
+g.flags["starter"] = True
+g.party = [mt.make_mon("tidecoil", 40)]
+g.beaten = {n["id"]: True for n in ALL_TRAINERS}      # walk without being challenged
+ok(g.edits == {} and g.materials == dict(stone=0, ore=0, wall=0) and not g.flags.get("pick"),
+   "a new game starts with no edits, no materials and no PICK")
+
+qx, qy = quarry["x"], quarry["y"]
+ok(mt.ROCK_BAND[0] <= qy <= mt.ROCK_BAND[1], "the QUARRY HAND stands in ROCKY PASS")
+g.player.tx, g.player.ty = mt.START_TILE
+r = walk_to(qx - 1, qy)
+ok(r.get("arrived"), "you can walk from CEDAR TOWN to the QUARRY HAND: %s" % r)
+
+# confirm on a boulder without the pick only explains
+g.player.tx, g.player.ty, g.player.dir = 34, 46, "left"
+g.interact()
+ok(g.mode == "dialogue" and "PICK" in " ".join(g.dialogue["lines"]) and g.edits == {},
+   "a boulder without a PICK just says you need one")
+g.dialogue, g.mode = None, "overworld"
+
+g.player.dir = "right"
+g.interact()
+ok(g.flags.get("pick") and g.mode == "dialogue"
+   and any("PICK" in l for l in g.dialogue["lines"]), "the QUARRY HAND hands over a PICK")
+g.dialogue, g.mode = None, "overworld"
+g.interact()
+ok(g.mode == "dialogue" and "CRAFT" in " ".join(g.dialogue["lines"]),
+   "talking again gives crafting tips, not a second pick")
+g.dialogue, g.mode = None, "overworld"
+
+
+def face_and_mine(bx, by):
+    for dx, dy, d in ((1, 0, "left"), (-1, 0, "right"), (0, 1, "up"), (0, -1, "down")):
+        sx, sy = bx + dx, by + dy
+        if g.blocked_for(sx, sy) or mt.tile_at(sx, sy, g.edits) == "v":
+            continue
+        res = walk_to(sx, sy)
+        if res.get("arrived"):
+            g.player.dir = d
+            before = dict(g.materials)
+            g.interact()
+            return {k: g.materials[k] - before[k] for k in g.materials}
+    return None
+
+
+got = face_and_mine(33, 46)
+ok(got == dict(stone=1, ore=1, wall=0), "mining the ore boulder at (33, 46) gives STONE + ORE: %s" % got)
+ok(g.tile(33, 46) == "." and mt.MAP[46][33] == "#", "the boulder is ground in the overlay only")
+ok(g.toast and "STONE" in g.toast and "ORE" in g.toast, "mining toasts what you got: %r" % g.toast)
+ok(not g.blocked_for(33, 46), "you can walk onto a mined boulder")
+again = dict(g.materials)
+g.interact()
+ok(g.materials == again, "the same tile can't be mined twice")
+
+ore_left = [b for b in ORE_TILES if b != (33, 46)]
+mined = 1
+for b in ore_left:
+    if g.materials["ore"] >= 2:
+        break
+    if face_and_mine(*b) is not None:
+        mined += 1
+ok(g.materials["ore"] >= 2, "walking the pass turns up a second ORE (%d mined)" % mined)
+
+balls0 = g.balls
+g.mode, g.menu_cursor = "menu", 0
+for _ in range(3):
+    g.move_cursor(0, 1)
+g.confirm()
+ok(g.mode == "craft", "menu row 4 opens CRAFT")
+ball_row = next(i for i, r in enumerate(mt.RECIPES) if r["out"] == "balls")
+g.craft_cursor = ball_row
+ore0 = g.materials["ore"]
+g.confirm()
+ok(g.balls == balls0 + 1 and g.materials["ore"] == ore0 - 2,
+   "crafting turns 2 ORE into 1 BALL in the pouch (%d -> %d)" % (balls0, g.balls))
+g.materials["ore"] = 0
+g.confirm()
+ok(g.balls == balls0 + 1 and "Need" in g.craft_msg, "crafting without ORE refuses: %r" % g.craft_msg)
+
+# mine stone for a wall, craft it, build it
+for b in BOULDERS:
+    if g.materials["stone"] >= 2:
+        break
+    if g.tile(*b) == "#":
+        face_and_mine(*b)
+g.mode = "craft"
+wall_row = next(i for i, r in enumerate(mt.RECIPES) if r["out"] == "wall")
+g.craft_cursor = wall_row
+st0 = g.materials["stone"]
+g.confirm()
+ok(g.materials["wall"] == 1 and g.materials["stone"] == st0 - 2, "2 STONE craft 1 WALL")
+g.craft_cursor = len(mt.RECIPES)
+g.confirm()
+ok(g.mode == "overworld" and g.building, "BUILD WALLS drops you into build mode")
+
+walk_to(30, 44)
+g.player.dir = "up"
+g.interact()
+ok(g.tile(30, 43) == mt.WALL and g.materials["wall"] == 0, "confirm while building places a WALL")
+ok(g.blocked_for(30, 43), "a built WALL is solid")
+ok(mt.MAP == MAP_BEFORE, "MAP is untouched after mining and building")
+g.player.dir = "left"
+g.interact()
+ok(g.tile(29, 44) == "." and "No WALL" in (g.toast or ""), "with no WALLs left nothing is placed")
+g.cancel()
+ok(not g.building and g.mode == "overworld", "X leaves build mode instead of opening the menu")
+g.cancel()
+ok(g.mode == "menu", "and the next X opens the menu as usual")
+g.mode = "overworld"
+
+# mine your own wall back
+g.player.dir = "up"
+st1 = g.materials["stone"]
+g.interact()
+ok(g.tile(30, 43) == "." and (30, 43) not in g.edits and g.materials["stone"] == st1 + 2,
+   "mining your own WALL returns its 2 STONE and leaves no diff")
+
+# refusal through the Game path: building onto the road
+g.materials["wall"] = 1
+g.building = True
+walk_to(41, 45)
+g.player.dir = "right"
+g.interact()
+ok(g.tile(42, 45) == "_" and g.materials["wall"] == 1 and "bare ground" in (g.toast or ""),
+   "the Game refuses a WALL on the trunk road, and says why: %r" % g.toast)
+g.building = False
+
+# trainer sight reads the overlay: a wall in the line of sight hides you
+t6 = mt.npc_by_id("t6")
+g.beaten = {}
+g.edits = {(t6["x"], t6["y"] + 1): mt.WALL}       # injected; the rules forbid it on the road
+g.player.tx, g.player.ty = t6["x"], t6["y"] + 2
+g.mode = "overworld"
+g.check_trainer_sight()
+ok(g.mode == "overworld", "a WALL in a trainer's line of sight blocks it")
+g.edits = {}
+g.check_trainer_sight()
+ok(g.mode == "dialogue", "without the wall the trainer spots you")
+g.dialogue, g.mode = None, "overworld"
+g.beaten = {n["id"]: True for n in ALL_TRAINERS}
+
+# --- save / load round-trip of the sandbox, and an old-format save ---
+g.edits = {(33, 46): ".", (30, 43): mt.WALL, (24, 41): mt.WALL}
+g.materials = dict(stone=3, ore=1, wall=2)
+g.flags["pick"] = True
+g.player.tx, g.player.ty = 30, 44
+ok(g.save_game(), "a sandbox save writes")
+with open(mt.SAVE_PATH, encoding="utf-8") as fh:
+    raw = json.load(fh)
+ok(raw["edits"] == {"33,46": ".", "30,43": "W", "24,41": "W"}, "edits save as an x,y diff: %s" % raw["edits"])
+g.edits, g.materials, g.flags = {}, dict(stone=0, ore=0, wall=0), dict(starter=False, gym=False)
+ok(g.load_game(), "the sandbox save loads")
+ok(g.edits == {(33, 46): ".", (30, 43): mt.WALL, (24, 41): mt.WALL}, "edits round-tripped")
+ok(g.materials == dict(stone=3, ore=1, wall=2), "materials round-tripped")
+ok(g.flags.get("pick") == 1, "the PICK round-tripped as tier 1")
+ok(g.tile(33, 46) == "." and g.blocked_for(30, 43), "the loaded overlay is live")
+
+raw["edits"].update({"10,100": "W", "42,45": "W", "nope": "W", "30,44": "#", "31,44": "."})
+raw["materials"] = dict(stone=-4, ore="2", wall=None, gold=9)
+with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+    json.dump(raw, fh)
+ok(g.load_game(), "a tampered sandbox save still loads")
+ok(set(g.edits) == {(33, 46), (30, 43), (24, 41)}, "impossible edits are dropped on load: %s" % g.edits)
+ok(g.materials == dict(stone=0, ore=2, wall=0), "materials are sanitised on load: %s" % g.materials)
+
+# An old save is today's save minus the sandbox fields.
+g.balls, g.picked = 4, {(20, 89)}
+g.save_game()
+with open(mt.SAVE_PATH, encoding="utf-8") as fh:
+    old = json.load(fh)
+for k in ("edits", "materials"):
+    old.pop(k)
+old["flags"].pop("pick", None)
+old["flags"].pop("axe", None)        # a save from before Part B has no axe key at all
+with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+    json.dump(old, fh)
+g.edits, g.materials, g.flags["pick"], g.flags["axe"] = {(1, 1): "W"}, dict(stone=9, ore=9, wall=9), True, 1
+ok(g.load_game(), "an old save without sandbox fields loads")
+ok(g.edits == {} and g.materials == dict(stone=0, ore=0, wall=0) and not g.flags.get("pick")
+   and g.flags["axe"] == 0, "an old save means no edits, no materials, no PICK, no AXE")
+ok(g.balls == 4 and g.picked == {(20, 89)}, "and the rest of the old save is intact")
+print("  playthrough: PICK -> %d boulders mined -> 1 BALL crafted -> WALL built and mined back"
+      % (mined + 1))
+
+# An old save from before tiers stored the PICK as True: it loads as tier 1.
+old["flags"]["pick"] = True
+with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+    json.dump(old, fh)
+ok(g.load_game() and g.flags["pick"] == 1 and g.flags["backstop"] is False,
+   "an old save with pick=True loads as PICK tier 1, no backstop paid")
+for junk in ("yes", 7, -2, None):
+    old["flags"]["pick"] = junk
+    with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+        json.dump(old, fh)
+    ok(g.load_game() and g.flags["pick"] == mt.pick_tier(junk) and 0 <= g.flags["pick"] <= 2,
+       "a junk pick flag %r loads as tier %d" % (junk, mt.pick_tier(junk)))
+
+# --- Game: IRON PICK -> the seam -> the GEODE: grass, the ball, save/load ---
+g = mt.Game()
+g.new_game()
+g.flags["starter"] = True
+g.party = [mt.make_mon("tidecoil", 40)]
+g.beaten = {n["id"]: True for n in ALL_TRAINERS}
+g.flags["pick"] = 1
+g.materials = dict(stone=6, ore=3, wall=0)
+g.player.tx, g.player.ty = mt.START_TILE
+r = walk_to(70, 35)
+ok(r.get("arrived"), "you can walk from CEDAR TOWN to the seam's face at (70, 35): %s" % r)
+g.player.dir = "up"
+ok(g.facing_tile() == (70, 34) and g.tile(70, 34) == mt.SEAM, "standing on (70, 35) faces the seam")
+g.interact()
+ok(g.mode == "dialogue" and "IRON PICK" in " ".join(g.dialogue["lines"]) and g.edits == {},
+   "a plain PICK skids off the seam and says what it needs")
+g.dialogue, g.mode = None, "overworld"
+
+g.mode, g.menu_cursor = "menu", 0
+for _ in range(3):
+    g.move_cursor(0, 1)
+g.confirm()
+iron_row = mt.RECIPES.index(IRON)
+g.craft_cursor = iron_row
+g.confirm()
+ok(g.flags["pick"] == 2 and g.materials == dict(stone=0, ore=0, wall=0)
+   and g.craft_msg.startswith("Crafted"), "CRAFT turns 3 ORE + 6 STONE into the IRON PICK: %r" % g.craft_msg)
+g.materials = dict(stone=6, ore=3, wall=0)
+g.confirm()
+ok(g.flags["pick"] == 2 and g.materials == dict(stone=6, ore=3, wall=0) and "already" in g.craft_msg,
+   "a second IRON PICK is refused and costs nothing: %r" % g.craft_msg)
+g.materials = dict(stone=0, ore=0, wall=0)
+g.cancel()
+ok(g.mode == "overworld", "X leaves CRAFT")
+
+fx_log = []
+g.fx_world = lambda *a: fx_log.append(a)
+g.player.dir = "up"
+g.interact()
+ok(g.tile(70, 34) == "c" and mt.MAP[34][70] == mt.SEAM and g.edits == {(70, 34): "c"},
+   "the IRON PICK opens the seam, in the overlay only")
+ok(g.materials == dict(stone=0, ore=2, wall=0) and "ORE" in (g.toast or ""),
+   "the seam drops 2 ORE and toasts it: %r" % g.toast)
+ok(fx_log == [("mine", 70, 34, mt.SEAM, {"ore": 2})], "mining the seam fires the same fx_world hook: %s" % fx_log)
+ok(not g.blocked_for(70, 34), "the opened seam is walkable")
+r = walk_to(70, 31)
+ok(r.get("arrived"), "you can walk into the GEODE: %s" % r)
+
+rstate = random.getstate()
+random.seed(2024)
+foe, tries = None, 0
+while foe is None and tries < 400:
+    g.player.tx, g.player.ty = 66 + tries % 9, 31 + (tries // 9) % 2
+    g.try_encounter()
+    foe = g.pending_foe
+    tries += 1
+ok(foe is not None, "walking the GEODE's dark grass fires an encounter (%d steps)" % tries)
+if foe:
+    ok(foe.id in dict(GEODE_ZONE["pool"]) and 24 <= foe.level <= 28,
+       "the GEODE foe comes from its pool at L24-28: %s L%d" % (foe.id, foe.level))
+    g.pending_foe, g.fade_dir, g.fade, g.fade_cb, g.mode = None, 0, 0.0, None, "overworld"
+
+# Dark grass now rolls encounters everywhere, not only tall grass: one probe per zone.
+dead = []
+for z in mt.ZONES:
+    spot = next((x, y) for y in range(z["y1"], z["y2"] + 1) for x in range(z["x1"], z["x2"] + 1)
+                if mt.tile_at(x, y) in GRASS)
+    fired_here = False
+    for _ in range(200):
+        g.player.tx, g.player.ty = spot
+        g.try_encounter()
+        if g.pending_foe is not None:
+            fired_here = g.pending_foe.id in dict(z["pool"])
+            g.pending_foe, g.fade_dir, g.fade, g.fade_cb = None, 0, 0.0, None
+            break
+    if not fired_here:
+        dead.append(spot)
+ok(not dead, "every zone, tall grass or dark grass, can fire an encounter (dead: %s)" % dead)
+random.setstate(rstate)
+
+g.player.tx, g.player.ty = 70, 31
+balls0 = g.balls
+r = walk_to(75, 31)
+g.player.dir = "up"
+g.interact()
+ok(r.get("arrived") and g.balls == balls0 + 8 and (75, 30) in g.picked,
+   "the GEODE ball is worth 8 BALLS (%d -> %d)" % (balls0, g.balls))
+g.dialogue, g.mode = None, "overworld"
+r = walk_to(66, 33)
+g.player.dir = "left"
+g.interact()
+ok(r.get("arrived") and g.tile(65, 33) == "c" and g.materials["ore"] == 4,
+   "the inner seam at (65, 33) is mined from inside for 2 more ORE")
+ok(not g.blocked_for(65, 33) and g.blocked_for(64, 33), "it opens one tile; the C wall behind it holds")
+
+ok(g.save_game(), "a GEODE save writes")
+with open(mt.SAVE_PATH, encoding="utf-8") as fh:
+    raw = json.load(fh)
+ok(raw["edits"] == {"65,33": "c", "70,34": "c"} and raw["flags"]["pick"] == 2,
+   "the opened seams and the tier save: %s %r" % (raw["edits"], raw["flags"]["pick"]))
+g.edits, g.picked, g.flags, g.balls = {}, set(), dict(starter=False, gym=False), 0
+ok(g.load_game(), "the GEODE save loads")
+ok(g.tile(70, 34) == "c" and not g.blocked_for(70, 34) and g.flags["pick"] == 2,
+   "after loading the GEODE is still open and the IRON PICK still held")
+ok((75, 30) in g.picked and not g.blocked_for(75, 30), "after loading the GEODE ball is still gone")
+g.player.tx, g.player.ty = 70, 35
+ok(walk_to(70, 31).get("arrived"), "and you can walk back into the GEODE")
+g.player.tx, g.player.ty, g.player.dir = 75, 31, "up"
+balls1 = g.balls
+g.interact()
+ok(g.balls == balls1 and "Nothing" in " ".join(g.dialogue["lines"]), "the taken ball gives nothing twice")
+g.dialogue, g.mode = None, "overworld"
+
+# --- the QUARRY HAND's backstop: once, and only when ORE has truly run out ---
+g.player.tx, g.player.ty, g.player.dir = qx - 1, qy, "right"
+g.flags.update(pick=1, backstop=False)
+g.materials, g.edits = dict(stone=6, ore=0, wall=0), {}
+g.interact()
+ok(g.materials["ore"] == 0 and "IRON PICK" in " ".join(g.dialogue["lines"]),
+   "with ORE still in the ground the QUARRY HAND only hints at the seam")
+g.dialogue, g.mode = None, "overworld"
+g.edits = dict(ALL_DUG)
+g.materials["ore"] = 1
+g.interact()
+ok(g.materials["ore"] == 1 + mt.BACKSTOP_ORE and g.flags["backstop"] is True
+   and "3 ORE" in " ".join(g.dialogue["lines"]), "out of ORE for good, he hands over 3 ORE")
+g.dialogue, g.mode = None, "overworld"
+g.materials["ore"] = 0
+g.interact()
+ok(g.materials["ore"] == 0 and g.dialogue and "IRON PICK" in " ".join(g.dialogue["lines"]),
+   "the backstop pays exactly once; after that it is the seam hint again")
+g.dialogue, g.mode = None, "overworld"
+g.save_game()
+g.flags["backstop"] = False
+g.load_game()
+ok(g.flags["backstop"] is True, "the paid backstop survives a save/load")
+g.player.tx, g.player.ty, g.player.dir = qx - 1, qy, "right"
+g.flags.update(pick=2, backstop=False)
+g.interact()
+ok(g.materials["ore"] == 0, "an IRON PICK holder never gets the backstop")
+g.dialogue, g.mode = None, "overworld"
+print("  GEODE: IRON PICK crafted -> seam mined -> grass fight in %d steps -> 8-BALL item -> save/load"
+      % tries)
+
+# --- Part B: the AXE and loot recipes ---
+# MAP is a mutable list read uncached by tile_at, so a temporary row swap
+# plants a fake authored THICK TREE at (20, 85) - DEEPWOOD ground, outside
+# ROCKY PASS.  Every swap is restored in finally.
+ok(mt.AXE_MAX == 1, "the AXE has one tier")
+for v, want in ((None, 0), (0, 0), (1, 1), (True, 1), (False, 0), (2, 1), (-3, 0), ("1", 0), (1.0, 0), ([], 0)):
+    ok(mt.axe_tier(v) == want, "axe_tier(%r) == %d" % (v, want))
+ok(mt.MATERIAL_LABEL["axe"] == "AXE", "the AXE has a label")
+
+bx, by = ORE_TILES[0]
+sx, sy = SEAMS[0]
+for tier in range(3):
+    for axe in range(2):
+        ok(mt.can_mine("#", bx, by, tier, axe) == (tier >= 1), "boulder: pick %d axe %d" % (tier, axe))
+        ok(mt.can_mine(mt.SEAM, sx, sy, tier, axe) == (tier >= 2), "seam: pick %d axe %d" % (tier, axe))
+_row = mt.MAP[85]
+mt.MAP[85] = _row[:20] + "T" + _row[21:]          # (20, 85): a fake authored tree, outside ROCKY PASS
+try:
+    for tier in range(3):
+        ok(not mt.can_mine("T", 20, 85, tier, 0), "no PICK tier cuts a thick tree (%d)" % tier)
+    ok(mt.can_mine("T", 20, 85, 0, 1), "the AXE cuts an authored thick tree")
+    ok(not mt.can_mine("T", 21, 85, 2, 1), "the AXE cannot cut a T that MAP does not hold there")
+    ok(not mt.can_mine("#", bx, by, 0, 1), "the AXE cannot break a boulder")
+    ok(mt.load_edits({"20,85": "."}) == {(20, 85): "."}, "load_edits keeps an authored tree cut to ground")
+    ok(mt.load_edits({"20,85": "W"}) == {} and mt.load_edits({"21,85": "."}) == {},
+       "load_edits drops a tree turned to anything else, and a cut where MAP holds no tree")
+finally:
+    mt.MAP[85] = _row
+ok(mt.can_mine("#", bx, by, 1) and not mt.can_mine("T", 20, 85, 2), "old 4-argument calls still work")
+
+AXE_R = next(r for r in mt.RECIPES if r.get("sets_tool"))
+ok(AXE_R["id"] == "axe" and AXE_R["needs"] == {"twig": 2, "flint": 1} and tuple(AXE_R["sets_tool"]) == ("axe", 1),
+   "the AXE is 2 TWIG + 1 FLINT and sets the axe to 1")
+ok([r["id"] for r in mt.RECIPES] == ["wall", "ball", "iron_pick", "oil", "pulse", "axe", "potion", "greatball", "smoke"],
+   "recipe order: the first five unchanged, then Part B's four")
+have = {"twig": 2, "flint": 1, "stone": 0}
+ok(mt.craft(have, AXE_R, 0, 0) == {"twig": 0, "flint": 0, "stone": 0}, "the AXE spends exactly its needs and stores nothing")
+ok(mt.craft(have, AXE_R, 0, 1) is None, "the AXE is refused once owned")
+ok(mt.craft({"twig": 1, "flint": 1}, AXE_R, 0, 0) is None, "the AXE is refused when short")
+for rid, needs in (("potion", {"leaf": 2, "dewdrop": 1}), ("greatball", {"flint": 2, "copperwire": 1}),
+                   ("smoke", {"emberdust": 1, "shadowsilk": 1})):
+    r = next(x for x in mt.RECIPES if x["id"] == rid)
+    ok(r["needs"] == needs and r["out"] == rid and r["count"] == 1, "recipe %s is %r" % (rid, needs))
+    h = dict(needs, potion=3)
+    after = mt.craft(h, r)
+    ok(after is not None and all(after[k] == 0 for k in needs) and after.get(rid, 0) == h.get(rid, 0) + 1,
+       "crafting %s conserves items exactly" % rid)
+    ok(sum(mt.GOODS[k]["price"] * n for k, n in needs.items()) < mt.GOODS[rid]["price"],
+       "economy: %s's loot sells for less than the shop charges" % rid)
+
+ok(not (set(mt.MATERIALS) | {"balls", "lantern", "pulse"}) & set(mt.GOODS),
+   "material and counter ids never collide with BAG ids")
+g = mt.Game(); g.new_game()
+g.bag = {"twig": 2, "flint": 3, "leaf": 2, "dewdrop": 1}
+axe_i = [r["id"] for r in mt.RECIPES].index("axe")
+pot_i = [r["id"] for r in mt.RECIPES].index("potion")
+ok(g.craft_recipe(axe_i) and g.flags["axe"] == 1 and g.bag == {"flint": 2, "leaf": 2, "dewdrop": 1},
+   "crafting the AXE spends TWIG/FLINT from the BAG and sets flags['axe']: %r" % g.bag)
+ok(g.craft_msg == "Crafted the AXE. Thin trees give way now.", "AXE message: %r" % g.craft_msg)
+before = dict(g.bag)
+ok(not g.craft_recipe(axe_i) and g.craft_msg == "You already have the AXE." and g.bag == before,
+   "a second AXE is refused and spends nothing")
+ok(g.craft_recipe(pot_i) and g.bag == {"flint": 2, "potion": 1} and g.craft_msg == "Crafted 1 POTION.",
+   "a POTION crafts into the BAG: %r %r" % (g.bag, g.craft_msg))
+g.bag = {"leaf": 2, "dewdrop": 1, "potion": mt.BAG_MAX}
+mt.note_found(g)
+ok(mt.craft_cells(g)[pot_i]["state"] == "locked", "a full POTION stack shows the cell as locked")
+ok(not g.craft_recipe(pot_i) and g.craft_msg == "Your BAG is full of POTION."
+   and g.bag == {"leaf": 2, "dewdrop": 1, "potion": mt.BAG_MAX}, "a full BAG refuses and spends nothing")
+g.bag = {}
+ok(not g.craft_recipe(pot_i) and g.craft_msg == "Need 2 LEAF, 1 DEW DROP.", "short: %r" % g.craft_msg)
+cells = mt.craft_cells(g)
+ok(len(cells) == len(mt.RECIPES) + 1 and cells[-1]["kind"] == "build",
+   "one CRAFT cell per recipe plus BUILD (no BACK row)")
+ok(cells[axe_i]["state"] == "owned" and cells[axe_i]["name"] == "AXE", "owned AXE cell: %r" % cells[axe_i])
+g.flags["axe"] = 0; g.bag = {"twig": 2, "flint": 1}; mt.note_found(g)
+c_axe = mt.craft_cells(g)[axe_i]
+ok(c_axe["state"] == "ready" and c_axe["needs"] == [("twig", 2, 2), ("flint", 1, 1)],
+   "craftable AXE cell: %r" % c_axe)
+c_pot = mt.craft_cells(g)[pot_i]
+ok(c_pot["state"] == "locked" and c_pot["name"] == "POTION"
+   and [mt.craft_label(k) for k, _h, _n in c_pot["needs"]] == ["LEAF", "DEW DROP"],
+   "loot cell uses GOODS names: %r" % c_pot)
+# materials and counters still route home after a loot-era craft
+g.bag, g.materials, g.balls = {"leaf": 5}, dict(stone=0, ore=4, wall=0), 2
+ball_i = [r["id"] for r in mt.RECIPES].index("ball")
+ok(g.craft_recipe(ball_i) and g.balls == 3 and g.materials == dict(stone=0, ore=2, wall=0) and g.bag == {"leaf": 5},
+   "a BALL still spends materials into the pouch and leaves the BAG alone")
+
+g = mt.Game(); g.new_game(); g.flags["starter"] = True
+_row = mt.MAP[85]; mt.MAP[85] = _row[:20] + "T" + _row[21:]
+try:
+    g.player.tx, g.player.ty, g.player.dir = 20, 84, "down"
+    g.interact()
+    ok(g.mode == "dialogue" and g.dialogue["lines"] == ["This tree is thinner than the rest. An AXE could cut it."]
+       and g.edits == {}, "no AXE: the tree says what it needs, and nothing is cut")
+    g.dialogue, g.mode = None, "overworld"
+    g.flags["pick"] = 2
+    g.interact(); g.dialogue, g.mode = None, "overworld"
+    ok(g.edits == {}, "an IRON PICK does not cut a tree")
+    g.flags["axe"] = 1
+    g.interact()
+    ok(g.edits == {(20, 85): "."} and g.toast == "You cut down the THICK TREE." and g.materials["stone"] == 0,
+       "with the AXE the tree is cut, drops nothing, and says so")
+    ok(not g.blocked_for(20, 85, "down"), "the cut tree is walkable ground")
+finally:
+    mt.MAP[85] = _row
+ok(mt.Game().flags.get("axe") == 0, "a new game starts without the AXE")
+for junk, want in ((None, 0), ("yes", 0), (5, 1), (True, 1), (-1, 0)):
+    g = mt.Game(); g.new_game(); g.flags["axe"] = junk; g.save_game()
+    ok(g.load_game() and g.flags["axe"] == want, "a saved axe of %r loads as %d" % (junk, want))
+print("  Part B: AXE crafted from BAG loot -> thick tree cut -> loot recipes conserve -> axe saved")
+
+# --- Part B playthrough: farm DEEPWOOD loot -> craft the AXE -> cut into both glades -> save/load ---
+# `finish` and `idle` live later (CAVE), so local copies of their bodies.  The
+# farm loop's update() runs NPC wander on the global random stream, so that
+# stream and every NPC's position are snapshotted and restored around it.
+_pb_idle = dict(up=False, down=False, left=False, right=False, run=False)
+
+
+def win_now(cg):
+    cg.end_battle("win")
+    guard = 0
+    while (cg.battle or cg.fade_dir) and guard < 2000:
+        guard += 1
+        cg.update(1 / 60, _pb_idle)
+        if cg.battle and cg.battle.step and cg.battle.step["t"] == "msg":
+            cg.battle.step = None
+
+
+FARM_BOUND = 13  # exact for today's loot seeds; re-derive if loot_seed/LOOT_* change
+_rs_farm = random.getstate()
+_npc_snap = [dict(n) for n in mt.NPCS]
+try:
+    g = mt.Game(); g.new_game(); g.flags["starter"] = True
+    g.party = [mt.make_mon("tidecoil", 40)]
+    g.beaten = {n["id"]: True for n in ALL_TRAINERS}
+    g.player.tx, g.player.ty = 10, 89          # inside the PEBBLIT zone (6,89)-(18,90)
+    battles = 0
+    while (g.bag.get("twig", 0) < 2 or g.bag.get("flint", 0) < 1) and battles < FARM_BOUND:
+        g.start_battle(mt.make_mon("pebblit", 10))
+        win_now(g)
+        battles += 1
+        g.steps += 7                             # vary the loot seed like real walking would
+finally:
+    random.setstate(_rs_farm)
+    for n, s in zip(mt.NPCS, _npc_snap):
+        n.clear(); n.update(s)
+print("  Part B farm: %d PEBBLIT wins for 2 TWIG + 1 FLINT (bag %r)" % (battles, g.bag))
+ok(g.mode == "overworld" and g.battle is None, "the farm loop leaves the overworld idle")
+ok(g.bag.get("twig", 0) >= 2 and g.bag.get("flint", 0) >= 1,
+   "farming PEBBLIT in DEEPWOOD yields 2 TWIG + 1 FLINT within %d wins (took %d)" % (FARM_BOUND, battles))
+axe_i = [r["id"] for r in mt.RECIPES].index("axe")
+ok(g.craft_recipe(axe_i) and g.flags["axe"] == 1, "the farmed loot crafts the AXE")
+g.dialogue, g.mode = None, "overworld"
+r = walk_to(20, 84); ok(r.get("arrived"), "walk to MOSS HOLLOW's tree: %s" % r)
+g.player.dir = "left"; g.interact(); g.dialogue, g.mode = None, "overworld"
+ok(g.tile(19, 84) == ".", "the AXE cuts MOSS HOLLOW's tree")
+ok(walk_to(5, 83).get("arrived"), "MOSS HOLLOW is open")
+g.player.dir = "up"; g.interact(); g.dialogue, g.mode = None, "overworld"
+ok((5, 82) in g.picked, "the MOSS HOLLOW ball can be picked up")
+ok(mt.zone_at(10, 85) and mt.zone_at(10, 85)["min"] == 12, "the hollow's dark grass is its zone")
+ok(g.save_game() and g.load_game() and g.edits.get((19, 84)) == "." and g.flags["axe"] == 1,
+   "the cut and the AXE survive a save round-trip")
+g.dialogue, g.mode = None, "overworld"
+ok((5, 82) in g.picked, "after loading the MOSS HOLLOW ball is still gone")
+r = walk_to(70, 84); ok(r.get("arrived"), "walk to OLD GROVE's tree: %s" % r)
+g.player.dir = "right"; g.interact(); g.dialogue, g.mode = None, "overworld"
+ok(g.tile(71, 84) == "." and walk_to(83, 83).get("arrived"), "the AXE opens OLD GROVE too")
+g.player.dir = "up"; g.interact(); g.dialogue, g.mode = None, "overworld"
+ok((83, 82) in g.picked and mt.zone_at(78, 84)["min"] == 16, "the OLD GROVE ball is picked and its grass is its zone")
+print("  Part B playthrough: farm -> AXE -> MOSS HOLLOW -> save/load -> OLD GROVE")
+
+# Sealed glades draw as forest: glade_masked is pure over MAP + the edits passed.
+ok(mt.GLADES == (mt.MOSS_HOLLOW, mt.OLD_GROVE)
+   and mt.GLADE_GATES == {mt.MOSS_HOLLOW: (19, 84), mt.OLD_GROVE: (71, 84)},
+   "GLADE_GATES finds each glade's unique THICK TREE: %s" % mt.GLADE_GATES)
+cut_w, cut_e = mt.with_edit({}, 19, 84, "."), mt.with_edit({}, 71, 84, ".")
+for p in ((10, 85), (5, 82), (4, 81)):
+    ok(mt.glade_masked(*p, edits={}) and mt.glade_masked(p[0], p[1], {}) and mt.glade_masked(*p, edits=cut_e)
+       and not mt.glade_masked(*p, edits=cut_w),
+       "MOSS HOLLOW %s is masked while (19,84) stands, and only its own cut unmasks it" % (p,))
+for p in ((75, 84), (83, 82), (84, 87)):
+    ok(mt.glade_masked(*p, edits={}) and mt.glade_masked(*p, edits=cut_w)
+       and not mt.glade_masked(*p, edits=cut_e),
+       "OLD GROVE %s is masked while (71,84) stands, and only its own cut unmasks it" % (p,))
+ok(not any(mt.glade_masked(x, y, e) for x, y in ((19, 84), (71, 84)) for e in ({}, cut_w, cut_e)),
+   "a glade's gate tile is never masked")
+ok(not any(mt.glade_masked(x, y, {}) for x, y in ((19, 85), (19, 81), (71, 85), (71, 81))),
+   "authored forest (#) inside a glade rect is never masked")
+ok(not any(mt.glade_masked(x, y, {}) for x, y in ((20, 84), (3, 84), (10, 80), (10, 88), (70, 84), (85, 84),
+                                                    (70, 32), (0, 0))),
+   "tiles outside both glade rects are never masked")
+ok(all(mt.glade_masked(x, y, {}) == (mt.MAP[y][x] not in ("#", mt.TREE))
+       for r in mt.GLADES for y in range(r[1], r[3] + 1) for x in range(r[0], r[2] + 1)),
+   "sealed, every non-#, non-T tile of both glade rects is masked")
+ok(not any(mt.glade_masked(x, y, mt.with_edit(cut_w, 71, 84, "."))
+           for r in mt.GLADES for y in range(r[1], r[3] + 1) for x in range(r[0], r[2] + 1)),
+   "with both trees cut nothing is masked")
+# -- icons: pure 16x16 pixel art, emitted to the HTML build --
+ICON_WANT = set(mt.GOODS) | {"stone", "ore", "wall", "balls", "pick", "iron_pick", "axe",
+                             "lantern", "pulse", "coins"}
+ok(set(mt.ICONS) == ICON_WANT, "ICONS has exactly one icon per drawable id (%d)" % len(ICON_WANT))
+ok("." not in mt.ICON_PALETTE, "'.' is transparent and never a palette key")
+ok(all(len(k) == 1 and len(v) == 3 and all(isinstance(c, int) and 0 <= c <= 255 for c in v)
+       for k, v in mt.ICON_PALETTE.items()), "palette keys are single chars, values RGB triples")
+ok(len(mt.ICON_SHADOW) == 3 and max(mt.ICON_SHADOW) - min(mt.ICON_SHADOW) < 24,
+   "ICON_SHADOW is one dark, unsaturated RGB triple")
+for k, rows in mt.ICONS.items():
+    ok(len(rows) == 16 and all(len(r) == 16 for r in rows), "icon %s is 16x16" % k)
+    ok(all(c == "." or c in mt.ICON_PALETTE for r in rows for c in r), "icon %s uses only palette chars" % k)
+    ok(sum(c != "." for r in rows for c in r) >= 24, "icon %s is not (nearly) empty" % k)
+ok(len({tuple(v) for v in mt.ICONS.values()}) == len(mt.ICONS), "no two icons are identical")
+ids = [r["out"] for r in mt.RECIPES] + [k for r in mt.RECIPES for k in r["needs"]] + list(mt.GOODS) \
+    + [row[1] for b in (0, 5) for row in mt.bag_rows(b, {k: 1 for k in mt.GOODS}, {"stone": 1, "ore": 1, "wall": 1})
+       if row[0] in ("item", "mat", "loot")] + list(mt.SHOP_STOCK) + ["coins"]
+ok(all(mt.icon_id(i) in mt.ICONS for i in ids), "icon_id resolves every recipe, BAG, shop and coins id")
+ok(mt.icon_id("ball") == "balls" and mt.icon_id("twig") == "twig", "icon_id maps only ball -> balls")
+
+# -- discovery: Game.found --
+fg = mt.Game(); fg.new_game()
+ok(fg.found == {"balls", "lantern"}, "a new game has found only what it starts with (BALLs, lamp)")
+fg.bag["twig"] = 1; mt.note_found(fg)
+ok("twig" in fg.found, "holding a TWIG once records it")
+fg.bag.pop("twig"); mt.note_found(fg)
+ok("twig" in fg.found, "spending it never un-finds it")
+fg.flags["pick"] = 2; fg.flags["axe"] = 1; fg.pulses = 1; fg.materials["ore"] = 1; mt.note_found(fg)
+ok({"pick", "iron_pick", "axe", "pulse", "ore"} <= fg.found, "tool tiers, PULSE counter and materials are found")
+ok("stone" not in fg.found, "a zero count is not found")
+ok(mt.clean_found(["twig", "axe", "twig"]) == {"twig", "axe"}, "clean_found keeps known ids")
+ok(mt.clean_found(["twig", 3, None, "nosuch", ["axe"]]) == {"twig"}, "clean_found drops junk entries")
+ok(all(mt.clean_found(v) == set() for v in (None, "twig", {"twig": 1}, 7)), "a non-list loads as empty")
+# save / load / new game
+fg.save_game(); lg = mt.Game(); lg.load_game()
+ok(lg.found >= {"twig", "pick", "iron_pick", "axe"}, "found survives a save and load")
+with open(mt.SAVE_PATH, encoding="utf-8") as fh:
+    raw = json.load(fh)
+ok(raw["found"] == sorted(raw["found"]), "found is saved as a sorted list")
+raw.pop("found"); raw["bag"] = {"flint": 2}
+with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+    json.dump(raw, fh)
+lg = mt.Game(); lg.load_game()
+ok("flint" in lg.found and "twig" not in lg.found, "an old save without found is seeded from holdings")
+raw["found"] = ["twig", 9, "zzz"]
+with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+    json.dump(raw, fh)
+lg = mt.Game(); lg.load_game()
+ok("twig" in lg.found and "zzz" not in lg.found, "junk in a saved found list is dropped")
+lg.new_game()
+ok(lg.found == {"balls", "lantern"}, "new_game after a load keeps no old discoveries")
+
+# -- craft_cells: the state matrix (spec 1.3) --
+def cell(g, rid):
+    return next(c for c in mt.craft_cells(g) if c["kind"] == "recipe" and mt.RECIPES[c["recipe"]]["id"] == rid)
+cg = mt.Game(); cg.new_game()
+cells = mt.craft_cells(cg)
+ok(len(cells) == len(mt.RECIPES) + 1 and cells[-1]["kind"] == "build", "one cell per recipe, then BUILD")
+ok([c["state"] for c in cells if c["kind"] == "recipe" and mt.RECIPES[c["recipe"]]["id"] in
+    ("axe", "potion", "greatball", "smoke")] == ["hidden"] * 4, "a fresh game hides the four loot recipes")
+ok(all(cell(cg, r)["state"] != "hidden" for r in ("wall", "ball", "iron_pick", "oil", "pulse")),
+   "sandbox recipes are never hidden")
+ok(cell(cg, "wall")["state"] == "locked" and cell(cg, "oil")["state"] == "locked", "fresh WALL and OIL are locked")
+h = cell(cg, "axe")
+ok(h["name"] == "???" and h["blurb"] == mt.CRAFT_MSG["hidden"], "a hidden cell names nothing")
+ok(h["needs"] == [("twig", 0, 2), ("flint", 0, 1)], "a hidden cell keeps the real needs (the screen hides them)")
+cg.bag["twig"] = 1; mt.note_found(cg)
+ok(cell(cg, "axe")["state"] == "locked", "after holding a TWIG once the AXE is locked, not hidden")
+cg.bag.update(twig=2, flint=1)
+ok(cell(cg, "axe")["state"] == "ready", "2 TWIG + 1 FLINT: the AXE is ready")
+ok(cell(cg, "axe")["name"] == "AXE" and cell(cg, "axe")["blurb"] == "Cuts thin trees.", "a revealed cell's name and blurb")
+calls = []
+cg.fx_craft = lambda i, before: calls.append((i, dict(before)))
+axe_i = next(i for i, r in enumerate(mt.RECIPES) if r["id"] == "axe")
+ok(cg.craft_recipe(axe_i) is True, "a successful craft returns True")
+ok(calls == [(axe_i, {"twig": 2, "flint": 1})], "fx_craft fires once with the counts from before spending")
+ok(cell(cg, "axe")["state"] == "owned", "after crafting, the AXE is owned")
+ok(cg.craft_recipe(axe_i) is False and len(calls) == 1, "a refused craft returns False and fires no hook")
+pot_i = next(i for i, r in enumerate(mt.RECIPES) if r["id"] == "potion")
+ok(cg.craft_recipe(pot_i) is False and len(calls) == 1, "a short craft fires no hook")
+ok(cells[-1]["state"] == "locked" and cells[-1]["needs"] == [("wall", 0, 1)], "BUILD is locked with no WALLs")
+cg.materials["wall"] = 2
+ok(mt.craft_cells(cg)[-1]["state"] == "ready", "BUILD is ready once a WALL is held")
+cg.lantern = 40
+ok(cell(cg, "oil")["blurb"] == "Fills the lamp (now 40%).", "the OIL blurb shows the lamp")
+ok(cell(cg, "pulse")["blurb"] == "Stuns the stalker. Have %d/3." % cg.pulses, "the PULSE blurb shows have/cap")
+ok(set(mt.CRAFT_BLURB) == {r["id"] for r in mt.RECIPES} | {"build"}, "one blurb per recipe plus BUILD")
+ok(all(len(b % ((100,) if "%d%%" in b else (3, 3) if "%d" in b else ())) <= 48
+       for b in mt.CRAFT_BLURB.values()), "every blurb fits 48 chars")
+
+# -- grid_move: exhaustive, n = 1..15 (spec 1.4) --
+gm_ok = True
+for n in range(1, 16):
+    for i in range(n):
+        for d in ("up", "down", "left", "right"):
+            j = mt.grid_move(i, d, n, mt.CRAFT_COLS)
+            if not 0 <= j < n:
+                gm_ok = False
+            if d in ("left", "right") and j // mt.CRAFT_COLS != i // mt.CRAFT_COLS:
+                gm_ok = False
+            if d == "down" and i // mt.CRAFT_COLS < (n - 1) // mt.CRAFT_COLS and j // mt.CRAFT_COLS != i // mt.CRAFT_COLS + 1:
+                gm_ok = False
+ok(gm_ok, "grid_move never leaves the grid, keeps left/right in-row, and down always reaches the next row")
+ok(mt.grid_move(0, "left", 10, 5) == 0 and mt.grid_move(4, "right", 10, 5) == 4, "no wrapping at row ends")
+ok(mt.grid_move(7, "down", 9, 5) == 7 and mt.grid_move(3, "down", 7, 5) == 6, "down clamps to the last cell")
+ok(mt.CRAFT_COLS == 5, "CRAFT_COLS")
+# the real hooks, not note_found by hand: update() and save_game() record holdings
+ug = mt.Game(); ug.new_game()
+ug.bag["twig"] = 1
+ug.update(0.016, {})
+ug.bag.pop("twig")
+ok("twig" in ug.found, "Game.update records what is held, even if it is spent before the next frame")
+ug.bag["flint"] = 1
+ug.save_game(); ul = mt.Game(); ul.load_game()
+ok("flint" in ug.found and "flint" in ul.found, "save_game records holdings before writing found")
+try:
+    mt.glade_masked(10, 85)
+    ok(False, "glade_masked without edits must raise (spec 1.6: edits is required)")
+except TypeError:
+    ok(True, "glade_masked requires its edits argument")
+os.remove(mt.SAVE_PATH)
+ok(mt.MAP == MAP_BEFORE, "MAP is byte-identical after the whole SANDBOX section")
+
+# ------------------------------------------------------------------ CAVE
+section("CAVE - lantern, tension, the GLOOMSTALK's hunt, the PULSE (DARK CAVE horror kit)")
+
+CNPC = {(n["x"], n["y"]) for n in mt.NPCS}
+SEAMS_OPEN = {(x, y): "c" for y, r in enumerate(mt.MAP) for x, ch in enumerate(r) if ch == mt.SEAM}
+L, T, HA, PU = mt.LANTERN, mt.TENSION, mt.HUNT_AI, mt.PULSE
+SOUTH, NORTH = (42, 39), 24
+
+
+def trunk_route(avoid=frozenset(), edits=None, start=SOUTH, picked=frozenset()):
+    """Shortest player path from start to the north mouth row, walls, people
+    and an avoid set solid.  None if there is no way through."""
+    edits = edits or {}
+    prev = {start: None}
+    frontier = [start]
+    while frontier:
+        nxt = []
+        for x, y in frontier:
+            if y == NORTH:
+                out, cur = [], (x, y)
+                while cur:
+                    out.insert(0, cur)
+                    cur = prev[cur]
+                return out
+            for dx, dy in mt.DIRS4:
+                n = (x + dx, y + dy)
+                if n in prev or n in avoid or not 23 <= n[1] <= 40:
+                    continue
+                if mt.tile_blocked(n[0], n[1], "none", edits, picked, CNPC):
+                    continue
+                prev[n] = (x, y)
+                nxt.append(n)
+        frontier = nxt
+    return None
+
+
+def cave_game(x=43, y=33):
+    cg = mt.Game()
+    cg.new_game()
+    cg.flags["starter"] = True
+    cg.party = [mt.make_mon("pyrelash", 26)]
+    p = cg.player
+    p.tx, p.ty, p.px, p.py, p.moving = x, y, x * 32, y * 32, False
+    cg.sync_cave()
+    return cg
+
+
+def step_to(cg, x, y, frames=40):
+    """Walk the Game one tile to the adjacent (x, y) through update_overworld,
+    as the real loop does.  Returns the mode afterwards."""
+    p = cg.player
+    d = ("up" if y < p.ty else "down" if y > p.ty else "left" if x < p.tx else "right")
+    held = dict(up=False, down=False, left=False, right=False, run=False)
+    held[d] = True
+    cg.update_overworld(1 / 60, held)
+    held[d] = False
+    for _ in range(frames):
+        if not p.moving:
+            break
+        cg.update_overworld(1 / 60, held)
+    return cg.mode
+
+
+# --- tables ---
+ok(mt.ENC_BASE == 0.14, "ENC_BASE keeps the old 0.14 wild roll")
+ok(L["max"] == 100 and L["drain"] == 1 and L["r_min"] == 2.25 and L["r_max"] == 4.7 and L["buckets"] == 8,
+   "LANTERN: 0..100, 1 per cave step, 2.25..4.7 tiles in 8 buckets")
+ok(mt.MENU_ITEMS.index("PULSE") == 4 and mt.MENU_ITEMS.index("CLOSE") == 5, "PULSE is menu row 4, CLOSE row 5")
+oil = next(r for r in mt.RECIPES if r["id"] == "oil")
+pul = next(r for r in mt.RECIPES if r["id"] == "pulse")
+ok(oil == dict(id="oil", out="lantern", count=L["oil"], needs={"ore": 1}, cap=L["max"]),
+   "OIL: 1 ORE -> +50 lantern, capped at the lantern's max")
+ok(pul == dict(id="pulse", out="pulse", count=1, needs={"ore": 1, "stone": 2}, cap=PU["max"]),
+   "PULSE: 1 ORE + 2 STONE -> 1 charge, carry at most 3")
+ok(len(HA["patrol"]) == 12 and HA["patrol"][0] == HA["lair"], "12 patrol waypoints, starting at the lair")
+
+# --- 1. lantern ---
+radii = [mt.lantern_radius(c) for c in range(0, 101)]
+ok(min(radii) >= L["r_min"] and radii[0] == L["r_min"] and radii[-1] == L["r_max"],
+   "the lantern never shrinks below R_MIN (%.2f tiles) and is R_MAX when full" % L["r_min"])
+ok(all(a <= b for a, b in zip(radii, radii[1:])), "lantern_radius is monotone in charge")
+ok(L["core_px"] >= mt.TILE, "the clear core (%d px) covers the 4 neighbouring tiles" % L["core_px"])
+ok([mt.lantern_bucket(c) for c in (0, 1, 12, 13, 50, 99, 100, 150, -5)] == [0, 1, 1, 2, 4, 8, 8, 8, 0],
+   "lantern_bucket: ceil to eighths, clamped")
+ok(mt.lantern_step(100, True) == 99 and mt.lantern_step(0, True) == 0 and mt.lantern_step(57, False) == 57
+   and mt.lantern_step(150, False) == 100, "lantern_step drains 1 in the cave only, never below 0")
+cg = cave_game()
+for _ in range(5):
+    cg.cave_step()
+ok(cg.lantern == 95, "five cave steps drain the lantern to 95 (got %d)" % cg.lantern)
+cg.player.ty = 45
+cg.cave_step()
+ok(cg.lantern == 95, "a step outside the cave never drains it")
+cg.heal_party()
+ok(cg.lantern == 100, "heal_party (the centre, the whiteout) refills it")
+
+cg = cave_game()
+cg.materials.update(ore=2, stone=0)
+cg.lantern = 40
+oi = mt.RECIPES.index(oil)
+ok(cg.craft_recipe(oi) and cg.lantern == 90 and cg.materials["ore"] == 1,
+   "OIL refills 40 -> 90 for 1 ORE")
+ok(cg.craft_msg == "Lantern refilled to 90%.", "the OIL message reads 'Lantern refilled to N%%.'")
+ok(cg.craft_recipe(oi) and cg.lantern == 100 and cg.materials["ore"] == 0, "a second OIL caps at 100")
+cg.materials["ore"] = 1
+ok(not cg.craft_recipe(oi) and cg.materials["ore"] == 1 and cg.lantern == 100,
+   "OIL is refused at a full lantern, spending nothing")
+cg.materials.update(ore=5, stone=10)
+pi = mt.RECIPES.index(pul)
+made = [cg.craft_recipe(pi) for _ in range(4)]
+ok(made == [True, True, True, False] and cg.pulses == 3 and cg.materials["ore"] == 2 and cg.materials["stone"] == 4,
+   "PULSE crafts to its cap of 3, then refuses without spending (%s, %d ore, %d stone)"
+   % (made, cg.materials["ore"], cg.materials["stone"]))
+# craft() conservation, caps included, for every recipe and a spread of stocks.
+cons_ok = True
+for r in mt.RECIPES:
+    for have in (dict(stone=0, ore=0, wall=0, balls=0, lantern=0, pulse=0),
+                 dict(stone=9, ore=9, wall=1, balls=3, lantern=70, pulse=2),
+                 dict(stone=9, ore=9, wall=0, balls=0, lantern=100, pulse=3),
+                 dict(stone=2, ore=1, wall=0, balls=0, lantern=99, pulse=0)):
+        out = mt.craft(have, r, 1)
+        if out is None:
+            continue
+        for k in have:
+            want = have[k] - r["needs"].get(k, 0)
+            if k == r["out"] and not r.get("sets_tier"):
+                want = have[k] + r["count"]
+                if "cap" in r:
+                    want = min(r["cap"], want)
+            cons_ok = cons_ok and out[k] == want
+        if "cap" in r:
+            cons_ok = cons_ok and have[r["out"]] < r["cap"]
+ok(cons_ok, "craft() moves exactly the needs and the (capped) count, and never fills a full counter")
+
+# --- 2. tension ---
+ok([mt.tension_step(10, c, False, False) - 10 for c in (100, 50, 49, 20, 19, 0)] == [1, 1, 2, 2, 4, 4],
+   "tension climbs +1 base, +1 under 50% light, +2 more under 20%")
+ok(mt.tension_step(10, 100, True, False) == 14 and mt.tension_step(10, 0, True, True) == 8,
+   "+3 while hunted; a safe-zone step settles it by 2 instead")
+ok(mt.tension_step(99, 0, True, False) == 100 and mt.tension_step(1, 0, False, True) == 0,
+   "tension_step clamps to 0..100")
+ok([mt.tension_event(50, e) for e in ("win", "run", "pulse", "nonsense")] == [40, 55, 35, 50]
+   and mt.tension_event(5, "pulse") == 0, "tension_event: win -10, run +5, pulse -15, clamped")
+ok(mt.encounter_rate(0) == 0.14, "encounter_rate(0) is exactly the old 0.14")
+ok(abs(mt.encounter_rate(100) - 0.245) < 1e-12, "encounter_rate(100) is 0.245")
+ok(all(mt.encounter_rate(a) <= mt.encounter_rate(b) for a, b in zip(range(100), range(1, 101))),
+   "encounter_rate is monotone in tension")
+cg = cave_game()
+cg.tension = 60
+cg.heal_party()
+ok(cg.tension == 0, "heal_party resets tension")
+cg = cave_game()
+cg.tension = 60
+cg.player.ty = 40
+cg.sync_cave()
+ok(cg.tension == 0 and cg.stalker is None and not cg.cave_in, "leaving CAVE_BAND resets tension and drops the stalker")
+
+# The same number of random() calls at any tension: only the threshold moves.
+class _CountingRandom:
+    def __init__(self, v):
+        self.v, self.n = v, 0
+
+    def random(self):
+        self.n += 1
+        return self.v
+
+    def randint(self, a, b):
+        self.n += 1
+        return a
+
+    def choice(self, seq):
+        self.n += 1
+        return seq[0]
+
+
+grass = (20, 30)
+ok(mt.tile_at(*grass) == ";" and mt.zone_at(*grass), "(20,30) is zoned cave dark grass")
+calls = {}
+_real_random = mt.random
+try:
+    for v in (0.5, 0.2, 0.1):
+        for tension in (0, 100):
+            cg = cave_game(*grass)
+            cg.tension = tension
+            mt.random = _CountingRandom(v)
+            cg.try_encounter()
+            calls[(v, tension)] = (mt.random.n, cg.pending_foe is not None)
+finally:
+    mt.random = _real_random
+ok(calls[(0.5, 0)] == calls[(0.5, 100)] == (1, False) and calls[(0.1, 0)] == calls[(0.1, 100)]
+   and calls[(0.1, 0)][1], "try_encounter makes the same random() calls at tension 0 and 100: %s" % calls)
+ok(calls[(0.2, 0)] == (1, False) and calls[(0.2, 100)][1],
+   "a roll of 0.2 misses at tension 0 but hits at full tension (0.245)")
+
+# --- 3. the stalker's domain ---
+dom = [(x, y) for y in range(mt.MAP_H) for x in range(mt.MAP_W) if mt.stalker_walkable(x, y, {}, set(), CNPC)]
+ok(len(dom) == 505, "the stalker's domain is 505 tiles (got %d)" % len(dom))
+ok(not any(mt.stalker_walkable(x, y, ed, set(), CNPC) for ed in ({}, SEAMS_OPEN)
+           for y in (24, 25, 26, 37, 38, 39) for x in range(mt.MAP_W)),
+   "it never stands on a chokepoint or mouth row (24-26, 37-39), seams shut or open")
+ok(not any(mt.stalker_walkable(x, y, SEAMS_OPEN, set(), CNPC) for y in range(mt.MAP_H)
+           for x in range(mt.MAP_W) if mt.in_safe_zone(x, y)), "it never enters an entrance safe zone")
+ok(not mt.stalker_walkable(42, 31, {}, set(), CNPC), "CAVER NOX's tile is solid to it")
+cave_balls = [p for p in mt.ITEMS if mt.in_cave(p[1]) and HA["rows"][0] <= p[1] <= HA["rows"][1]]
+ok(cave_balls and not any(mt.stalker_walkable(*p, SEAMS_OPEN, set(), CNPC) for p in cave_balls)
+   and all(mt.stalker_walkable(*p, SEAMS_OPEN, set(cave_balls), CNPC) for p in cave_balls),
+   "unpicked item balls are solid to it, picked ones are floor (%s)" % cave_balls)
+legs = [mt.cave_dist(HA["patrol"][i], {}, set(), CNPC).get(HA["patrol"][(i + 1) % 12]) for i in range(12)]
+ok(all(mt.stalker_walkable(*w, {}, set(), CNPC) for w in HA["patrol"]) and None not in legs,
+   "every patrol waypoint is walkable and every leg connected (%s)" % legs)
+ok(all(mt.cave_dist(HA["patrol"][i], SEAMS_OPEN, set(), CNPC).get(HA["patrol"][(i + 1) % 12]) for i in range(12)),
+   "the patrol loop still holds with the seams mined open")
+ok(not set(dom) & {(x, y) for x in (42, 43) for y in (24, 25, 26, 27, 28, 29, 34, 35, 36, 37, 38, 39)},
+   "on the trunk it can only reach the middle danger strip, rows 30-33")
+
+# --- 4. it can never block the trunk ---
+blockers = []
+for sp in dom:
+    aura = {sp} | {(sp[0] + dx, sp[1] + dy) for dx, dy in mt.DIRS4}
+    if trunk_route(frozenset(aura)) is None:
+        blockers.append(sp)
+ok(not blockers, "even solid with its 4 neighbours, no stalker position seals the trunk: %s" % blockers[:5])
+cg = cave_game(43, 33)
+cg.stalker = mt.new_stalker(43, 32)
+ok(not cg.blocked_for(43, 32), "the stalker is never in blocked_for (it is not solid to the player)")
+print("  can't block: all %d stalker positions (plus their 4 neighbours) leave the trunk open" % len(dom))
+
+# --- 5. always completable ---
+band = (mt.CAVE_BAND[0] - 1, mt.CAVE_BAND[1] + 1)
+mouth_d = {}
+frontier = [(x, y) for x in (42, 43) for y in (24, 39)]
+for f in frontier:
+    mouth_d[f] = 0
+while frontier:
+    nxt = []
+    for x, y in frontier:
+        for dx, dy in mt.DIRS4:
+            n = (x + dx, y + dy)
+            if n not in mouth_d and band[0] <= n[1] <= band[1] and \
+                    not mt.tile_blocked(n[0], n[1], "none", SEAMS_OPEN, set(), CNPC):
+                mouth_d[n] = mouth_d[(x, y)] + 1
+                nxt.append(n)
+    frontier = nxt
+farthest = max(mouth_d.values())
+crossing = len(trunk_route()) - 1
+ok(HA["rest_lose"] > farthest and HA["rest_lose"] > crossing,
+   "rest_lose (%d) outlasts the longest walk out (%d) and the trunk crossing (%d)"
+   % (HA["rest_lose"], farthest, crossing))
+route_sn = trunk_route()
+contacts_total = 0
+finished = 0
+worst = 0
+for si, sp in enumerate(dom):
+    rng = mt.mulberry32(si)
+    st = mt.new_stalker(*sp)
+    rest, i, steps, contacts = 0, 0, 0, 0
+    while i < len(route_sn) - 1 and steps < 400:
+        steps += 1
+        nxt = route_sn[i + 1]
+        if st is not None and mt.bump(st, nxt):
+            hit = True
+        else:
+            i += 1
+            hit = False
+            if rest > 0:
+                rest -= 1
+                if rest == 0:
+                    st = mt.new_stalker(*mt.stalker_spawn(route_sn[i], {}, set(), CNPC)[:2])
+            elif st is not None:
+                st, ev = mt.stalker_tick(st, route_sn[i], 0, 100, {}, set(), CNPC, rng)
+                hit = ev == "lunge"
+        if hit:                       # resolve as a loss: whiteout, walk back, rest_lose
+            contacts += 1
+            st, rest, i = None, HA["rest_lose"], 0
+    finished += i == len(route_sn) - 1
+    contacts_total += contacts
+    worst = max(worst, contacts)
+ok(finished == len(dom) and worst <= 1,
+   "zero light, max tension, no PULSE: from all %d stalker starts the player reaches the north mouth, "
+   "each with at most one (lost) fight (%d finished, worst %d)" % (len(dom), finished, worst))
+print("  always completable: %d/%d starts cross (%d contacts, all lost, at most 1 each); "
+      "rest_lose %d > farthest walk out %d > crossing %d"
+      % (finished, len(dom), contacts_total, HA["rest_lose"], farthest, crossing))
+
+# --- 6. the light shield ---
+lunges, bad_moves = 0, 0
+prng = mt.mulberry32(99)
+srng = mt.mulberry32(3)
+ppos = (43, 32)
+st = mt.new_stalker(38, 30)
+for tick in range(1000):
+    opts = [(ppos[0] + dx, ppos[1] + dy) for dx, dy in mt.DIRS4]
+    opts = [o for o in opts if mt.in_cave(o[1]) and 26 <= o[1] <= 37
+            and not mt.tile_blocked(o[0], o[1], "none", {}, set(), CNPC) and (o[0], o[1]) != (st["x"], st["y"])]
+    if opts:
+        ppos = opts[int(prng() * len(opts))]
+    charge, tension = 50 + int(prng() * 51), int(prng() * 75)
+    before = (st["x"], st["y"])
+    st, ev = mt.stalker_tick(st, ppos, charge, tension, {}, set(), CNPC, srng)
+    lunges += ev == "lunge"
+    ko = mt.keep_out(charge, tension)
+    man = abs(st["x"] - ppos[0]) + abs(st["y"] - ppos[1])
+    if (st["x"], st["y"]) != before and ev != "retreat" and man < ko:
+        bad_moves += 1
+ok(lunges == 0, "1000 ticks at >= 50%% light and tension < 75: no lunge (%d)" % lunges)
+ok(bad_moves == 0, "it never ends a (non-retreat) move inside keep_out (%d)" % bad_moves)
+ok([mt.keep_out(c, t) for c, t in ((100, 0), (50, 74), (49, 0), (20, 0), (19, 0), (100, 75), (49, 75), (0, 100))]
+   == [3, 3, 2, 2, 1, 2, 1, 1], "keep_out: 3 / 2 / 1 by light, one less in fear, never below 1")
+# no lunge in a safe zone, none during grace
+edge = next((pp, sp) for pp in ((x, y) for y in range(26, 38) for x in range(mt.MAP_W)
+                                if mt.in_safe_zone(x, y) and not mt.tile_blocked(x, y, "none", {}, set(), CNPC))
+            for sp in ((pp[0] + dx, pp[1] + dy) for dx, dy in mt.DIRS4)
+            if mt.stalker_walkable(*sp, {}, set(), CNPC))
+evs = [mt.stalker_tick(dict(mt.new_stalker(*edge[1]), mode="hunt"), edge[0], 0, 100, {}, set(), CNPC,
+                       mt.mulberry32(s))[1] for s in range(5)]
+ok("lunge" not in evs, "no lunge while the player stands in a safe zone (%s next to %s)" % (edge[0], edge[1]))
+st = dict(mt.new_stalker(42, 32), grace=3)
+gseq = []
+for _ in range(4):
+    st, ev = mt.stalker_tick(st, (43, 32), 0, 100, {}, set(), CNPC, mt.mulberry32(1))
+    st["x"], st["y"] = 42, 32                          # hold it adjacent
+    gseq.append(ev)
+ok(gseq[:2] == [None, None] or "lunge" not in gseq[:2], "no lunge during grace (%s)" % gseq)
+ok(gseq[2] == "lunge", "the lunge comes once grace has run out (%s)" % gseq)
+
+# --- 7. determinism ---
+def trace(seed, n=300):
+    rng = mt.mulberry32(seed)
+    st = mt.new_stalker(*mt.stalker_spawn((43, 30), {}, set(), CNPC)[:2])
+    out = []
+    pp = (43, 30)
+    walk = [(43, 30), (44, 30), (45, 30), (46, 30), (47, 30), (48, 30)]
+    for k in range(n):
+        pp = walk[(k // 25) % len(walk)]
+        st, ev = mt.stalker_tick(st, pp, max(0, 100 - k // 2), min(100, k // 3), {}, set(), CNPC, rng)
+        out.append([st["x"], st["y"], st["mode"], st["stun"], ev])
+    return out
+
+
+ok(trace(7) == trace(7), "the same seed replays an identical 300-tick stalker trace")
+ok(trace(7) != trace(8), "a different seed gives a different trace")
+r1, r2 = mt.mulberry32(1), mt.mulberry32(123456789)
+ok([round(r1(), 6) for _ in range(3)] == [0.627074, 0.002736, 0.527447], "mulberry32(1) matches its reference values")
+
+# --- 8. pace, sense, lose-track, and no movement without a step ---
+st = mt.new_stalker(*HA["lair"])
+moved = []
+srng = mt.mulberry32(11)
+for _ in range(200):
+    before = (st["x"], st["y"])
+    st, ev = mt.stalker_tick(st, (42, 25), 100, 0, {}, set(), CNPC, srng)   # player safe: never hunted
+    moved.append((st["tick"], (st["x"], st["y"]) != before))
+ok(all(t % 2 == 0 for t, m in moved if m), "patrol moves only on every other step")
+ok(70 <= sum(m for _, m in moved) <= 100, "patrol moves on roughly 80%% of its turns (pause 20%%): %d/100"
+   % sum(m for _, m in moved))
+st = dict(mt.new_stalker(20, 30), mode="hunt")
+hmoves = []
+for _ in range(10):
+    before = (st["x"], st["y"])
+    st, ev = mt.stalker_tick(st, (8, 30), 0, 0, {}, set(), CNPC, mt.mulberry32(1))
+    hmoves.append((st["tick"], (st["x"], st["y"]) != before))
+ok(all(t % 5 != 4 for t, m in hmoves if m) and sum(m for _, m in hmoves) == 8,
+   "hunting moves 4 steps in 5, so a walking player always outruns it (%s)" % hmoves)
+ok([mt.stalker_sense(c, t) for c, t in ((100, 0), (50, 0), (0, 0), (0, 100), (100, 24), (100, 25))]
+   == [4, 6, 8, 12, 4, 5], "stalker_sense: 4 lit and calm, up to 12 in the dark at full tension")
+pp = (30, 30)
+d = mt.cave_dist(pp, {}, set(), CNPC)
+s_at = {v: k for k, v in sorted(d.items(), key=lambda kv: (kv[1], kv[0]))}
+sense = mt.stalker_sense(100, 0)
+st_in = mt.stalker_tick(mt.new_stalker(*s_at[sense]), pp, 100, 0, {}, set(), CNPC, mt.mulberry32(1))
+st_out = mt.stalker_tick(mt.new_stalker(*s_at[sense + 1]), pp, 100, 0, {}, set(), CNPC, mt.mulberry32(1))
+ok(st_in[0]["mode"] == "hunt" and st_out[0]["mode"] == "patrol", "it starts hunting at path distance <= sense, not beyond")
+far = s_at[sense + HA["lose_track"] + 1]
+st_lost = mt.stalker_tick(dict(mt.new_stalker(*far), mode="hunt"), pp, 100, 0, {}, set(), CNPC, mt.mulberry32(1))
+st_kept = mt.stalker_tick(dict(mt.new_stalker(*s_at[sense + HA["lose_track"]]), mode="hunt"), pp, 100, 0,
+                          {}, set(), CNPC, mt.mulberry32(1))
+ok(st_lost[0]["mode"] == "patrol" and st_kept[0]["mode"] == "hunt",
+   "it loses track beyond sense + %d" % HA["lose_track"])
+cg = cave_game(43, 33)
+cg.stalker = dict(mt.new_stalker(30, 30), mode="hunt")
+snap_st = dict(cg.stalker)
+idle = dict(up=False, down=False, left=False, right=False, run=False)
+for _ in range(300):
+    cg.update(1 / 60, idle)
+ok(cg.stalker == snap_st and cg.lantern == 100, "standing still for 5 s: the stalker never moves, the lantern never drains")
+
+# --- 9. the PULSE ---
+st = mt.new_stalker(10, 28)
+s2, hit = mt.pulse_apply(st, (10, 31), {}, set(), CNPC)
+ok(not hit and s2 == st, "the PULSE reaches by path, not through rock (Manhattan 3, path > 4: missed)")
+st = mt.new_stalker(12, 31)
+s2, hit = mt.pulse_apply(st, (10, 31), {}, set(), CNPC)
+dd = mt.cave_dist((10, 31), {}, set(), CNPC, roam=True)
+ok(hit and s2["stun"] == PU["stun"] and dd[(s2["x"], s2["y"])] > dd[(12, 31)]
+   and dd[(s2["x"], s2["y"])] - dd[(12, 31)] <= PU["push"],
+   "a hit stuns it for %d steps and shoves it up to %d tiles further off (now %s)"
+   % (PU["stun"], PU["push"], (s2["x"], s2["y"])))
+pos = []
+for _ in range(PU["stun"]):
+    s2, ev = mt.stalker_tick(s2, (10, 31), 0, 100, {}, set(), CNPC, mt.mulberry32(1))
+    pos.append((s2["x"], s2["y"], ev))
+ok(len(set(p[:2] for p in pos)) == 1 and all(p[2] is None for p in pos) and s2["stun"] == 0,
+   "stunned: it neither moves nor lunges for exactly %d steps" % PU["stun"])
+ok(not mt.bump(dict(st, stun=3), (12, 31)) and mt.bump(st, (12, 31)), "bump: a stunned stalker is no fight")
+cg = cave_game(20, 30)
+cg.stalker = dict(mt.new_stalker(21, 30), stun=5)
+mode = step_to(cg, 21, 30)
+ok(mode == "overworld" and (cg.player.tx, cg.player.ty) == (21, 30) and cg.battle is None,
+   "you walk straight past a stunned stalker")
+cg = cave_game(20, 30)
+cg.stalker = mt.new_stalker(30, 30)
+before = (dict(cg.stalker), cg.tension, cg.pulses)
+cg.mode, cg.menu_cursor = "menu", mt.MENU_ITEMS.index("PULSE")
+cg.confirm()
+ok((dict(cg.stalker), cg.tension, cg.pulses) == before and cg.mode == "menu" and "No PULSE" in cg.toast,
+   "PULSE with 0 charges: a toast and no state change")
+cg.pulses, cg.tension = 2, 40
+cg.confirm()
+ok(cg.pulses == 1 and cg.tension == 25 and cg.mode == "overworld" and "nothing." in cg.toast,
+   "a PULSE with nothing in reach is still spent (tension -15, menu closed)")
+ok(mt.menu_label(cg, "PULSE") == "PULSE x1", "the menu row reads PULSE x1")
+# auto-fire on a lunge; a bump never auto-fires
+cg = cave_game(20, 30)
+cg.lantern, cg.tension, cg.pulses = 0, 100, 1
+cg.stalker = mt.new_stalker(22, 30)
+mode = step_to(cg, 21, 30)
+ok(mode == "overworld" and cg.battle is None and cg.pulses == 0 and cg.stalker["stun"] > 0,
+   "a lunge with a PULSE carried fires it by reflex: no fight, the stalker reels stunned")
+cg = cave_game(20, 30)
+cg.lantern, cg.tension, cg.pulses = 100, 0, 1
+cg.stalker = mt.new_stalker(21, 30)
+mode = step_to(cg, 21, 30)
+ok(mode == "battle" and cg.battle.hunt and cg.pulses == 1 and (cg.player.tx, cg.player.ty) == (20, 30),
+   "bumping into it is a deliberate fight, even at full light, and never spends a PULSE")
+
+# --- 10. the handoff, and what each result leaves behind ---
+ok(cg.battle.foe.id == mt.HUNT["species"] and cg.battle.foe.level == mt.hunt_level([26]),
+   "the hunt battle is GLOOMSTALK at hunt_level(party)")
+ok(not any(sid == "gloomstalk" for z in mt.ZONES + mt.WATER_ZONES for sid, _ in z["pool"]),
+   "GLOOMSTALK is in no encounter pool")
+cg = cave_game(20, 30)
+cg.lantern, cg.tension = 0, 100
+cg.stalker = mt.new_stalker(22, 30)
+random.seed(3)
+rs = random.getstate()
+mode = step_to(cg, 21, 30)
+ok(mode == "battle" and cg.battle.hunt and cg.pending_foe is None and random.getstate() == rs,
+   "a lunge on dark grass starts the hunt and skips the wild roll entirely")
+
+
+def finish(cg, result):
+    cg.end_battle(result)
+    guard = 0
+    while (cg.battle or cg.fade_dir) and guard < 2000:
+        guard += 1
+        cg.update(1 / 60, idle)
+        if cg.battle and cg.battle.step and cg.battle.step["t"] == "msg":
+            cg.battle.step = None
+
+
+finish(cg, "win")
+ok(cg.hunt_gone and cg.stalker is None and cg.tension == 0 and cg.mode == "overworld",
+   "win: the stalker is gone, tension 0")
+for _ in range(100):
+    cg.cave_step()
+ok(cg.stalker is None, "a beaten stalker stays gone however long you walk")
+cg.heal_party()
+ok(not cg.hunt_gone, "...until heal_party")
+cg = cave_game(20, 30)
+cg.stalker = mt.new_stalker(21, 30)
+step_to(cg, 21, 30)
+finish(cg, "run")
+ok(cg.hunt_rest == HA["rest_run"] and cg.stalker is None and not cg.hunt_gone, "run: it rests %d cave steps" % HA["rest_run"])
+for _ in range(HA["rest_run"] - 1):
+    cg.cave_step()
+ok(cg.stalker is None, "still resting one step before rest_run runs out")
+cg.cave_step()
+ok(cg.stalker is not None and cg.hunt_rest == 0, "it returns when the rest runs out")
+sx, sy, _ = mt.stalker_spawn((cg.player.tx, cg.player.ty), cg.edits, cg.picked, cg.npc_tiles())
+ok((cg.stalker["x"], cg.stalker["y"]) == (sx, sy), "it returns at the waypoint furthest from you")
+cg = cave_game(20, 30)
+cg.last_centre = (12, 59)
+cg.lantern = 3
+cg.stalker = mt.new_stalker(21, 30)
+step_to(cg, 21, 30)
+finish(cg, "lose")
+ok(cg.hunt_rest == HA["rest_lose"] and (cg.player.tx, cg.player.ty) == (12, 59) and cg.lantern == 100
+   and cg.stalker is None and not cg.cave_in and cg.party_alive(),
+   "lose: the normal whiteout to the centre, lantern refilled, the stalker rests %d" % HA["rest_lose"])
+p = cg.player
+p.tx, p.ty = SOUTH
+cg.mode, cg.dialogue = "overworld", None
+seen = False
+for x, y in trunk_route()[1:]:
+    p.tx, p.ty = x, y
+    cg.cave_step()
+    seen = seen or cg.stalker is not None
+in_cave_steps = sum(1 for _, y in trunk_route()[1:] if mt.in_cave(y))
+ok(not seen and cg.hunt_rest == HA["rest_lose"] - in_cave_steps,
+   "walking back in, the whole trunk crossing is stalker-free (rest %d left)" % cg.hunt_rest)
+cg = cave_game(20, 30)
+cg.stalker = mt.new_stalker(30, 30)
+cg.tension = 50
+cg.start_battle(mt.make_mon("nocturn", 22))
+finish(cg, "win")
+ok(cg.stalker["grace"] == HA["grace"] and cg.tension == 40, "a wild win in the cave: grace %d, tension -10" % HA["grace"])
+
+# --- 11. save round-trip ---
+cg = cave_game(43, 33)
+cg.lantern, cg.tension, cg.pulses, cg.hunt_rest, cg.hunt_gone = 37, 44, 2, 12, True
+ok(cg.save_game(), "save with the cave counters")
+with open(mt.SAVE_PATH, encoding="utf-8") as fh:
+    raw = json.load(fh)
+ok(raw.get("cave") == dict(lantern=37, tension=44, pulses=2, rest=12, gone=True), "the save carries cave=%s" % raw.get("cave"))
+lg = mt.Game()
+ok(lg.load_game() and (lg.lantern, lg.tension, lg.pulses, lg.hunt_rest, lg.hunt_gone) == (37, 44, 2, 12, True)
+   and lg.stalker is None, "the cave counters round-trip; a resting stalker stays away")
+for cave_raw, want, label in ((None, (100, 0, 0, 0, False), "an old save (no cave)"),
+                              ([], (100, 0, 0, 0, False), "a non-dict cave"),
+                              (dict(lantern="abc", tension=-5, pulses=99, rest=None, gone="yes"),
+                               (100, 0, 3, 0, False), "garbage values"),
+                              (dict(lantern=12.9, tension="30", pulses=True, rest=999, gone=True),
+                               (12, 30, 0, 80, True), "odd types")):
+    raw2 = dict(raw)
+    if cave_raw is None:
+        raw2.pop("cave")
+    else:
+        raw2["cave"] = cave_raw
+    with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+        json.dump(raw2, fh)
+    lg = mt.Game()
+    got = (lg.load_game(), lg.lantern, lg.tension, lg.pulses, lg.hunt_rest, lg.hunt_gone)
+    ok(got == (True,) + want, "%s loads as %s (got %s)" % (label, want, got[1:]))
+raw2 = dict(raw, cave=dict(lantern=80, tension=0, pulses=0, rest=0, gone=False), x=43, y=33)
+with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+    json.dump(raw2, fh)
+lg = mt.Game()
+lg.load_game()
+sx, sy, _ = mt.stalker_spawn((43, 33), lg.edits, lg.picked, lg.npc_tiles())
+ok(lg.stalker is not None and (lg.stalker["x"], lg.stalker["y"]) == (sx, sy) and lg.cave_in,
+   "loading inside the cave spawns the stalker at the farthest waypoint %s" % ((sx, sy),))
+os.remove(mt.SAVE_PATH)
+print("  cave: lantern %.2f-%.2f tiles, 505-tile domain, rest %d/%d, %d-tick traces deterministic"
+      % (L["r_min"], L["r_max"], HA["rest_run"], HA["rest_lose"], 300))
+
+
+# ---------------------------------------------------------------- CONDITIONS
+section("CONDITIONS - battle weather rolls, damage boosts, fog, the seed")
+
+C = mt.CONDITIONS
+ok(list(C) == ["clear", "rain", "sun", "fog", "night", "tremor", "static"], "seven conditions in table order")
+ok(C["rain"]["boost"] == {"Water": 1.2} and C["static"]["boost"] == {"Electric": 1.15}
+   and C["fog"]["acc"] == -10 and C["clear"]["msg"] == "",
+   "rain boosts Water, static Electric x1.15, fog accuracy, clear has no message")
+for cid, c in C.items():
+    ok(set(c) == {"name", "msg", "boost", "acc"}, "%s has exactly name/msg/boost/acc" % cid)
+    ok(all(t in mt.TYPE_CHART for t in c["boost"]), "%s boosts only real types" % cid)
+    ok(all(v > 1 for v in c["boost"].values()), "%s only boosts, never a penalty (the balance rule)" % cid)
+regions = [n for _, _, n in mt.REGIONS] + ["THE TRAIL", "FISHING"]
+ok(set(mt.REGION_CONDITIONS) == set(regions), "every region, THE TRAIL and FISHING have a weight row")
+for reg, pool in mt.REGION_CONDITIONS.items():
+    ok(all(cid in C and w > 0 for cid, w in pool), "%s weights name real conditions" % reg)
+
+# seed: fixed values pin the formula (PARITY re-checks them in the .html build)
+ok(mt.CONDITION_SALT == 0xC0DE7 and mt.SCENE_SALT == 0x5CE7E, "the two salts are pinned")
+ok(mt.condition_seed(0, 0, 0) == 0xC0DE7, "seed(0,0,0) is the salt")
+ok(mt.condition_seed(1, 2, 3) == ((31 + 1954 + 393) ^ 0xC0DE7), "seed formula")
+ok(mt.condition_seed(10**7, 87, 109) == ((10**7 * 31 + 87 * 977 + 109 * 131) ^ 0xC0DE7) & 0xFFFFFFFF, "seed wraps to uint32")
+
+# battle_condition: pure, deterministic, fixed cases
+bc = mt.battle_condition
+ok(bc("DARK CAVE", None, True, 5) == "static", "a hunt is always static")
+ok(all(bc("DEEPWOOD", {"id": "gym"}, False, s) == "clear" for s in range(200)), "the gym is always clear")
+ok(all(bc(r, None, False, s) == "clear" for r in ("CEDAR TOWN", "ROUTE ONE") for s in range(200)),
+   "the starting regions are always clear")
+ok([bc("DEEPWOOD", None, False, s) for s in range(50)] == [bc("DEEPWOOD", None, False, s) for s in range(50)],
+   "deterministic per seed")
+ok(bc("NOWHERE", None, False, 7) == bc("THE TRAIL", None, False, 7), "an unknown region uses THE TRAIL row")
+for reg, pool in mt.REGION_CONDITIONS.items():
+    allowed = {cid for cid, _ in pool}
+    seen = [bc(reg, None, False, s) for s in range(2000)]
+    ok(set(seen) <= allowed, "%s only rolls its own conditions" % reg)
+    total = sum(w for _, w in pool)
+    for cid, w in pool:
+        share = seen.count(cid) / 2000.0
+        ok(abs(share - w / total) < 0.05, "%s rolls %s near %.2f (saw %.3f)" % (reg, cid, w / total, share))
+
+
+# damage_calc(..., condition): boosts after the type chart, fog shifts accuracy,
+# and the number of rng draws never changes.
+def roll_seq(vals):
+    it = iter(vals)
+    calls = [0]
+
+    def r():
+        calls[0] += 1
+        return next(it)
+    return r, calls
+
+
+# A Normal defender is neutral to Water and Fire, so the boosts show cleanly.
+atk, dfn = mt.make_mon("pyrelash", 20), mt.make_mon("nibbit", 20)
+water = next(m for m, v in mt.MOVES.items() if v["type"] == "Water" and v["pow"] > 0 and v["acc"] == 100)
+fire = next(m for m, v in mt.MOVES.items() if v["type"] == "Fire" and v["pow"] > 0 and v["acc"] == 100)
+never = next((m for m, v in mt.MOVES.items() if v["acc"] >= 999), None)
+seq = [0.5, 0.9, 0.5]                       # hit, no crit, mid roll
+base = mt.damage_calc(atk, dfn, water, {}, {}, roll_seq(seq)[0])
+for cid in (None, "clear"):
+    ok(mt.damage_calc(atk, dfn, water, {}, {}, roll_seq(seq)[0], 1.0, 0.0, cid) == base, "%r = today's result" % cid)
+rain = mt.damage_calc(atk, dfn, water, {}, {}, roll_seq(seq)[0], 1.0, 0.0, "rain")
+ok(rain["dmg"] > base["dmg"], "rain boosts Water (%d -> %d)" % (base["dmg"], rain["dmg"]))
+fb = mt.damage_calc(atk, dfn, fire, {}, {}, roll_seq(seq)[0])
+ok(mt.damage_calc(atk, dfn, fire, {}, {}, roll_seq(seq)[0], 1.0, 0.0, "rain") == fb, "rain leaves Fire alone (boost only)")
+ok(mt.damage_calc(atk, dfn, fire, {}, {}, roll_seq(seq)[0], 1.0, 0.0, "sun")["dmg"] > fb["dmg"], "sun boosts Fire")
+ok(mt.damage_calc(atk, dfn, fire, {}, {}, roll_seq(seq)[0], 1.0, 0.0, "night") == fb, "night leaves Fire alone")
+# each condition's boost touches only its own types
+for cid, c in mt.CONDITIONS.items():
+    for mid, mv in mt.MOVES.items():
+        if mv["pow"] <= 0 or mv["type"] in c["boost"]:
+            continue
+        r0 = mt.damage_calc(atk, dfn, mid, {}, {}, roll_seq([0.0, 0.9, 0.5])[0])
+        r1 = mt.damage_calc(atk, dfn, mid, {}, {}, roll_seq([0.0, 0.9, 0.5])[0], 1.0, 0.0, cid)
+        if r0 != r1:
+            ok(False, "%s changed %s (%s), which it does not boost" % (cid, mid, mv["type"]))
+            break
+    else:
+        ok(True, "%s leaves every unboosted type alone" % cid)
+ok(not mt.damage_calc(atk, dfn, water, {}, {}, roll_seq([0.95, 0.9, 0.5])[0])["missed"], "0.95 hits an acc-100 move")
+ok(mt.damage_calc(atk, dfn, water, {}, {}, roll_seq([0.95, 0.9, 0.5])[0], 1.0, 0.0, "fog")["missed"], "fog turns 0.95 into a miss")
+ok(never is not None, "MOVES has a move that can't miss (acc >= 999) to test fog against")
+if never:
+    ok(not mt.damage_calc(atk, dfn, never, {}, {}, roll_seq([0.999, 0.9, 0.5])[0], 1.0, 0.0, "fog")["missed"],
+       "fog never touches a move that can't miss")
+for cid in mt.CONDITIONS:
+    r1, c1 = roll_seq([0.5, 0.9, 0.5, 0.5]); mt.damage_calc(atk, dfn, water, {}, {}, r1)
+    r2, c2 = roll_seq([0.5, 0.9, 0.5, 0.5]); mt.damage_calc(atk, dfn, water, {}, {}, r2, 1.0, 0.0, cid)
+    ok(c1[0] == c2[0], "%s draws the same number of rolls" % cid)
+# an immune matchup stays 0 under a boost
+psy = next((m for m, v in mt.MOVES.items() if v["type"] == "Psychic" and v["pow"] > 0), None)
+dark = next((s for s, v in mt.SPECIES.items() if "Dark" in v["types"]), None)
+ok(bool(psy and dark), "a damaging Psychic move and a Dark species exist for the immunity check")
+if psy and dark:
+    for cid in mt.CONDITIONS:
+        ok(mt.damage_calc(atk, mt.make_mon(dark, 20), psy, {}, {}, roll_seq([0.1, 0.9, 0.5])[0], 1.0, 0.0, cid)["dmg"] == 0,
+           "PSYCHIC on DARK stays 0 under %s" % cid)
+# fuzz: None == today for 500 random calls
+fz = random.Random(4)
+same = True
+for _ in range(500):
+    m = fz.choice([k for k, v in mt.MOVES.items() if v["pow"] > 0])
+    vals = [fz.random() for _ in range(3)]
+    same &= mt.damage_calc(atk, dfn, m, {}, {}, roll_seq(vals)[0]) == mt.damage_calc(atk, dfn, m, {}, {}, roll_seq(vals)[0], 1.0, 0.0, None)
+ok(same, "condition=None matches the default over 500 calls")
+# ...and matches the pre-conditions damage_calc (the sdd backup) over the same 500 rolls.
+BACKUP_PY = os.path.join(HERE, ".superpowers", "sdd", "2026-10-18-battle-conditions", "claude's monsters.py")
+if os.path.exists(BACKUP_PY):
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)            # lesson tool-import-path: the game imports combat/
+    _bspec = importlib.util.spec_from_file_location("monster_trail_pre_conditions", BACKUP_PY)
+    old_mt = importlib.util.module_from_spec(_bspec)
+    _bspec.loader.exec_module(old_mt)
+    o_atk, o_dfn = old_mt.make_mon("pyrelash", 20), old_mt.make_mon("nibbit", 20)
+    fz = random.Random(4)
+    same_old = True
+    for _ in range(500):
+        m = fz.choice([k for k, v in mt.MOVES.items() if v["pow"] > 0])
+        vals = [fz.random() for _ in range(3)]
+        same_old &= (mt.damage_calc(atk, dfn, m, {}, {}, roll_seq(vals)[0], 1.0, 0.0, None)
+                     == old_mt.damage_calc(o_atk, o_dfn, m, {}, {}, roll_seq(vals)[0]))
+    ok(same_old, "condition=None matches the pre-conditions damage_calc (backup) over 500 rolls")
+else:
+    print("  (skip) no pre-conditions backup at %s" % BACKUP_PY)
+
+# arena_kind and battle_scene: pure, used by the shell and PARITY
+ak = mt.arena_kind
+ok(ak("DARK CAVE", ".", False, True, False) == "cave" and ak("DEEPWOOD", ".", True, False, False) == "shore",
+   "hunt -> cave, fishing -> shore")
+ok(ak("SPIRE RUINS", ".", False, False, False) == "ruins" and ak("ROCKY PASS", ".", False, False, False) == "pass",
+   "ruins and pass by region")
+ok(ak("DEEPWOOD", ".", False, False, True) == "pass", "the sandbox is pass")
+ok(ak("SEASIDE", ".", False, False, False) == "shore", "SEASIDE is shore (the deliberate fix)")
+ok(ak("DEEPWOOD", ",", False, False, False) == "meadow", "default meadow")
+sc = mt.battle_scene
+s1 = sc("rain", "meadow", 1234)
+ok(set(s1) == {"layout", "time", "weather", "camera"} and s1 == sc("rain", "meadow", 1234), "scene is deterministic")
+ok(s1["weather"] == "rain" and 0 <= s1["camera"] < mt.CAMERA_PRESETS and 0 <= s1["layout"] < 2 ** 32, "scene fields")
+ok(all(sc("night", "meadow", s)["time"] == "night" for s in range(50)), "night condition forces night")
+ok(all(sc("clear", "cave", s)["time"] == "night" for s in range(50)), "the cave is always night")
+ok(sc("clear", "pass", 3)["weather"] == "snow" and sc("clear", "shore", 3)["weather"] == "none", "regional extras")
+times = {sc("clear", "meadow", s)["time"] for s in range(400)}
+ok(times == {"day", "dusk", "dawn", "night"}, "meadow sees all four times")
+ok(len({sc("clear", "meadow", s)["layout"] for s in range(100)}) > 90, "layouts vary")
+ok(len({sc("clear", "meadow", s)["camera"] for s in range(100)}) == mt.CAMERA_PRESETS, "every camera preset is reachable")
+ok(set(mt.DEFAULT_SCENE) == {"layout", "time", "weather", "camera"} and mt.DEFAULT_SCENE["layout"] == 0
+   and mt.DEFAULT_SCENE["camera"] == 0, "DEFAULT_SCENE is today's look")
+
+
+# Wiring: start_battle rolls, stores and announces the condition; resolve uses it.
+# Own Game objects, so the module-level ``g`` the BATTLE helpers share is untouched.
+def cond_game():
+    ng = mt.Game()
+    ng.party = [mt.make_mon("pyrelash", 20)]
+    ng.balls, ng.fade_dir, ng.fade_cb, ng.mode = 20, 0, None, "overworld"
+    return ng
+
+
+def queued_msgs(gg):
+    return [s.get("s") for s in gg.battle.queue if s.get("t") == "msg"]
+
+
+def cond_to_menu(gg):
+    """Press through the queue until the battle asks for an action."""
+    guard = 0
+    while gg.battle and gg.battle.phase not in ("menu", "over") and guard < 20000:
+        guard += 1
+        b = gg.battle
+        gg.update_battle(1 / 60)
+        b.disp_mine, b.disp_foe = float(b.mine.hp), float(b.foe.hp)
+        if b.step and b.step["t"] == "msg":
+            b.step = None
+
+
+DW_Y1, DW_Y2 = next((y1, y2) for y1, y2, n in mt.REGIONS if n == "DEEPWOOD")
+DEEP_GRASS = next(((x, y) for y in range(DW_Y1, DW_Y2 + 1) for x in range(mt.MAP_W)
+                   if mt.tile_at(x, y) == "," and not mt.in_sandbox(x, y)), None)
+ok(DEEP_GRASS is not None, "DEEPWOOD has a tall-grass tile to start the condition battles on")
+DEEP_GRASS = DEEP_GRASS or (0, DW_Y1)
+prev, prev_scene = mt.FORCE_CONDITION, mt.FORCE_SCENE
+saved_random = random.getstate()
+real_random = random.random
+try:
+    mt.FORCE_CONDITION = None
+    mt.FORCE_SCENE = None
+    cg1 = cond_game()
+    cg1.player.tx, cg1.player.ty = DEEP_GRASS
+    seed1 = mt.condition_seed(cg1.steps, DEEP_GRASS[0], DEEP_GRASS[1])
+    want = mt.battle_condition("DEEPWOOD", None, False, seed1)
+    before = random.getstate()
+    cg1.start_battle(mt.make_mon(mt.STARTERS[0], 5))
+    ok(random.getstate() == before, "start_battle never touches the global random stream")
+    ok(cg1.battle.condition == want, "the battle rolls battle_condition from condition_seed (%s)" % want)
+    ok(cg1.battle.arena == "meadow" and cg1.battle.scene == mt.battle_scene(want, "meadow", seed1),
+       "arena and scene stored on the battle")
+    msgs = queued_msgs(cg1)
+    gi = next(i for i, m in enumerate(msgs) if m.startswith("Go, "))
+    cond_msgs = {c["msg"] for c in mt.CONDITIONS.values() if c["msg"]}
+    if want == "clear":
+        ok(not cond_msgs & set(msgs), "clear adds no message")
+    else:
+        ok(msgs[gi - 1] == mt.CONDITIONS[want]["msg"], "the condition line sits right before Go")
+    # Walk DEEPWOOD seeds until both a clear and a non-clear battle have been seen.
+    got = {}
+    for st in range(200):
+        cgs = cond_game()
+        cgs.player.tx, cgs.player.ty = DEEP_GRASS
+        cgs.steps = st
+        cgs.start_battle(mt.make_mon(mt.STARTERS[0], 5))
+        cid = cgs.battle.condition
+        key = "clear" if cid == "clear" else "other"
+        if key not in got:
+            got[key] = (cid, queued_msgs(cgs))
+        if len(got) == 2:
+            break
+    ok(set(got) == {"clear", "other"}, "DEEPWOOD rolls both clear and non-clear battles over 200 step counts")
+    if "clear" in got:
+        ok(got["clear"][1] == ["A wild %s appeared!" % mt.SPECIES[mt.STARTERS[0]]["name"], "Go, PYRELASH!"],
+           "a clear wild battle queues exactly today's two lines")
+    if "other" in got:
+        cid, ms = got["other"]
+        ok(ms == ["A wild %s appeared!" % mt.SPECIES[mt.STARTERS[0]]["name"], mt.CONDITIONS[cid]["msg"],
+                  "Go, PYRELASH!"], "a %s wild battle: intro, condition line, then Go" % cid)
+    # A trainer battle: the line comes after both trainer lines.
+    mt.FORCE_CONDITION = "sun"
+    cgt = cond_game()
+    tr = dict(id="t_test", name="HIKER TEST", intro="Hi!")
+    cgt.start_battle(mt.make_mon(mt.STARTERS[0], 5), tr)
+    ok(queued_msgs(cgt)[-3:] == ["HIKER TEST sent out %s!" % mt.SPECIES[mt.STARTERS[0]]["name"],
+                                 mt.CONDITIONS["sun"]["msg"], "Go, PYRELASH!"],
+       "a trainer battle: both trainer lines, then the condition, then Go")
+    # The gym is clear unless forced.
+    mt.FORCE_CONDITION = None
+    cgg = cond_game()
+    cgg.player.tx, cgg.player.ty = DEEP_GRASS
+    cgg.start_battle(mt.make_mon(mt.STARTERS[0], 5), mt.GYM_LEADER)
+    ok(cgg.battle.condition == "clear", "the gym battle is always clear")
+    mt.FORCE_CONDITION = "rain"
+    cgg2 = cond_game()
+    cgg2.start_battle(mt.make_mon(mt.STARTERS[0], 5), mt.GYM_LEADER)
+    ok(cgg2.battle.condition == "rain", "FORCE_CONDITION rain beats the gym rule")
+    # Non-string seams are ignored, never a crash (an unhashable or numeric id).
+    for junk in (["rain"], {"id": "rain"}, 3, b"rain"):
+        mt.FORCE_CONDITION = junk
+        cgj = cond_game()
+        cgj.player.tx, cgj.player.ty = DEEP_GRASS
+        cgj.start_battle(mt.make_mon(mt.STARTERS[0], 5), mt.GYM_LEADER)
+        ok(cgj.battle.condition == "clear", "FORCE_CONDITION %r is ignored (the gym stays clear)" % (junk,))
+    mt.FORCE_CONDITION = None
+    for junk in ("day", ["day"], dict(layout=0, time="day"), dict(mt.DEFAULT_SCENE, extra=1), {}):
+        mt.FORCE_SCENE = junk
+        cgs2 = cond_game()
+        cgs2.player.tx, cgs2.player.ty = DEEP_GRASS
+        cgs2.start_battle(mt.make_mon(mt.STARTERS[0], 5))
+        b = cgs2.battle
+        ok(b.scene == mt.battle_scene(b.condition, b.arena, mt.condition_seed(0, DEEP_GRASS[0], DEEP_GRASS[1])),
+           "FORCE_SCENE %r is ignored (battle_scene runs)" % (junk,))
+    mt.FORCE_SCENE = None
+    # a forced condition, a hunt
+    for force in ("rain", "fog"):
+        mt.FORCE_CONDITION = force
+        cg2 = cond_game()
+        cg2.start_battle(mt.make_mon(mt.STARTERS[0], 5), hunt=True)
+        ok(cg2.battle.condition == force, "FORCE_CONDITION %s beats the hunt rule" % force)
+    mt.FORCE_CONDITION = "bogus"
+    cg3 = cond_game()
+    cg3.player.tx, cg3.player.ty = 50, 30
+    cg3.start_battle(mt.make_mon("gloomstalk", 25), hunt=True)
+    ok(cg3.battle.condition == "static" and cg3.battle.arena == "cave",
+       "an unknown forced id is ignored; the hunt is static in the cave")
+    m3 = queued_msgs(cg3)
+    gi3 = next(i for i, m in enumerate(m3) if m.startswith("Go, "))
+    ok(m3[gi3 - 1] == mt.CONDITIONS["static"]["msg"] and gi3 >= 4
+       and m3[gi3 - 2] == "It's hunting you. There's no time to aim a BALL!",
+       "the hunt's static line comes after the whole scare, right before Go")
+    mt.FORCE_CONDITION = None
+    fish_ids = {c for c, _ in mt.REGION_CONDITIONS["FISHING"]}
+    fish_seen = set()
+    for st in range(60):
+        cg4 = cond_game()
+        cg4.steps = st
+        cg4.start_battle(mt.make_mon(mt.STARTERS[0], 5), fishing=True)
+        if st == 0:
+            ok(cg4.battle.arena == "shore", "a fishing battle is on the shore")
+        fish_seen.add(cg4.battle.condition)
+        if cg4.battle.condition != mt.battle_condition(
+                "FISHING", None, False, mt.condition_seed(st, cg4.player.tx, cg4.player.ty)):
+            ok(False, "fishing battle %d did not roll the FISHING row" % st)
+            break
+    ok(fish_seen <= fish_ids and len(fish_seen) > 1, "fishing rolls the FISHING row (%s)" % sorted(fish_seen))
+    mt.FORCE_SCENE = dict(mt.DEFAULT_SCENE)
+    cg5 = cond_game()
+    cg5.start_battle(mt.make_mon(mt.STARTERS[0], 5))
+    ok(cg5.battle.scene == mt.DEFAULT_SCENE and cg5.battle.scene is not mt.DEFAULT_SCENE,
+       "FORCE_SCENE beats battle_scene (a copy)")
+
+    # The battle's damage uses b.condition: one Water turn, rain vs clear.
+    def water_turn(force):
+        mt.FORCE_CONDITION = force
+        gg = cond_game()
+        gg.party = [mt.make_mon("dripling", 20)]
+        gg.party[0].moves = ["waterpulse"]
+        gg.start_battle(mt.make_mon("nibbit", 20))
+        cond_to_menu(gg)
+        b = gg.battle
+        hp0 = b.foe.hp
+        random.random = lambda: 0.5            # hit, no crit, mid roll, every time
+        try:
+            gg.take_turn(dict(t="attack", move="waterpulse"))
+            cond_to_menu(gg)
+        finally:
+            random.random = real_random
+        return hp0 - b.foe.hp
+    clear_loss, rain_loss = water_turn("clear"), water_turn("rain")
+    ok(clear_loss > 0 and rain_loss > clear_loss,
+       "rain makes the battle's Water hit land harder (%d -> %d HP)" % (clear_loss, rain_loss))
+finally:
+    random.random = real_random
+    mt.FORCE_CONDITION, mt.FORCE_SCENE = prev, prev_scene
+    random.setstate(saved_random)
+ok(mt.FORCE_CONDITION == "clear" and mt.FORCE_SCENE == mt.DEFAULT_SCENE, "the suite-wide seams are restored")
+print("  conditions: %d ids, %d region rows; DEEPWOOD battle rolled %s; Water turn clear %d HP vs rain %d HP"
+      % (len(mt.CONDITIONS), len(mt.REGION_CONDITIONS), want, clear_loss, rain_loss))
+
+
+# ------------------------------------------------------------------ LOOT
+section("LOOT - goods, drops, coins, shop, save cleaning")
+
+# --- tables (spec section 1) ---
+SHOP_IDS = ["greatball", "potion", "superpotion", "smoke"]
+LOOT_IDS = ["softfur", "twig", "treesap", "shell", "seasalt", "grit", "flint", "glowmoss",
+            "glowcrystal", "dust", "relicshard", "scale", "pearl", "emberdust", "dewdrop",
+            "leaf", "copperwire", "venomsac", "feather", "shadowsilk"]
+LOOT_PRICE = dict(softfur=5, twig=6, treesap=14, shell=6, seasalt=14, grit=8, flint=16,
+                  glowmoss=10, glowcrystal=24, dust=10, relicshard=30, scale=8, pearl=30,
+                  emberdust=12, dewdrop=12, leaf=8, copperwire=14, venomsac=14, feather=10,
+                  shadowsilk=16)
+ok(list(mt.GOODS) == SHOP_IDS + LOOT_IDS, "GOODS has exactly the 24 spec ids, in spec order")
+ok(all({"name", "kind", "price", "desc"} <= set(v) for v in mt.GOODS.values()),
+   "every GOODS entry has name, kind, price and desc")
+ok(all(isinstance(v["price"], int) and v["price"] > 0 for v in mt.GOODS.values()),
+   "every GOODS price is a positive int")
+ok(all(isinstance(v["desc"], str) and v["desc"] and v["name"] == v["name"].upper()
+       for v in mt.GOODS.values()), "every GOODS entry has a CAPS name and a description")
+ok([mt.GOODS[k]["kind"] for k in SHOP_IDS] == ["ball", "heal", "heal", "escape"]
+   and all(mt.GOODS[k]["kind"] == "loot" for k in LOOT_IDS), "GOODS kinds match the spec")
+ok([mt.GOODS[k]["price"] for k in SHOP_IDS] == [60, 30, 80, 40]
+   and all(mt.GOODS[k]["price"] == p for k, p in LOOT_PRICE.items()), "GOODS prices match the spec")
+ok(mt.GOODS["greatball"]["bonus"] == 1.5 and mt.GOODS["potion"]["heal"] == 20
+   and mt.GOODS["superpotion"]["heal"] == 60, "the GREAT BALL bonus and the heal amounts match")
+ok(all("bonus" in v for v in mt.GOODS.values() if v["kind"] == "ball")
+   and all("heal" in v for v in mt.GOODS.values() if v["kind"] == "heal"),
+   "balls carry bonus, heals carry heal")
+ok([mt.GOODS[k]["name"] for k in ("greatball", "superpotion", "glowcrystal", "relicshard", "copperwire")]
+   == ["GREAT BALL", "SUPER POTION", "GLOW CRYSTAL", "RELIC SHARD", "COPPER WIRE"], "GOODS names")
+region_names = {n for _, _, n in mt.REGIONS}
+ok(all(k in region_names or k == "FISHING" for k in mt.LOOT_AREA), "LOOT_AREA keys are regions or FISHING")
+ok(all(mt.GOODS.get(i, {}).get("kind") == "loot" and isinstance(w, int) and w > 0
+       for pool in mt.LOOT_AREA.values() for i, w in pool), "LOOT_AREA lists loot ids with positive weights")
+ok(mt.LOOT_AREA == {"ROUTE ONE": [("softfur", 1)], "DEEPWOOD": [("twig", 3), ("treesap", 1)],
+                    "SEASIDE": [("shell", 3), ("seasalt", 1)], "ROCKY PASS": [("grit", 3), ("flint", 1)],
+                    "DARK CAVE": [("glowmoss", 3), ("glowcrystal", 1)],
+                    "SPIRE RUINS": [("dust", 3), ("relicshard", 1)], "FISHING": [("scale", 3), ("pearl", 1)]},
+   "LOOT_AREA matches the spec")
+ok(set(mt.LOOT_TYPE) == set(mt.TYPE_CHART) and len(mt.LOOT_TYPE) == 12, "LOOT_TYPE covers all 12 types")
+ok(all(mt.GOODS.get(v, {}).get("kind") == "loot" for v in mt.LOOT_TYPE.values()), "LOOT_TYPE values are loot")
+ok(mt.LOOT_TYPE == dict(Normal="softfur", Fire="emberdust", Water="dewdrop", Grass="leaf", Bug="leaf",
+                        Electric="copperwire", Steel="copperwire", Poison="venomsac", Flying="feather",
+                        Psychic="shadowsilk", Dark="shadowsilk", Rock="flint"), "LOOT_TYPE matches the spec")
+ok((mt.BALL_PRICE, mt.START_COINS, mt.COINS_MAX, mt.BAG_MAX, mt.LOOT_WIN_CHANCE, mt.LOOT_AREA_SHARE,
+    mt.LOOT_SALT, mt.SAFETY_BALLS, mt.GYM_BONUS, mt.SHOP_QTY_MAX)
+   == (20, 100, 99999, 999, 0.4, 0.7, 0x1007, 5, 300, 10), "the loot/shop constants match the spec")
+ok(mt.FORCE_NO_LOOT is False, "FORCE_NO_LOOT is off for the suite")
+ok(len(mt.ITEMS) == 14 and mt.ITEMS[(75, 30)] == 8 and mt.ITEMS[(56, 100)] == 4,
+   "the item-ball table ITEMS is untouched by GOODS")
+
+# --- loot_seed ---
+ok([mt.loot_seed(0, 0, 0, 0, 0), mt.loot_seed(1, 2, 3, 4, 5), mt.loot_seed(120, 36, 95, 5, 3)]
+   == [4103, 561796, 409208], "loot_seed gives the three fixed values")
+ok(mt.loot_seed(10 ** 9, 87, 109, 100, 10 ** 6) == 2585909101 and mt.loot_seed(2 ** 40, 0, 0, 0, 0) == 4103,
+   "loot_seed wraps to 32 bits")
+ok(mt.loot_seed(5, 1, 1, 5, 1) != mt.loot_seed(5, 1, 1, 5, 2), "the battle counter changes the seed")
+
+# --- loot_roll ---
+rs_loot = random.getstate()
+N_SEEDS = 2000
+wins = [mt.loot_roll("DEEPWOOD", ["Grass"], False, None, False, s) for s in range(N_SEEDS)]
+rate = sum(1 for x in wins if x) / N_SEEDS
+ok(abs(rate - 0.40) <= 0.04, "a wild win drops loot about 40%% of the time (%.3f)" % rate)
+caught = [mt.loot_roll("DEEPWOOD", ["Grass"], True, None, False, s) for s in range(N_SEEDS)]
+ok(all(caught), "a catch always drops")
+area = sum(1 for x in caught if x in ("twig", "treesap")) / N_SEEDS
+ok(abs(area - 0.70) <= 0.04, "drops come from the area list about 70%% of the time (%.3f)" % area)
+ok(all(x in ("twig", "treesap", "leaf") for x in caught), "DEEPWOOD + Grass gives only twig/treesap/leaf")
+area_drops = [x for x in caught if x in ("twig", "treesap")]
+twig_share = area_drops.count("twig") / max(1, len(area_drops))
+ok(abs(twig_share - 0.75) <= 0.05, "area weights hold: TWIG 3 : TREE SAP 1 (%.3f)" % twig_share)
+fish = [mt.loot_roll("FISHING", ["Water"], True, None, False, s) for s in range(N_SEEDS)]
+fish_area = [x for x in fish if x in ("scale", "pearl")]
+ok(set(fish) <= {"scale", "pearl", "dewdrop"} and abs(fish_area.count("scale") / len(fish_area) - 0.75) <= 0.05,
+   "the FISHING row weights SCALE 3 : PEARL 1")
+ok(all(mt.loot_roll("DEEPWOOD", ["Grass"], c, dict(id="t1"), False, s) is None
+       for s in range(50) for c in (False, True)), "a trainer battle never drops")
+ok(all(mt.loot_roll("DARK CAVE", ["Dark"], c, None, True, s) is None
+       for s in range(50) for c in (False, True)), "a hunt never drops")
+ok({mt.loot_roll("ROUTE ONE", ["Fire"], True, None, False, s) for s in range(400)} == {"softfur", "emberdust"},
+   "ROUTE ONE with a Fire foe gives only softfur or emberdust")
+ok({mt.loot_roll("RIDGE TOWN", ["Water", "Rock"], True, None, False, s) for s in range(400)} == {"dewdrop"},
+   "RIDGE TOWN (no area row) always gives the first type's item")
+ok(all(mt.loot_roll("SEASIDE", ["Bug"], c, None, False, s) == mt.loot_roll("SEASIDE", ["Bug"], c, None, False, s)
+       for s in range(200) for c in (False, True)), "loot_roll is deterministic")
+# A catch makes the same r draw as a win, so a seed that drops on a win drops the same item on a catch.
+ok(all(w is None or w == c for w, c in zip(wins, caught)), "a catch draws in the same order as a win")
+ok(random.getstate() == rs_loot, "loot_seed/loot_roll never touch the global random stream")
+
+# --- coins ---
+ok(mt.coin_reward(10, None, False, False) == 30, "a wild L10 win pays 30")
+ok(mt.coin_reward(5, 12, False, False) == 240, "a trainer with a L12 top monster pays 240")
+ok(mt.coin_reward(5, 12, True, False) == 540 and mt.coin_reward(5, 12, True, True) == 240,
+   "the gym pays the bonus once (540, then 240)")
+ok([mt.blackout_coins(c) for c in (0, 1, 3, 4, 7, 99999)] == [0, 1, 3, 3, 6, 75000],
+   "a blackout keeps all but a quarter, rounded down")
+ok(mt.add_coins(10, 5) == 15 and mt.add_coins(10, -50) == 0 and mt.add_coins(99990, 50) == 99999,
+   "add_coins clamps to 0..COINS_MAX")
+bag0 = {"twig": 2}
+bag1 = mt.bag_add(bag0, "twig", 3)
+ok(bag1 == {"twig": 5} and bag0 == {"twig": 2}, "bag_add adds and never mutates its input")
+ok(mt.bag_add(bag0, "twig", -2) == {} and mt.bag_add(bag0, "twig", -9) == {}, "bag_add drops zero entries")
+ok(mt.bag_add({"twig": 998}, "twig", 5) == {"twig": 999} and mt.bag_add({}, "leaf", 0) == {},
+   "bag_add clamps to BAG_MAX and never stores a zero")
+
+# --- shop ---
+c, bl, bg, okk, why = mt.shop_buy(100, 3, {}, "potion", 2)
+ok((c, bl, bg, okk, why) == (40, 3, {"potion": 2}, True, None), "buying 2 POTIONs costs exactly 60")
+c, bl, bg, okk, why = mt.shop_buy(100, 3, {}, "ball", 5)
+ok((c, bl, bg, okk) == (0, 8, {}, True), "a BALL goes to the balls counter at BALL_PRICE")
+ok(mt.shop_buy(59, 0, {}, "greatball", 1)[3:] == (False, "coins"), "not enough coins is refused")
+ok(mt.shop_buy(60, 0, {}, "greatball", 1)[:4] == (0, 0, {"greatball": 1}, True), "exact coins are enough")
+ok(mt.shop_buy(1000, 0, {"potion": 995}, "potion", 5)[3:] == (False, "full"), "a buy past BAG_MAX is refused")
+ok(mt.shop_buy(1000, 0, {"potion": 994}, "potion", 5)[3] is True, "a buy up to BAG_MAX is fine")
+ok(mt.shop_buy(1000, 995, {}, "ball", 5)[3:] == (False, "full"), "the ball total is capped at BAG_MAX")
+ok(mt.shop_buy(1000, 0, {}, "potion", 0)[3:] == (False, "qty")
+   and mt.shop_buy(1000, 0, {}, "potion", 11)[3:] == (False, "qty")
+   and mt.shop_buy(1000, 0, {}, "potion", True)[3:] == (False, "qty"), "qty 0, 11 and bools are refused")
+ok(mt.shop_buy(1000, 0, {}, "twig", 1)[3:] == (False, "item") and mt.shop_buy(1000, 0, {}, "nope", 1)[3:]
+   == (False, "item"), "loot and unknown ids can't be bought")
+refused = mt.shop_buy(10, 2, {"leaf": 1}, "potion", 1)
+ok(refused[:3] == (10, 2, {"leaf": 1}), "a refused buy changes nothing")
+c, bg, okk, why = mt.shop_sell(10, {"twig": 3}, "twig", 2)
+ok((c, bg, okk, why) == (22, {"twig": 1}, True, None), "selling 2 TWIG pays exactly 12")
+ok(mt.shop_sell(10, {"twig": 2}, "twig", 2)[1] == {}, "selling the last one drops the entry")
+ok(mt.shop_sell(10, {"twig": 1}, "twig", 2)[2:] == (False, "qty"), "you can't sell more than you own")
+ok(mt.shop_sell(10, {"potion": 3}, "potion", 1)[2:] == (False, "item")
+   and mt.shop_sell(10, {}, "ball", 1)[2:] == (False, "item"), "shop items can't be sold")
+ok(mt.shop_sell(10, {"twig": 20}, "twig", 0)[2:] == (False, "qty")
+   and mt.shop_sell(10, {"twig": 20}, "twig", 11)[2:] == (False, "qty"), "selling qty 0 / 11 is refused")
+ok(mt.shop_sell(99990, {"pearl": 1}, "pearl", 1)[2:] == (False, "full")
+   and mt.shop_sell(99969, {"pearl": 1}, "pearl", 1)[:3] == (99999, {}, True),
+   "a sale past COINS_MAX is refused rather than losing coins")
+ok([mt.ball_safety_net(0, 19), mt.ball_safety_net(0, 20), mt.ball_safety_net(1, 0)] == [5, 0, 0],
+   "the safety net gives 5 BALLs only when out of balls and coins")
+
+# --- save cleaning ---
+ok([mt.clean_bag(x) for x in (None, [1, 2], "twig", 5)] == [{}, {}, {}, {}], "clean_bag rejects non-dicts")
+ok(mt.clean_bag({"twig": 2, "nope": 4, "leaf": True, "potion": 1.0, "smoke": 1.5, "pearl": -3,
+                 "scale": "7", "dust": None, "shell": float("nan"), "flint": float("inf"),
+                 "feather": 5000, 7: 1}) == {"twig": 2, "potion": 1, "feather": 999},
+   "clean_bag drops junk, bools, fractions, negatives and unknown ids, and clamps")
+ok([mt.clean_coins(x) for x in (None, 250, 1.0, 1.5, True, False, -5, "50", [], float("nan"),
+                                float("inf"), 10 ** 9)] == [100, 250, 1, 0, 0, 0, 0, 0, 0, 0, 0, 99999],
+   "clean_coins: absent/None -> 100, junk -> 0, clamped")
+ok([mt.clean_count(x) for x in (None, 7, 3.0, 2.5, True, -1, "4")] == [0, 7, 3, 0, 0, 0, 0],
+   "clean_count: missing -> 0, junk -> 0")
+print("  loot: %d goods, %d area rows; win drop %.3f, area share %.3f, TWIG share %.3f"
+      % (len(mt.GOODS), len(mt.LOOT_AREA), rate, area, twig_share))
+
+
+# --- state, saves, heal, payouts and battle items (Chunk 2) ---
+# Own Game objects throughout: the module-level ``g`` other sections share is untouched.
+LOOT_IDLE = dict(up=False, down=False, left=False, right=False, run=False)
+NURSE_LINE = "Here, take these BALLs. Be careful out there."
+
+
+def loot_game(x=None, y=None, mons=None):
+    ng = mt.Game()
+    ng.party = mons or [mt.make_mon("pyrelash", 20)]
+    ng.balls, ng.fade_dir, ng.fade_cb, ng.mode = 20, 0, None, "overworld"
+    if x is not None:
+        ng.player.tx, ng.player.ty = x, y
+        ng.player.px, ng.player.py = x * 32, y * 32
+    return ng
+
+
+def loot_run(gg, policy=None):
+    """Tick the battle, pressing through messages, until it ends (battle None)
+    or - with no policy - it asks for an action. Returns the messages shown."""
+    msgs = []
+    for _ in range(40000):
+        b = gg.battle
+        if b is None:
+            break
+        if b.phase == "menu" and not b.step and not b.queue:
+            if policy is None:
+                break
+            gg.take_turn(policy(b))
+        gg.update(1 / 60, LOOT_IDLE)
+        b = gg.battle
+        if b:
+            b.disp_mine, b.disp_foe = float(b.mine.hp), float(b.foe.hp)
+            if b.step and b.step["t"] == "msg":
+                msgs.append(b.step["s"])
+                b.step = None
+    return msgs
+
+
+def queued(gg):
+    return [s["s"] for s in gg.battle.queue if s["t"] == "msg"]
+
+
+def best_attack(b):
+    return dict(t="attack", move=max(b.mine.moves, key=lambda m: mt.MOVES[m]["pow"]))
+
+
+ng0 = mt.Game()
+ok(ng0.bag == {} and ng0.coins == 100 and ng0.battles == 0 and ng0.flags["gym_bonus"] is False,
+   "a new Game starts with an empty bag, 100 coins, 0 battles, no gym bonus")
+ng0.bag, ng0.coins, ng0.battles, ng0.flags["gym_bonus"] = {"twig": 1}, 5, 9, True
+ng0.new_game()
+ok(ng0.bag == {} and ng0.coins == 100 and ng0.battles == 0 and ng0.flags["gym_bonus"] is False,
+   "new_game resets the bag, coins, battles and the gym bonus")
+ok(mt.SIGNS[(18, 59)] == ["CENTRE: free healing, and a shop. No catch."], "the CENTRE sign mentions the shop")
+ok(mt.npc_by_id("nurse1")["lines"][0] == "The CENTRE door heals your whole team, and its shop sells balls.",
+   "the MEDIC's line mentions the shop")
+
+# start_battle: the counter, the fishing flag and the fixed loot seed.
+DX, DY = DEEP_GRASS
+loot_foe_lv = 5
+ST_DROP = next(st for st in range(2000) if mt.loot_roll(
+    "DEEPWOOD", ["Grass"], False, None, False, mt.loot_seed(st, DX, DY, loot_foe_lv, 1)))
+ST_NONE = next(st for st in range(2000) if not mt.loot_roll(
+    "DEEPWOOD", ["Grass"], False, None, False, mt.loot_seed(st, DX, DY, loot_foe_lv, 1)))
+DROP_ITEM = mt.loot_roll("DEEPWOOD", ["Grass"], False, None, False, mt.loot_seed(ST_DROP, DX, DY, loot_foe_lv, 1))
+gw = loot_game(DX, DY)
+gw.steps = ST_DROP
+foe = mt.make_mon("sprigling", loot_foe_lv)
+rs = random.getstate()
+gw.start_battle(foe)
+ok(random.getstate() == rs, "start_battle's loot seed never touches the global random stream")
+b = gw.battle
+ok(gw.battles == 1 and b.fishing is False and b.reward_paid is False
+   and b.loot_seed == mt.loot_seed(ST_DROP, DX, DY, loot_foe_lv, 1),
+   "start_battle counts the battle and fixes its loot seed with the new count")
+loot_run(gw)
+gw.end_battle("win")
+q = queued(gw)
+want_drop = "The wild %s dropped a %s!" % (foe.name, mt.GOODS[DROP_ITEM]["name"])
+ok(q == ["You got 15 coins!", want_drop], "a wild L5 win queues the coins, then the drop: %s" % q)
+ok(gw.battle is b and gw.fade_dir == 0 and b.reward_paid and b.phase != "over",
+   "the reward is queued before the fade starts")
+ok(gw.coins == 115 and gw.bag == {DROP_ITEM: 1}, "the coins and the loot are paid")
+shown = loot_run(gw)
+ok(shown == q and gw.battle is None and gw.mode == "overworld", "every reward line is shown, none dropped")
+gw.fade_dir = 0
+gw.start_battle(mt.make_mon("nibbit", 3), hunt=False, fishing=True)
+ok(gw.battles == 2 and gw.battle.fishing is True, "a fishing battle is counted and flagged")
+
+gn = loot_game(DX, DY)
+gn.steps = ST_NONE
+gn.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+loot_run(gn)
+gn.end_battle("win")
+ok(queued(gn) == ["You got 15 coins!"] and gn.bag == {}, "a win with no drop pays coins only")
+
+# A real fight: EXP first, then the coins, then the drop, then the end.
+gf = loot_game(DX, DY, mons=[mt.make_mon("pyrelash", 30)])
+gf.steps = ST_DROP
+gf.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+log_f = loot_run(gf, best_attack)
+i_exp = next((i for i, s in enumerate(log_f) if "EXP" in s), -1)
+i_coin = next((i for i, s in enumerate(log_f) if s == "You got 15 coins!"), -1)
+i_drop = next((i for i, s in enumerate(log_f) if s.endswith("dropped a %s!" % mt.GOODS[DROP_ITEM]["name"])), -1)
+ok(0 <= i_exp < i_coin < i_drop == len(log_f) - 1, "a fought win narrates EXP, coins, then the drop")
+
+# Bag full.
+gfull = loot_game(DX, DY)
+gfull.steps = ST_DROP
+gfull.bag = {DROP_ITEM: mt.BAG_MAX}
+gfull.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+loot_run(gfull)
+gfull.end_battle("win")
+ok(queued(gfull)[1:] == [want_drop, "...but your bag is full."]
+   and gfull.bag == {DROP_ITEM: mt.BAG_MAX}, "a full bag narrates the drop and keeps the count")
+
+# Trainers and the gym.
+tr2 = mt.npc_by_id("t2")
+gt = loot_game()
+gt.start_battle(mt.make_mon(*tr2["team"][0]), trainer=tr2)
+loot_run(gt)
+gt.end_battle("win")
+ok(queued(gt) == ["You got 160 coins!"] and gt.coins == 260 and gt.bag == {},
+   "a trainer win pays 20 x its top level and never drops loot")
+gy = loot_game(mons=[mt.make_mon("pyrelash", 60)])
+for n, want in ((1, 940), (2, 640)):
+    gy.fade_dir, gy.mode = 0, "overworld"
+    gy.start_battle(mt.make_mon(*mt.GYM_LEADER["team"][0]), trainer=mt.GYM_LEADER)
+    loot_run(gy)
+    c0 = gy.coins
+    gy.end_battle("win")
+    ok(queued(gy) == ["You got %d coins!" % want] and gy.coins == c0 + want,
+       "gym win %d pays %d" % (n, want))
+    ok(gy.flags["gym_bonus"] is True, "gym win %d: the bonus is marked paid" % n)
+    loot_run(gy)
+
+# Catching: the loot is held, coins are not paid; also when the team is full.
+gc = loot_game(DX, DY)
+gc.steps = ST_NONE
+foe = mt.make_mon("sprigling", loot_foe_lv)
+gc.start_battle(foe)
+held = mt.loot_roll("DEEPWOOD", foe.types, True, None, False, gc.battle.loot_seed)
+loot_run(gc)
+gc.end_battle("caught")
+ok(queued(gc) == ["%s was holding a %s!" % (foe.name, mt.GOODS[held]["name"])] and gc.coins == 100
+   and gc.bag == {held: 1}, "a catch finds the held loot and pays no coins")
+real_catch = mt.catch_roll
+try:
+    mt.catch_roll = lambda mon, bonus, rng=None, throw_scale=1: dict(caught=True, shakes=4)
+    gc6 = loot_game(DX, DY, mons=[mt.make_mon("nibbit", 10) for _ in range(6)])
+    foe = mt.make_mon("sprigling", loot_foe_lv)
+    gc6.start_battle(foe)
+    held6 = mt.loot_roll("DEEPWOOD", foe.types, True, None, False, gc6.battle.loot_seed)
+    loot_run(gc6)
+    gc6.take_turn(dict(t="ball"))
+    log6 = loot_run(gc6)
+    i_rel = next((i for i, s in enumerate(log6) if "released" in s), -1)
+    i_held = next((i for i, s in enumerate(log6) if "was holding" in s), -1)
+    ok(0 <= i_rel < i_held and gc6.bag == {held6: 1} and gc6.coins == 100 and len(gc6.party) == 6,
+       "a released catch still keeps its loot, after the release line")
+finally:
+    mt.catch_roll = real_catch
+
+# Losing: a quarter of the coins, then the whiteout's safety net sees the loss.
+gl = loot_game()
+gl.start_battle(mt.make_mon("nibbit", 3))
+loot_run(gl)
+gl.end_battle("lose")
+ok(queued(gl) == ["You dropped 25 coins..."] and gl.coins == 75, "a blackout drops a quarter of the coins")
+loot_run(gl)
+ok(gl.mode == "dialogue" and gl.dialogue["lines"] == ["You scrambled back to the CENTRE...",
+                                                      "Your team was patched up, good as new."]
+   and gl.balls == 20, "with balls left, the whiteout says nothing about BALLs")
+gl0 = loot_game()
+gl0.coins, gl0.balls = 24, 0
+gl0.start_battle(mt.make_mon("nibbit", 3))
+loot_run(gl0)
+gl0.end_battle("lose")
+loot_run(gl0)
+ok(gl0.coins == 18 and gl0.balls == 5 and gl0.dialogue["lines"][-1] == NURSE_LINE,
+   "the coin loss comes first, so 24 coins -> 18 triggers the safety net and the nurse line")
+glz = loot_game()
+glz.coins = 0
+glz.start_battle(mt.make_mon("nibbit", 3))
+loot_run(glz)
+glz.end_battle("lose")
+ok(queued(glz) == [] and glz.coins == 0, "losing with no coins says nothing about coins")
+
+# Hunts: ORE only on a win; a lost hunt still costs a quarter, inside hunt_over.
+gh = loot_game(mons=[mt.make_mon("pyrelash", 60)])
+gh.start_battle(mt.make_mon("gloomstalk", 25), hunt=True)
+loot_run(gh)
+gh.end_battle("win")
+ok(queued(gh) == ["It left 3 ORE behind in the dark."] and gh.coins == 100 and gh.bag == {},
+   "a won hunt pays its ORE and no coins or loot")
+loot_run(gh)
+ok(gh.battle is None, "the won hunt still ends")
+gh2 = loot_game()
+calls = []
+real_ho = gh2.hunt_over
+gh2.hunt_over = lambda result: (calls.append(result), real_ho(result))
+gh2.start_battle(mt.make_mon("gloomstalk", 25), hunt=True)
+loot_run(gh2)
+hb = gh2.battle
+gh2.end_battle("lose")
+ok(queued(gh2) == ["You dropped 25 coins..."] and gh2.coins == 75 and calls == ["lose"]
+   and hb.reward_paid is False and hb.hunt_paid, "a lost hunt drops a quarter through hunt_over, not reward_paid")
+loot_run(gh2)
+ok(gh2.mode == "dialogue" and gh2.coins == 75, "the lost hunt whites out once, without a second loss")
+
+# Running pays nothing and fades at once.
+gr = loot_game()
+gr.start_battle(mt.make_mon("nibbit", 3))
+loot_run(gr)
+gr.end_battle("run")
+ok(queued(gr) == [] and gr.coins == 100 and gr.bag == {}, "running away queues nothing to pay")
+loot_run(gr)
+ok(gr.battle is None and gr.coins == 100 and gr.bag == {}, "running away pays nothing and still ends")
+
+# FORCE_NO_LOOT: no loot, no coins, no blackout loss.
+try:
+    mt.FORCE_NO_LOOT = True
+    gq = loot_game(DX, DY)
+    gq.steps = ST_DROP
+    gq.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+    loot_run(gq)
+    gq.end_battle("win")
+    ok(queued(gq) == [] and gq.coins == 100 and gq.bag == {}, "FORCE_NO_LOOT: a win pays nothing")
+    gq2 = loot_game()
+    gq2.start_battle(mt.make_mon("nibbit", 3))
+    loot_run(gq2)
+    gq2.end_battle("lose")
+    ok(queued(gq2) == [] and gq2.coins == 100, "FORCE_NO_LOOT: a loss costs nothing")
+finally:
+    mt.FORCE_NO_LOOT = False
+
+
+def seeded_wild(no_loot):
+    prev, rs0 = mt.FORCE_NO_LOOT, random.getstate()
+    try:
+        mt.FORCE_NO_LOOT = no_loot
+        random.seed(1234)
+        gs = loot_game(DX, DY, mons=[mt.make_mon("tidecoil", 22)])
+        gs.steps = ST_DROP
+        gs.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+        log_s = loot_run(gs, best_attack)
+        return log_s, random.getstate(), gs.coins, dict(gs.bag)
+    finally:
+        mt.FORCE_NO_LOOT = prev
+        random.setstate(rs0)
+
+
+log_a, state_a, coins_a, bag_a = seeded_wild(False)
+log_b, state_b, coins_b, bag_b = seeded_wild(True)
+ok(coins_a > 100 and bag_a and coins_b == 100 and not bag_b, "the seeded battle paid out only with loot on")
+ok(state_a == state_b, "rewards and loot never touch the global random stream (same state either way)")
+ok(mt.FORCE_NO_LOOT is False, "FORCE_NO_LOOT is restored")
+
+# Saves.
+try:
+    gsv = loot_game()
+    gsv.bag, gsv.coins, gsv.battles = {"twig": 3, "potion": 2}, 1234, 17
+    gsv.flags["gym_bonus"] = True
+    ok(gsv.save_game(), "a save with a bag and coins is written")
+    gld = mt.Game()
+    ok(gld.load_game() and gld.bag == {"twig": 3, "potion": 2} and gld.coins == 1234 and gld.battles == 17
+       and gld.flags["gym_bonus"] is True, "bag, coins, battles and the gym bonus round-trip")
+    with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+        json.dump(dict(party=[mt.make_mon("nibbit", 5).to_dict()], balls=3), fh)
+    gld = mt.Game()
+    ok(gld.load_game() and gld.bag == {} and gld.coins == 100 and gld.battles == 0
+       and gld.flags["gym_bonus"] is False, "an old save loads with an empty bag, 100 coins, 0 battles")
+    with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+        json.dump(dict(party=[mt.make_mon("nibbit", 5).to_dict()], bag={"twig": "9", "leaf": 2, "x": 1},
+                       coins=True, battles=-4, flags={"gym_bonus": "yes"}), fh)
+    gld = mt.Game()
+    ok(gld.load_game() and gld.bag == {"leaf": 2} and gld.coins == 0 and gld.battles == 0
+       and gld.flags["gym_bonus"] is True, "a junk save is cleaned (bag, coins, battles, gym_bonus)")
+    with open(mt.SAVE_PATH, "w", encoding="utf-8") as fh:
+        json.dump(dict(party=[mt.make_mon("nibbit", 5).to_dict()], coins=None, bag=None), fh)
+    gld = mt.Game()
+    ok(gld.load_game() and gld.coins == 100 and gld.bag == {}, "null coins load as START_COINS")
+finally:
+    if os.path.exists(mt.SAVE_PATH):
+        os.remove(mt.SAVE_PATH)
+
+# heal_party and the CENTRE door.
+gd = loot_game()
+gd.balls, gd.coins = 3, 100
+gd.lantern, gd.tension, gd.hunt_gone = 10, 50, True
+ok(gd.heal_party() == 0 and gd.balls == 3, "heal_party no longer tops balls up to 20")
+ok(gd.lantern == 100 and gd.tension == 0 and gd.hunt_gone is False, "it still refills the lantern and nerve")
+gd.balls, gd.coins = 0, 19
+ok(gd.heal_party() == 5 and gd.balls == 5, "out of balls and coins: the safety net gives 5")
+gd.balls, gd.coins = 0, 20
+ok(gd.heal_party() == 0 and gd.balls == 0, "with 20 coins you can buy one: no gift")
+for balls, coins, extra in ((4, 0, []), (0, 10, [NURSE_LINE])):
+    gd = loot_game()
+    gd.balls, gd.coins = balls, coins
+    gd.party[0].hp = 1
+    gd.player.tx, gd.player.ty, gd.player.dir = 12, 107, "up"
+    gd.interact()
+    ok(gd.mode == "dialogue" and gd.dialogue["lines"] == ["MEDIC: Rest here a moment...",
+                                                          "Your team is fully healed!"] + extra
+       and gd.party[0].hp == gd.party[0].maxhp, "the CENTRE door heals%s" % (" and gifts BALLs" if extra else ""))
+
+# --- battle items ---
+# The battle BAG list: owned, usable, in spec order; cursor and cancel.
+gb = loot_game(DX, DY)
+gb.bag = {"smoke": 2, "potion": 1, "twig": 4}
+gb.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+loot_run(gb)
+b = gb.battle
+ok(gb.battle_bag_items() == ["ball", "potion", "smoke"], "the battle BAG lists owned usable items in order")
+b.cursor = 1
+gb.confirm()
+ok(b.phase == "bag" and b.cursor == 0, "BAG opens the item list")
+moves = []
+for dx, dy in ((0, 1), (1, 0), (0, 1), (0, 1), (0, -1)):
+    gb.move_cursor(dx, dy)
+    moves.append(b.cursor)
+ok(moves == [1, 1, 2, 2, 1], "the BAG cursor moves one row, ignores left/right and clamps (%s)" % moves)
+gb.cancel()
+ok(b.phase == "menu" and not b.queue, "cancel leaves the BAG without using a turn")
+ge = loot_game(DX, DY)
+ge.balls, ge.bag = 0, {"twig": 1}
+ge.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+loot_run(ge)
+b = ge.battle
+hp0 = (b.mine.hp, b.foe.hp)
+b.cursor = 1
+ge.confirm()
+ok(b.phase == "anim" and queued(ge) == ["Your bag is empty!"], "an empty BAG is narrated through the queue")
+ok(loot_run(ge) == ["Your bag is empty!"] and b.phase == "menu" and (b.mine.hp, b.foe.hp) == hp0,
+   "...and returns to the menu with no turn used")
+ok(ge.battle_bag_items() == [], "loot is not usable in battle")
+ge.take_turn(dict(t="ball"))
+ok(loot_run(ge) == ["You have no balls left!"] and b.phase == "menu" and ge.balls == 0,
+   "a direct BALL turn with no balls is still guarded")
+
+# GREAT BALL: bonus 2.25 and the bag, not balls; a refused one is kept.
+bonus_seen = []
+try:
+    mt.catch_roll = lambda mon, bonus, rng=None, throw_scale=1: (bonus_seen.append(bonus),
+                                                                  dict(caught=False, shakes=1))[1]
+    gg = loot_game(DX, DY, mons=[mt.make_mon("pyrelash", 40)])
+    gg.bag = {"greatball": 2}
+    gg.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+    loot_run(gg)
+    gg.take_turn(dict(t="ball", item="greatball"))
+    log_g = loot_run(gg)
+    ok(bonus_seen == [2.25] and gg.bag == {"greatball": 1} and gg.balls == 20
+       and "You threw a GREAT BALL!" in log_g, "a GREAT BALL throws at 2.25x and uses the bag")
+    del bonus_seen[:]
+    gg.take_turn(dict(t="ball"))
+    log_g = loot_run(gg)
+    ok(bonus_seen == [1.5] and gg.balls == 19 and gg.bag == {"greatball": 1} and "You threw a BALL!" in log_g,
+       "a plain BALL still throws at 1.5x from the balls counter")
+    gt2 = loot_game()
+    gt2.bag = {"greatball": 1}
+    gt2.start_battle(mt.make_mon(*tr2["team"][0]), trainer=tr2)
+    loot_run(gt2)
+    gt2.take_turn(dict(t="ball", item="greatball"))
+    ok(loot_run(gt2) == ["You can't catch another trainer's monster!"] and gt2.bag == {"greatball": 1},
+       "a GREAT BALL refused by a trainer is not used up")
+    gh3 = loot_game(mons=[mt.make_mon("pyrelash", 60)])
+    gh3.bag = {"greatball": 1}
+    gh3.start_battle(mt.make_mon("gloomstalk", 25), hunt=True)
+    loot_run(gh3)
+    gh3.take_turn(dict(t="ball", item="greatball"))
+    ok(loot_run(gh3) == ["It melts into the dark before the BALL can land!"] and gh3.bag == {"greatball": 1},
+       "a GREAT BALL refused in a hunt is not used up")
+finally:
+    mt.catch_roll = real_catch
+
+# POTION / SUPER POTION: refused at full HP; otherwise heal, then the foe's turn.
+gp = loot_game(DX, DY, mons=[mt.make_mon("pyrelash", 40)])
+gp.bag = {"potion": 3, "superpotion": 1}
+gp.start_battle(mt.make_mon("sprigling", 3))
+loot_run(gp)
+b = gp.battle
+me = b.mine
+foe_hp = b.foe.hp
+rs0 = random.getstate()
+random.seed(5)
+gp.take_turn(dict(t="item", item="potion"))
+ok(loot_run(gp) == ["It won't have any effect."] and gp.bag["potion"] == 3 and b.phase == "menu"
+   and b.foe.hp == foe_hp and me.hp == me.maxhp, "a POTION at full HP is refused, nothing used, no turn")
+state_ref = random.getstate()
+random.seed(5)
+random.choice(b.foe.moves)
+ok(state_ref == random.getstate(), "the refusal draws only the usual foe-move pick")
+random.setstate(rs0)
+me.hp = me.maxhp - 30
+gp.take_turn(dict(t="item", item="potion"))
+qq = b.queue
+ok(qq[0]["t"] == "do" and qq[1] == dict(t="msg", s="%s recovered 20 HP!" % me.name) and qq[2]["t"] == "hp"
+   and len(qq) > 5 and qq[-2]["t"] == "hp" and qq[-1]["t"] == "do",
+   "the queue runs: heal sfx, message, HP bar, foe move, HP bar, faint check")
+ok(me.hp == me.maxhp - 10 and gp.bag["potion"] == 2, "a POTION heals 20 and is used up")
+log_p = loot_run(gp)
+ok(log_p[0] == "%s recovered 20 HP!" % me.name and any(s.startswith("Foe ") or "used" in s for s in log_p[1:]),
+   "the foe takes its turn after the heal")
+me.hp = me.maxhp - 10
+gp.take_turn(dict(t="item", item="potion"))
+ok(loot_run(gp)[0] == "%s recovered 10 HP!" % me.name, "a POTION never overheals (heals 10 of 20)")
+me.hp = me.maxhp - 70
+gp.take_turn(dict(t="item", item="superpotion"))
+ok(loot_run(gp)[0] == "%s recovered 60 HP!" % me.name and "superpotion" not in gp.bag,
+   "a SUPER POTION heals 60 and the last one leaves the bag")
+gp.bag["superpotion"] = 1
+me.hp = me.maxhp
+foe_hp = gp.battle.foe.hp
+gp.take_turn(dict(t="item", item="superpotion"))
+ok(loot_run(gp) == ["It won't have any effect."] and gp.bag["superpotion"] == 1 and gp.battle.phase == "menu"
+   and gp.battle.foe.hp == foe_hp and me.hp == me.maxhp, "a SUPER POTION at full HP is refused, nothing used, no turn")
+ok((mt.WILD_COIN_RATE, mt.TRAINER_COIN_RATE) == (3, 20), "the coin rates are named constants")
+
+# An item turn draws exactly what a swap turn draws: the foe-move pick and its rolls.
+def draws_after(kind):
+    rs1 = random.getstate()
+    try:
+        gz = loot_game(DX, DY, mons=[mt.make_mon("tidecoil", 30), mt.make_mon("tidecoil", 30)])
+        gz.bag = {"potion": 1}
+        gz.start_battle(mt.make_mon("sprigling", 8))
+        loot_run(gz)
+        gz.battle.mine.hp -= 25
+        random.seed(99)
+        gz.take_turn(dict(t="item", item="potion") if kind == "potion" else dict(t="swap", index=1))
+        loot_run(gz)
+        return random.getstate()
+    finally:
+        random.setstate(rs1)
+
+
+ok(draws_after("potion") == draws_after("swap"), "a POTION turn draws exactly like any foe-only turn")
+
+# SMOKE: wild only; ends as a run with no odds draw.
+for kind in ("trainer", "hunt"):
+    gs = loot_game(mons=[mt.make_mon("pyrelash", 60)])
+    gs.bag = {"smoke": 1}
+    if kind == "trainer":
+        gs.start_battle(mt.make_mon(*tr2["team"][0]), trainer=tr2)
+    else:
+        gs.start_battle(mt.make_mon("gloomstalk", 25), hunt=True)
+    loot_run(gs)
+    gs.take_turn(dict(t="item", item="smoke"))
+    ok(loot_run(gs) == ["The smoke won't help here!"] and gs.bag == {"smoke": 1} and gs.battle.phase == "menu",
+       "SMOKE is refused in a %s battle, not used up, no turn" % kind)
+gs = loot_game(DX, DY)
+gs.bag = {"smoke": 2}
+gs.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+loot_run(gs)
+b = gs.battle
+n_random = [0]
+real_rr = random.random
+
+
+def counting_random():
+    n_random[0] += 1
+    return real_rr()
+
+
+try:
+    random.random = counting_random
+    gs.take_turn(dict(t="item", item="smoke"))
+    log_s = []
+    for _ in range(5000):
+        if b.phase == "over":
+            break
+        gs.update(1 / 60, LOOT_IDLE)
+        if b.step and b.step["t"] == "msg":
+            log_s.append(b.step["s"])
+            b.step = None
+finally:
+    random.random = real_rr
+ok(log_s == ["You vanished in a puff of smoke!"] and b.result == "run" and gs.bag == {"smoke": 1},
+   "SMOKE ends a wild battle as a run and is used up")
+ok(n_random[0] == 0 and gs.coins == 100, "SMOKE never draws the RUN odds and pays nothing")
+print("  loot battle: drop seed %d -> %s; gym pays 940 then 640; seeded wild battle %d lines" %
+      (ST_DROP, DROP_ITEM, len(log_a)))
+
+
+# ---------------------------------------------------------------- RENDER
+section("RENDER - shell, sprites, tiles, every mode and battle phase, juice")
+
+# Everything above drives layers 1-3 only.  This section builds the real
+# Shell against SDL's dummy video/audio drivers and draws: every species in
+# every orientation, the overworld in every region band and over every glyph,
+# every Game mode, every battle phase, and the Juice system frame by frame.
+# Set MT_FRAME_DIR to a folder to also save the key frames as PNGs.
+import math
+import time as _time
+
+_render_t0 = _time.perf_counter()
+_render_p0 = PASSED
+pygame = mt.pygame
+FRAME_DIR = os.environ.get("MT_FRAME_DIR")
+DT = 1 / 60
+NO_KEYS = dict(up=False, down=False, left=False, right=False, run=False)
+
+_real_draw_creature = mt.draw_creature
+
+
+def cave_render(sh, sg, lum, keep, stand, DRAWN):
+    """DARK CAVE shell checks: the lantern hole follows the charge, the
+    neighbours stay lit at empty, the stalker's eyes read through the dark,
+    the cave HUD / PULSE row / 7-row CRAFT fit.  Placeholder visuals (step 3
+    owns the look); these pin the contract the look must keep."""
+    pygame = mt.pygame
+    errors = []
+    sg.party = sg.party or [mt.make_mon("emberling", 12)]
+    sg.stalker = None
+    combos = 0
+    try:
+        for calm in (False, True):
+            mt.REDUCED_MOTION = calm
+            for charge in (0, 50, 100):
+                for tension in (0, 50, 100):
+                    stand(43, 30)
+                    sg.lantern, sg.tension = charge, tension
+                    try:
+                        sh.render()
+                        combos += 1
+                    except Exception as e:             # noqa: BLE001
+                        errors.append(repr(e))
+                    if FRAME_DIR and tension == 100 and not calm:
+                        keep("cave-lamp-%03d" % charge)
+    finally:
+        mt.REDUCED_MOTION = False
+    ok(not errors and combos == 18, "cave renders at lantern 0/50/100 x tension 0/50/100 x reduced motion "
+       "on/off (%d frames) %s" % (combos, errors[:1]))
+
+    def frames(charge):
+        stand(43, 30)
+        sg.lantern, sg.tension, sg.stalker = charge, 0, None
+        sh.render()
+        dark = sh.surf.copy()
+        real = sh.draw_cave_dark
+        sh.draw_cave_dark = lambda x, y: None
+        sh.render()
+        lit = sh.surf.copy()
+        sh.draw_cave_dark = real
+        cx = int(sg.player.px - sh.cam[0] + mt.TILE / 2)
+        cy = int(sg.player.py - sh.cam[1] + mt.TILE / 2)
+        return dark, lit, cx, cy
+
+    def gap(dark, lit, rect):
+        return abs(lum(dark, rect) - lum(lit, rect))
+
+    for charge in (0, 50, 100):
+        dark, lit, cx, cy = frames(charge)
+        near = [pygame.Rect(cx + dx * mt.TILE - 4, cy + dy * mt.TILE - 4, 8, 8) for dx, dy in mt.DIRS4]
+        ok(all(gap(dark, lit, r) < 6 for r in near),
+           "lantern %d: the 4 neighbouring tiles stay lit" % charge)
+    d0, l0, cx, cy = frames(0)
+    d8, l8, _, _ = frames(100)
+    ring = pygame.Rect(cx + int(3.5 * mt.TILE) - 4, cy - 4, 8, 8)
+    ok(gap(d8, l8, ring) < 6 < gap(d0, l0, ring),
+       "the lit radius shrinks: 3.5 tiles out is lit at full (%.0f) and dark at empty (%.0f)"
+       % (gap(d8, l8, ring), gap(d0, l0, ring)))
+    keep("cave-lamp-empty")
+
+    # Eyes over the darkness while it hunts; nothing while it only patrols.
+    # The eyes drift by EYE_BOB and blink, so look in a small window, not one pixel.
+    for mode, want in (("hunt", True), ("patrol", False)):
+        stand(43, 30)
+        sg.lantern, sg.tension = 0, 0
+        sg.stalker = dict(mt.new_stalker(38, 30), mode=mode)
+        sh.cfx.blink = 0.0
+        sh.render()
+        c = eye_pixel(sh, 38, 30)
+        red = c[0] > 150 and c[1] < 120 and c[2] < 140
+        ok(red == want, "%s: the stalker's eyes %s through the dark (%s)"
+           % (mode, "show" if want else "do not show", tuple(c)[:3]))
+        if want:
+            keep("cave-eyes-hunting")
+    stand(43, 30)
+    sg.lantern = 100
+    sg.stalker = mt.new_stalker(44, 30)
+    del DRAWN[:]
+    sh.render()
+    ok(any(d[0] == mt.HUNT["species"] for d in DRAWN), "the stalker's body draws as GLOOMSTALK under the dark")
+    sg.stalker = None
+
+    # HUD / menu / craft fit.
+    cr = pygame.Rect(*mt.HUD_CAVE_RECT)
+    widest = sh.f11.size("LAMP 100%  TENSION 100  PULSE 3")[0]
+    ok(widest <= cr.w - 8, "the widest cave HUD line (%d px) fits HUD_CAVE_RECT (%d)" % (widest, cr.w))
+    menu_r = pygame.Rect(mt.W - mt.MENU_W - 16, mt.MENU_Y, mt.MENU_W, 26 * len(mt.MENU_ITEMS) + 24)
+    others = [pygame.Rect(8, 8, 150, 30), pygame.Rect(*mt.HUD_LEAD_RECT), pygame.Rect(*mt.HUD_MAT_RECT), menu_r]
+    ok(not any(cr.colliderect(o) for o in others), "the cave HUD overlaps no other HUD panel or the menu")
+    ok(menu_r.bottom <= mt.H - 60, "the 6-row menu ends above the toast strip")
+    cave_toasts = ("PULSE fired! It reels, stunned.", "PULSE! The shape reels, stunned.",
+                   "The PULSE flares... nothing.", "No PULSE. Craft one from ORE.")
+    widest_toast = max(sh.f13.size(t_)[0] for t_ in cave_toasts)
+    ok(widest_toast <= 280 - 12, "every cave toast fits the toast panel (%d px)" % widest_toast)
+    stand(43, 30, "menu")
+    sg.pulses, sg.menu_cursor = 2, 4
+    sh.render()
+    ok(mt.menu_label(sg, "PULSE") == "PULSE x2", "the menu shows PULSE x2")
+    keep("cave-menu-pulse")
+    stand(43, 30, "craft")
+    sg.materials.update(stone=99, ore=99, wall=99)
+    sg.balls, sg.lantern, sg.pulses = 99, 3, 0
+    cells = mt.craft_cells(sg)
+    x, y, w, h = mt.CRAFT_RECT
+    pitch = mt.CRAFT_SLOT + mt.CRAFT_GAP
+    vis_bottom = y + mt.CRAFT_GRID_Y + (mt.CRAFT_GRID_ROWS - 1) * pitch + mt.CRAFT_SLOT + 4   # + outline
+    ok(vis_bottom <= y + h - 34, "the %d visible CRAFT grid rows end above the message line (%d <= %d)"
+       % (mt.CRAFT_GRID_ROWS, vis_bottom, y + h - 34))
+    grid_right = x + mt.CRAFT_GRID_X + (mt.CRAFT_COLS - 1) * pitch + mt.CRAFT_SLOT + 4
+    ok(grid_right + 8 <= x + 298, "the CRAFT grid (and its cue) ends left of the detail divider (%d)" % grid_right)
+    ok(len(cells) == len(mt.RECIPES) + 1, "one CRAFT cell per recipe plus BUILD")
+    win_bad = []
+    for n in range(1, 16):
+        for cur in range(n):
+            top = mt.list_top(n, cur, mt.CRAFT_GRID_ROWS)
+            if not (top <= cur < top + mt.CRAFT_GRID_ROWS and 0 <= top <= max(0, n - mt.CRAFT_GRID_ROWS)):
+                win_bad.append((cur, n, top))
+    ok(not win_bad, "the CRAFT grid window keeps the cursor row visible for 1..15 rows %s" % win_bad[:5])
+    # detail pane: name at x+332, count right-aligned at x+478, never overlapping
+    names = {mt.craft_label(k) for c in cells for k, _h, _n in c["needs"]}
+    fits = all(332 + sh.f13.size(nm)[0] + 6 + sh.f13.size("99/99")[0] <= 478 for nm in names)
+    ok(fits, "every need name and its have/n count share one detail row without overlapping")
+    ok(all(sh.f15.size(c["name"])[0] <= 184 for c in cells), "every CRAFT cell name fits the detail pane")
+    sh.render()
+    keep("cave-craft")
+    sg.mode = "overworld"
+
+
+
+def eye_window(sh, tx, ty):
+    """The pixels where the stalker's right eye sits (a 7x9 window, since
+    the eyes drift by EYE_BOB)."""
+    ex = int(tx * mt.TILE - sh.cam[0] + mt.TILE / 2 + 5)
+    ey = int(ty * mt.TILE - sh.cam[1] + mt.TILE / 2 - 4)
+    return [tuple(sh.surf.get_at((ex + dx, ey + dy)))[:3] for dy in range(-4, 5) for dx in range(-3, 4)
+            if 0 <= ex + dx < mt.W and 0 <= ey + dy < mt.H]
+
+
+def eye_pixel(sh, tx, ty, key=lambda q: q[0] - q[1]):
+    """The most eye-like pixel there (reddest by default)."""
+    return max(eye_window(sh, tx, ty), key=key, default=(0, 0, 0))
+
+
+def eye_count(sh, tx, ty):
+    return sum(1 for q in eye_window(sh, tx, ty) if q == mt.EYE_COL)
+
+
+def bfs_path(src, dst, cg):
+    """A player path through open cave tiles (for the shell-vs-no-shell walk)."""
+    prev = {src: None}
+    frontier = [src]
+    while frontier:
+        nxt = []
+        for x, y in frontier:
+            if (x, y) == dst:
+                out, cur = [], (x, y)
+                while cur:
+                    out.insert(0, cur)
+                    cur = prev[cur]
+                return out
+            for dx, dy in mt.DIRS4:
+                n = (x + dx, y + dy)
+                if n in prev or not mt.in_cave(n[1]):
+                    continue
+                if mt.tile_blocked(n[0], n[1], "none", cg.edits, cg.picked, cg.npc_tiles()):
+                    continue
+                prev[n] = (x, y)
+                nxt.append(n)
+        frontier = nxt
+    return None
+
+
+def cave_feel_render(sh, sg, lum, keep, stand, DRAWN):
+    """DARK CAVE step 3 - the look, sound and feel: the soft lantern with its
+    clear core, the per-bucket hole sprites, the flicker, the tension screen
+    (vignette, heartbeat, grain, tears), the stalker's shadow body and eyes,
+    the lunge flare, the PULSE wavefront, the HUD bars, and that none of it
+    moves the engine's random or the stalker's mulberry32."""
+    pygame = mt.pygame
+    cfx = sh.cfx
+    TILE = mt.TILE
+    sg.party = sg.party or [mt.make_mon("emberling", 12)]
+    sg.stalker, sg.pulses = None, 0
+
+    def frames_cave(n, dt=1 / 60):
+        for _ in range(n):
+            sh.update_cave_fx(dt)
+
+    # -- lantern: clear core, a radius per bucket, warm, soft, flicker ---------
+    core = mt.LANTERN["core_px"]
+    sizes = []
+    for b in range(mt.LANTERN["buckets"] + 1):
+        c = b * mt.LANTERN["max"] // mt.LANTERN["buckets"]
+        ok(mt.lantern_bucket(c) == b, "charge %d is lantern bucket %d" % (c, b))
+        hole, ring = sh.lamp_sprites(c)
+        r = hole.get_width() // 2
+        lit = int(round(mt.lantern_radius(c) * TILE))
+        sizes.append(r)
+        ok(r == mt.lamp_hole_radius(c) and hole.get_size() == (2 * r, 2 * r),
+           "bucket %d: the hole sprite is %dx%d (lit radius %d px, feathered to %d)" % (b, 2 * r, 2 * r, lit, r))
+        clear = all(hole.get_at((int(r + math.cos(a) * d), int(r + math.sin(a) * d)))[3] == 0
+                    for d in (0, TILE, core - 1) for a in [k * math.tau / 16 for k in range(16)])
+        ok(clear, "bucket %d: the %d px core is fully clear, so the 4 neighbours stay lit" % (b, core))
+        ok(all(ring.get_at((r + dx * TILE, r + dy * TILE))[3] == 0 for dx, dy in mt.DIRS4),
+           "bucket %d: the flicker ring never darkens the 4 neighbouring tiles" % b)
+        alphas = [hole.get_at((r + d, r))[3] for d in range(core + 1, r)]
+        ok(all(a0 <= a1 + 1 for a0, a1 in zip(alphas, alphas[1:])),
+           "bucket %d: the mask darkens monotonically from the core outward (soft, no ring)" % b)
+        inner = int(lit * mt.LAMP_FEATHER[0]) - 2
+        ok(hole.get_at((r + inner, r))[3] <= mt.LAMP_TINT_ALPHA + 1 and hole.get_at((r + r - 2, r))[3] >= mt.LAMP_DARK_ALPHA - 16,
+           "bucket %d: lit (tint only) to %d px, dark by %d px" % (b, inner, r - 2))
+        warm = hole.get_at((r + (core + inner) // 2, r))
+        ok(warm[0] > warm[2] + 40 and warm[3] > 0, "bucket %d: the lit ring carries the warm tint %s" % (b, tuple(warm)))
+    ok(all(a <= b for a, b in zip(sizes, sizes[1:])) and sizes[0] < sizes[-1],
+       "the hole grows with the bucket: %s" % sizes)
+    ok(len(sh._dark) == mt.LANTERN["buckets"] + 1, "one cached hole + ring per bucket, %d in all" % len(sh._dark))
+    ok(all(hole.get_width() < mt.W for hole, _ in sh._dark.values()),
+       "every hole sprite is smaller than the screen (no full-screen mask per bucket)")
+
+    stand(43, 30)
+    for charge, calm, want in ((10, False, True), (10, True, False), (60, False, False)):
+        mt.REDUCED_MOTION = calm
+        cfx.reset()
+        sg.lantern, sg.tension = charge, 0
+        seen = 0.0
+        for _ in range(120):
+            sh.update_cave_fx(1 / 60)
+            seen = max(seen, cfx.flicker * mt.lamp_flicker_amp(charge, calm))
+        mt.REDUCED_MOTION = False
+        ok((seen > 0.05) == want, "lantern %d%s: the flame %s (peak %.2f)"
+           % (charge, " + reduced motion" if calm else "", "flickers" if want else "holds steady", seen))
+
+    # -- tension screen: vignette, heartbeat, grain, tears ----------------------
+    ok([mt.vignette_alpha(t) for t in (0, 49, 50, 75, 100)] == [0, 0, mt.VIGNETTE_MIN, 75, mt.VIGNETTE_MAX],
+       "vignette alpha: 0 at t 0 and 49, %d at 50, 75 at 75, %d at 100"
+       % (mt.VIGNETTE_MIN, mt.VIGNETTE_MAX))
+    va = [mt.vignette_alpha(t) for t in range(0, 101)]
+    ok(all(a <= b for a, b in zip(va, va[1:])), "the vignette only deepens with tension")
+    ok(mt.heart_hz(74) == 0 and mt.heart_hz(75) == mt.HEART_HZ_MIN and mt.heart_hz(100) == mt.HEART_HZ_MAX,
+       "heartbeat: none below fear, %.1f Hz at fear, %.1f Hz at 100" % (mt.HEART_HZ_MIN, mt.HEART_HZ_MAX))
+    for t, calm in ((74, False), (75, False), (100, True)):
+        fx = mt.tension_fx(t, calm)
+        want = t >= 75 and not calm
+        ok(fx["pulse"] == fx["grain"] == fx["tears"] == want and (fx["heart"] > 0) == (t >= 75),
+           "tension %d%s: pulse/grain/tears %s, heartbeat sound %s"
+           % (t, " + reduced motion" if calm else "", "on" if want else "off", "on" if t >= 75 else "off"))
+
+    def screen(t, calm):
+        stand(43, 30)
+        sg.lantern, sg.tension, sg.stalker = 100, t, None
+        mt.REDUCED_MOTION = calm
+        try:
+            sh.render()
+        finally:
+            mt.REDUCED_MOTION = False
+        return sh.surf.copy()
+
+    corner, centre = pygame.Rect(40, 120, 16, 16), pygame.Rect(mt.W // 2 - 60, mt.H // 2 + 40, 16, 16)
+    s0, s50, s100 = screen(0, True), screen(50, True), screen(100, True)
+    ok(lum(s0, corner) > lum(s50, corner) > lum(s100, corner),
+       "the vignette darkens the edge with tension (%.1f > %.1f > %.1f)"
+       % (lum(s0, corner), lum(s50, corner), lum(s100, corner)))
+    ok(abs(lum(s0, centre) - lum(s100, centre)) < 3, "the vignette leaves the lit middle alone")
+    hud_r = pygame.Rect(*mt.HUD_LEAD_RECT).inflate(-8, -8)          # inside its rounded corners
+    ok(pygame.image.tobytes(s0.subsurface(hud_r), "RGB") == pygame.image.tobytes(s100.subsurface(hud_r), "RGB"),
+       "the vignette goes under the HUD: the lead box is identical at tension 0 and 100")
+    sh.surf.blit(s100, (0, 0))
+    keep("cave-vignette-100-reduced")
+
+    for t, calm, want in ((60, False, False), (80, False, True), (100, True, False), (74, False, False)):
+        mt.REDUCED_MOTION = calm
+        cfx.reset()
+        stand(43, 30)
+        sg.lantern, sg.tension = 100, t
+        g0 = (cfx.grain_x, cfx.grain_y)
+        grains, tears, beats0 = set(), 0, cfx.beats
+        for _ in range(300):                               # 5 s at 60 Hz
+            sh.update_cave_fx(1 / 60)
+            grains.add((cfx.grain_x, cfx.grain_y))
+            tears = max(tears, cfx.tears_live())
+        mt.REDUCED_MOTION = False
+        tag = "tension %d%s" % (t, " + reduced motion" if calm else "")
+        ok((len(grains - {g0}) > 0) == want, "%s: film grain %s (%d offsets)" % (tag, "rolls" if want else "never runs", len(grains)))
+        ok((tears > 0) == want, "%s: tear lines %s" % (tag, "appear" if want else "never appear"))
+        beats = cfx.beats - beats0
+        hz = mt.heart_hz(t)
+        ok(abs(beats - (1 + int(5 * hz))) <= 1 if hz else beats == 0,
+           "%s: %d heartbeats in 5 s (sound stays with reduced motion)" % (tag, beats))
+
+    # A forced tear shifts only its own rows, and never with reduced motion.
+    for calm in (False, True):
+        mt.REDUCED_MOTION = calm
+        cfx.reset()
+        stand(43, 30)
+        sg.lantern, sg.tension = 100, 90
+        sh.render()
+        before = sh.surf.copy()
+        cfx.tears[0][:] = [0.1, 200, 4, mt.TEAR_SHIFT]
+        sh.render()
+        after = sh.surf.copy()
+        cfx.tears[0][0] = 0.0
+        mt.REDUCED_MOTION = False
+        rows = {y for y in range(mt.H) if pygame.image.tobytes(before.subsurface((0, y, mt.W, 1)), "RGB")
+                != pygame.image.tobytes(after.subsurface((0, y, mt.W, 1)), "RGB")}
+        if calm:
+            ok(not rows, "reduced motion: no tear line, even when one is queued")
+        else:
+            ok(rows and rows <= set(range(200, 204)), "a tear shifts only its own rows (%s)" % sorted(rows))
+    mt.REDUCED_MOTION = False
+    cfx.reset()
+    stand(43, 30)
+    sg.lantern, sg.tension = 15, 95
+    frames_cave(40)
+    cfx.tears[0][:] = [0.1, 230, 4, mt.TEAR_SHIFT]
+    sh.render()
+    keep("cave-fear-grain-tears")
+    cfx.tears[0][0] = 0.0
+
+    # -- the stalker: a shadow under the dark, eyes over it -----------------------
+    def with_without(st, charge, tension=0):
+        stand(43, 30)
+        sg.lantern, sg.tension = charge, tension
+        sg.stalker = None
+        cfx.reset()
+        sh.render()
+        empty = sh.surf.copy()
+        sg.stalker = st
+        cfx.reset()
+        sh.render()
+        return empty, sh.surf.copy()
+
+    def max_gap(a, b, rect):
+        ra, rb = pygame.image.tobytes(a.subsurface(rect), "RGB"), pygame.image.tobytes(b.subsurface(rect), "RGB")
+        return max(abs(x - y) for x, y in zip(ra, rb))
+
+    def box(tx, ty):
+        return pygame.Rect(int(tx * TILE - sh.cam[0]) - 16, int(ty * TILE - sh.cam[1]) - 24, 64, 64).clip(
+            pygame.Rect(0, 0, mt.W, mt.H))
+
+    e, f = with_without(mt.new_stalker(39, 30), 0)
+    hidden = max_gap(e, f, box(39, 30))
+    ok(hidden <= 6, "out of the light (4 tiles, lantern 0) the patrolling body is hidden (max diff %d/255)" % hidden)
+    e, f = with_without(mt.new_stalker(44, 30), 100)
+    seen = max_gap(e, f, box(44, 30))
+    ok(seen >= 30, "in the light its shadowy body shows (max diff %d)" % seen)
+    keep("cave-stalker-in-light")
+    sense0 = mt.stalker_sense(100, 0)
+    for st, charge, want, tag in (
+            (dict(mt.new_stalker(38, 30), mode="hunt"), 0, "hunt", "hunting within sense"),
+            (dict(mt.new_stalker(43 - sense0 - 2, 30), mode="hunt"), 100, None, "hunting beyond sense"),
+            (dict(mt.new_stalker(38, 30), mode="patrol"), 0, None, "patrolling"),
+            (dict(mt.new_stalker(38, 30), stun=5), 0, "stun", "stunned")):
+        stand(43, 30)
+        sg.lantern, sg.tension, sg.stalker = charge, 0, st
+        cfx.reset()
+        ok(mt.stalker_eyes(st, (43, 30), charge, 0) == want, "%s: stalker_eyes is %s" % (tag, want))
+        sh.render()
+        c = eye_pixel(sh, st["x"], st["y"])
+        red = c[0] > 150 and c[1] < 120 and c[2] < 140
+        b_ = eye_pixel(sh, st["x"], st["y"], lambda q: q[2] - q[0])
+        blue = b_[2] > 120 and b_[2] > b_[0]
+        if want == "hunt":
+            ok(red, "%s: glowing red eyes read through the dark %s" % (tag, c))
+        elif want == "stun":
+            ok(not red and blue, "%s: the eyes are dimmed, not red %s" % (tag, b_))
+            keep("cave-stalker-stunned")
+        else:
+            ok(not red, "%s: no eyes %s" % (tag, c))
+    # Blink: the eye goes to a line, then opens again.
+    stand(43, 30)
+    sg.lantern, sg.tension, sg.stalker = 0, 0, dict(mt.new_stalker(38, 30), mode="hunt")
+    cfx.reset()
+    cfx.blink = mt.EYE_BLINK_TIME
+    sh.render()
+    shut = eye_count(sh, 38, 30)
+    cfx.blink = 0.0
+    sh.render()
+    opened = eye_count(sh, 38, 30)
+    ok(0 < shut < opened, "a blink narrows the eye to a line (%d -> %d red pixels)" % (shut, opened))
+    # Glide + trail: a hunting step slides the body and leaves an eye ghost.
+    cfx.reset()
+    sh.update_cave_fx(1 / 60)
+    sg.stalker = dict(sg.stalker, x=39)
+    sh.update_cave_fx(1 / 60)
+    mid = cfx.stalker_px(sg.stalker)
+    ok(38 * TILE + TILE / 2 < mid[0] < 39 * TILE + TILE / 2, "the body glides between tiles (x %.1f)" % mid[0])
+    ok(sum(1 for tr in cfx.trail if tr[2] > 0) == 1, "a hunting step leaves one fading eye ghost")
+    sh.render()
+    keep("cave-eyes-trail")
+    frames_cave(int(mt.TRAIL_TIME * 60) + 2)
+    ok(cfx.stalker_px(sg.stalker) == (39 * TILE + TILE / 2, 30 * TILE + TILE / 2)
+       and not any(tr[2] > 0 for tr in cfx.trail), "the glide settles on its tile and the trail fades")
+    mt.REDUCED_MOTION = True
+    cfx.reset()
+    sh.update_cave_fx(1 / 60)
+    sg.stalker = dict(sg.stalker, x=40)
+    sh.update_cave_fx(1 / 60)
+    mt.REDUCED_MOTION = False
+    ok(cfx.stalker_px(sg.stalker)[0] == 40 * TILE + TILE / 2 and not any(tr[2] > 0 for tr in cfx.trail),
+       "reduced motion: the body snaps to its tile with no trail")
+
+    # -- the lunge: one flare + jolt, then the cut; a confirm is held, not lost ----
+    real_db = sh.draw_battle
+    drew_battle = []
+    sh.draw_battle = lambda: (drew_battle.append(1), real_db())
+    confirms = []
+    real_confirm = sg.confirm
+    try:
+        stand(43, 30)
+        sg.lantern, sg.tension = 0, 90
+        sg.party = [mt.make_mon("pyrelash", 26)]
+        sg.stalker = dict(mt.new_stalker(42, 30), mode="hunt")
+        cfx.reset()
+        sh.wfx.reset()
+        sg.begin_hunt()
+        b = sg.battle
+        ok(sg.mode == "battle" and b.hunt and b.scare == "dark", "the lunge hands off to the hunt battle (hard cut)")
+        ok(cfx.lunge_age == 0.0 and sh.wfx.trauma >= mt.LUNGE_TRAUMA, "the lunge starts the flare and jolts the world")
+        q_before = [(s_["t"], s_.get("s")) for s_ in b.queue]
+        sh.render()
+        ok(not drew_battle, "during the flare the overworld stays on screen (the cut lands after it)")
+        keep("cave-lunge-flare")
+        sg.confirm = lambda: confirms.append(1)
+        sh.pending_confirm = True
+        flares = []
+        for _ in range(int(mt.LUNGE_TIME * 60) + 3):
+            flares.append(mt.lunge_flare(cfx.lunge_age))
+            sh.update_cave_fx(1 / 60)
+        rises = sum(1 for a, c in zip([0.0] + flares, flares) if c > a + 1e-9)
+        ok(rises == 1 and flares[0] == 1.0 and flares[-1] == 0.0,
+           "the lunge flashes exactly once and only fades (%d rise, %.2f -> %.2f)" % (rises, flares[0], flares[-1]))
+        ok(all(a >= c for a, c in zip(flares, flares[1:])), "the flare never re-brightens (no strobe)")
+        ok(cfx.lunge_age is None and confirms == [1] and not sh.pending_confirm,
+           "a confirm pressed during the flare is replayed once after it")
+        ok([(s_["t"], s_.get("s")) for s_ in b.queue] == q_before, "the flare never touched the battle queue")
+        sh.render()
+        ok(drew_battle, "after the flare the battle's dark frame is drawn")
+        sg.confirm = real_confirm
+        mt.REDUCED_MOTION = True
+        cfx.reset()
+        sh.wfx.reset()
+        sg.fx_world("lunge", 42, 30, None, {})
+        mt.REDUCED_MOTION = False
+        ok(cfx.lunge_age is None and sh.wfx.trauma == 0, "reduced motion: no flare, no jolt (the fade carries it)")
+    finally:
+        sh.draw_battle = real_db
+        sg.confirm = real_confirm
+        sg.battle, sg.mode = None, "overworld"
+
+    # -- the PULSE wavefront: bounded by range and by rock ----------------------
+    heard = []
+    real_sfx = cfx.sfx
+    cfx.sfx = lambda n: heard.append(n)
+    try:
+        for hit in (True, False):
+            stand(43, 30)
+            sg.lantern, sg.tension = 30, 0
+            sg.stalker = dict(mt.new_stalker(41, 30), stun=10) if hit else None
+            cfx.reset()
+            sh.wfx.reset()
+            del heard[:]
+            sg.fx_world("pulse", 43, 30, None, {"hit": hit, "auto": False})
+            r = cfx.ring
+            tiles = r["tiles"]
+            ok(tiles and all(d <= mt.PULSE["range"] and abs(x - 43) + abs(y - 30) <= d for x, y, d in tiles),
+               "pulse (%s): every ring tile is within %d steps by path" % ("hit" if hit else "miss", mt.PULSE["range"]))
+            ok(not any(mt.tile_blocked(x, y, "none", sg.edits, sg.picked, sg.npc_tiles()) for x, y, _ in tiles),
+               "pulse: the ring never lights rock (it stops at walls)")
+            ok(heard == (["pulse_hit"] if hit else ["pulse_miss"]), "pulse %s: its own sound %s"
+               % ("hit" if hit else "miss", heard))
+            ok((sh.wfx.live() > 0 and sh.wfx.trauma > 0) == hit, "pulse %s: sparks and a jolt only on a hit"
+               % ("hit" if hit else "miss"))
+            frames_cave(int(mt.PULSE_RING_TIME * 0.6 * 60))
+            sh.render()
+            ringed = sh.surf.copy()
+            keep("cave-pulse-%s" % ("hit" if hit else "miss"))
+            if not hit:
+                saved, cfx.ring = cfx.ring, None
+                sh.render()
+                plain = sh.surf.copy()
+                cfx.ring = saved
+                cam = sh.cam
+                allowed = [pygame.Rect(int(x * TILE - cam[0]), int(y * TILE - cam[1]), TILE, TILE) for x, y, _ in tiles]
+                outside = 0
+                for yy in range(0, mt.H, 2):
+                    for xx in range(0, mt.W, 2):
+                        if ringed.get_at((xx, yy)) != plain.get_at((xx, yy)) and \
+                                not any(a.collidepoint(xx, yy) for a in allowed):
+                            outside += 1
+                ok(outside == 0, "the PULSE ring draws only on its own tiles (%d stray pixels)" % outside)
+            frames_cave(int((mt.PULSE_RING_TIME + mt.PULSE_RING_FADE) * 60) + 2)
+            ok(cfx.ring is None, "pulse: the ring is gone after %.2f s" % (mt.PULSE_RING_TIME + mt.PULSE_RING_FADE))
+        # Next to rock the ring is cut short; in the open it is a full diamond.
+        wall_side = next(((x, y) for y in range(27, 37) for x in range(10, 80)
+                          if not mt.tile_blocked(x, y, "none", {}, set(), sg.npc_tiles())
+                          and mt.tile_blocked(x + 1, y, "none", {}, set(), sg.npc_tiles())), None)
+        reach = mt.cave_dist(wall_side, sg.edits, sg.picked, sg.npc_tiles(), roam=True)
+        cut = mt.pulse_ring(reach)
+        ok(len(cut) < 41, "beside rock at %s the ring covers %d of the 41 open-diamond tiles" % (wall_side, len(cut)))
+    finally:
+        cfx.sfx = real_sfx
+        sg.stalker = None
+        cfx.reset()
+
+    # -- HUD bars ----------------------------------------------------------------
+    cr = pygame.Rect(*mt.HUD_CAVE_RECT)
+    others = [pygame.Rect(8, 8, 150, 30), pygame.Rect(*mt.HUD_LEAD_RECT), pygame.Rect(*mt.HUD_MAT_RECT)]
+    bad = []
+    for c in (0, 1, 19, 20, 50, 99, 100):
+        for t in (0, 24, 25, 74, 75, 100):
+            hb = mt.cave_hud_bars(c, t)
+            rects = [pygame.Rect(*hb["lamp"])] + ([pygame.Rect(*hb["tension"])] if hb["tension"] else [])
+            if hb["lamp_fill"] != round(mt.HUD_CAVE_BAR_W * c / 100) or hb["low"] != (c < mt.HUD_LAMP_LOW):
+                bad.append(("lamp", c, hb["lamp_fill"]))
+            if (hb["tension"] is None) != (t < mt.HUD_TENSION_FROM) or hb["fear"] != (t >= 75) or \
+                    hb["label"] != ("FEAR!" if t >= 75 else "TENSION") or \
+                    (hb["tension"] and hb["tension_fill"] != round(mt.HUD_CAVE_BAR_W * t / 100)):
+                bad.append(("tension", t, hb["tension_fill"]))
+            if not all(cr.contains(r_) for r_ in rects) or any(r_.colliderect(o) for r_ in rects for o in others):
+                bad.append(("layout", c, t))
+            if len(rects) == 2 and rects[0].colliderect(rects[1]):
+                bad.append(("overlap", c, t))
+    ok(not bad, "cave_hud_bars: fills, FEAR! label, show-from-25 and layout hold for 42 states %s" % bad[:3])
+    f10 = sh.f10
+    hb = mt.cave_hud_bars(100, 100)
+    label_end = cr.x + 8 + max(f10.size("TENSION")[0], f10.size("FEAR!")[0], f10.size("LAMP")[0])
+    num_left = hb["lamp"][0] + mt.HUD_CAVE_BAR_W + 30 - f10.size("100%")[0]
+    pulse_left = cr.right - 22 - f10.size("PULSE")[0] // 2
+    ok(label_end < hb["lamp"][0] and hb["lamp"][0] + mt.HUD_CAVE_BAR_W < num_left and
+       hb["lamp"][0] + mt.HUD_CAVE_BAR_W + 30 < pulse_left and cr.right - 22 + f10.size("PULSE")[0] // 2 <= cr.right - 2,
+       "HUD text columns do not overlap: label to %d, bar %d-%d, number %d-%d, PULSE from %d (panel to %d)"
+       % (label_end, hb["lamp"][0], hb["lamp"][0] + mt.HUD_CAVE_BAR_W, num_left,
+          hb["lamp"][0] + mt.HUD_CAVE_BAR_W + 30, pulse_left, cr.right))
+    ok(hb["tension"][1] + f10.get_height() - 3 <= cr.bottom, "the TENSION row's text ends inside the panel")
+    for c, t in ((62, 40), (12, 88), (100, 10)):
+        stand(43, 30)
+        sg.lantern, sg.tension, sg.pulses = c, t, 2
+        sh.render()
+        hb = mt.cave_hud_bars(c, t)
+        lx, ly = hb["lamp"][0], hb["lamp"][1] + 3
+        fill_px = tuple(sh.surf.get_at((lx + hb["lamp_fill"] - 1, ly)))[:3]
+        empty_px = tuple(sh.surf.get_at((lx + hb["lamp_fill"] + 1, ly)))[:3] if hb["lamp_fill"] < mt.HUD_CAVE_BAR_W - 1 else None
+        want_fill = (240, 110, 60) if c < mt.HUD_LAMP_LOW else (255, 190, 90)
+        ok(fill_px == want_fill and (empty_px is None or empty_px == (57, 65, 77)),
+           "lamp %d%%: the bar is filled to %d px %s" % (c, hb["lamp_fill"], fill_px))
+        if hb["tension"]:
+            tx, ty = hb["tension"][0], hb["tension"][1] + 3
+            tp = tuple(sh.surf.get_at((tx + hb["tension_fill"] - 1, ty)))[:3]
+            ok(tp == ((236, 64, 76) if hb["fear"] else (160, 120, 230)), "tension %d: the bar is filled %s" % (t, tp))
+        else:
+            ty = mt.HUD_CAVE_RECT[1] + mt.HUD_CAVE_ROWS[1] + 3
+            ok(tuple(sh.surf.get_at((hb["lamp"][0] + 10, ty)))[:3] == (29, 39, 51),
+               "tension %d: no TENSION bar below %d" % (t, mt.HUD_TENSION_FROM))
+        keep("cave-hud-%d-%d" % (c, t))
+
+    # -- none of it touches the engine random or the stalker's mulberry32 ---------
+    def walk(with_shell):
+        random.seed(2024)
+        cg = cave_game(43, 30)
+        cg.lantern, cg.tension, cg.pulses = 8, 70, 3
+        cg.sync_cave()
+        cg.stalker = mt.new_stalker(38, 30)
+        if with_shell:
+            sh.game, cfx.game = cg, cg
+            cg.fx_world, cg.sfx = sg.fx_world, sh.sfx.play
+            cfx.reset()
+        there = bfs_path((43, 30), (7, 33), cg) or []
+        path = there + (bfs_path((7, 33), (43, 30), cg) or [])[1:]
+        out = []
+        try:
+            for x, y in path[1:]:
+                if cg.mode != "overworld":
+                    break
+                p = cg.player
+                d = ("up" if y < p.ty else "down" if y > p.ty else "left" if x < p.tx else "right")
+                held = dict(up=False, down=False, left=False, right=False, run=False)
+                held[d] = True
+                for k in range(40):
+                    cg.update_overworld(1 / 60, held)
+                    held[d] = False if k == 0 else held[d]
+                    if with_shell:
+                        sh.wfx.update(1 / 60)
+                        sh.update_cave_fx(1 / 60)
+                        sh.render()
+                    if not cg.player.moving:
+                        break
+                st = cg.stalker
+                out.append((cg.player.tx, cg.player.ty, cg.mode, cg.lantern, cg.tension, cg.pulses,
+                            None if st is None else (st["x"], st["y"], st["mode"], st["stun"], st["tick"])))
+            return out, random.getstate(), cg.cave_rng()
+        finally:
+            if with_shell:
+                sh.game, cfx.game = sg, sg
+                cfx.reset()
+
+    plain, rs_plain, next_plain = walk(False)
+    shelled, rs_shell, next_shell = walk(True)
+    ok(len(plain) > 10 and plain == shelled,
+       "a %d-step cave walk (hunts, PULSEs, renders every frame) leaves the same trace with the shell running"
+       % len(plain))
+    ok(rs_plain == rs_shell, "the shell never draws from the engine's global random")
+    ok(next_plain == next_shell, "the shell never draws from the stalker's mulberry32 (next %.6f)" % next_plain)
+    ok(any(row[5] < 3 for row in plain) or any(row[2] != "overworld" for row in plain),
+       "the walk exercised the PULSE or the hunt (pulses left %s)" % sorted({row[5] for row in plain}))
+    stand(43, 30)
+    sg.lantern, sg.tension, sg.stalker, sg.pulses = 100, 0, None, 0
+    sg.mode = "overworld"
+
+
+
+def render_section():
+    """Wrapped so a shell crash is reported as a failure, not a traceback
+    that skips PARITY, and so the monkeypatches below are always undone."""
+    sh = mt.Shell()
+    sg = sh.game
+    # Weather draws behind the HUD and never consumes gameplay randomness.
+    sg.party = [mt.make_mon('emberling', 10)]
+    sg.start_battle(mt.make_mon('thornmane', 10))
+    wb = sg.battle
+    before_rng = random.getstate()
+    if sh.sfx.ok:
+        for weather in ('rain','static'):
+            sh.sfx.weather_loop(weather)
+            snd = sh.sfx._weather_sound
+            ok(abs(snd.get_length()-2)<.01, '%s weather loop is two seconds at the actual mixer rate' % weather)
+            sh.sfx.weather_loop(None)
+            ok(sh.sfx._weather_sound is None, '%s weather stops on leaving battle' % weather)
+    weather_pixels = {}
+    for cid in mt.CONDITIONS:
+        for time in ('day','dusk','dawn','night'):
+            wb.condition = cid
+            wb.scene = dict(layout=123,time=time,weather=mt.SCENE_WEATHER.get(cid,'none'),camera=0)
+            sh.draw_battle()
+            weather_pixels[(cid,time)] = (tuple(sh.surf.get_at((0,0)))[:3], tuple(sh.surf.get_at((30,34))), tuple(sh.surf.get_at((360,254))))
+            ok(True, 'weather frame %s/%s draws' % (cid,time))
+    ok(sum(weather_pixels[('clear','night')][0]) < sum(weather_pixels[('clear','day')][0]), 'night sky darker than day')
+    ok(weather_pixels[('clear','day')][1:] == weather_pixels[('rain','night')][1:], 'weather leaves HP panels unchanged')
+    wb.scene = dict(layout=123,time='night',weather='rain',camera=0)
+    sh.draw_battle()
+    rain_count = sum(tuple(sh.surf.get_at((x,y)))[:3] == (170,200,235) for x in range(mt.W) for y in range(125,240))
+    ok(rain_count >= 20, 'visible rain above the platforms (%s pixels)' % rain_count)
+    for weather, cfg in mt.WEATHER_2D.items():
+        scene = dict(layout=123,time='day',weather=weather,camera=0)
+        pool = mt.weather_2d_step(None,scene,0)
+        ok(len(pool['parts']) == cfg['n'], '%s pool bounded' % weather)
+        ok(mt.weather_2d_step(pool,scene,.1,True) == pool, '%s reduced motion freezes' % weather)
+        moved = mt.weather_2d_step(pool,scene,.1)
+        ok(all(0 <= p[0] < 640 and 0 <= p[1] < 360 for p in moved['parts']), '%s wraps above text' % weather)
+    ok(random.getstate() == before_rng, 'weather draw/step never touch engine RNG')
+    wb.scene = dict(mt.DEFAULT_SCENE)
+    wb.condition = 'clear'
+    sg.battle = None
+    sg.mode = 'title'
+    ok(sh.surf.get_size() == (mt.W, mt.H), "shell draws into a %dx%d surface" % (mt.W, mt.H))
+    ok(sh.window.get_size() == (mt.W * mt.SCALE, mt.H * mt.SCALE),
+       "the window is the surface scaled by SCALE")
+
+
+    def snap(rect=None):
+        s = sh.surf if rect is None else sh.surf.subsurface(rect)
+        return pygame.image.tobytes(s, "RGB")
+
+
+    def keep(name):
+        if FRAME_DIR:
+            os.makedirs(FRAME_DIR, exist_ok=True)
+            pygame.image.save(sh.surf, os.path.join(FRAME_DIR, name + ".png"))
+
+
+    def busy(surf, need=12):
+        """True when a frame carries real content rather than one flat fill."""
+        raw = pygame.image.tobytes(surf, "RGB")
+        seen = {raw[i:i + 3] for i in range(0, len(raw), 3 * 61)}
+        return len(seen) >= need
+
+
+    def lum(surf, rect):
+        return sum(pygame.transform.average_color(surf, rect)[:3]) / 3
+
+
+    def active(j):
+        return sum(1 for p in j.parts if p[4] > 0)
+
+
+    BOTTOM_PANEL = pygame.Rect(16, mt.H - 118, mt.W - 32, 102)   # never shaken
+    MY_HP_BOX = pygame.Rect(mt.W - 284, 248, 260, 66)
+    FOE_HP_BOX = pygame.Rect(24, 28, 260, 52)
+
+    # Every draw_creature call made by the shell, so frames can be asserted on
+    # what they drew (the shell looks the name up at call time).
+    DRAWN = []
+
+
+    def _recording_draw_creature(surf, sid, cx, cy, size, flip=False, back_view=False, t=0.0):
+        DRAWN.append((sid, flip, back_view))
+        return _real_draw_creature(surf, sid, cx, cy, size, flip, back_view, t)
+
+
+    mt.draw_creature = _recording_draw_creature
+
+    # -- audio: synthesised PCM, or a clean no-op without a mixer --------------
+    ok(isinstance(sh.sfx.ok, bool), "Sfx reports whether a mixer opened")
+    sfx_errors = []
+    for name in mt.Sfx.SPEC:
+        try:
+            sh.sfx.play(name)
+        except Exception as e:                     # noqa: BLE001
+            sfx_errors.append("%s: %r" % (name, e))
+    ok(not sfx_errors, "every Sfx.SPEC sound plays without raising: %s" % sfx_errors[:3])
+    craft_spec = mt.Sfx.SPEC.get("craft", [])
+    ok(len(craft_spec) == 2 and craft_spec[1][1] > craft_spec[0][1]
+       and abs(max(d + dur for d, _, dur, _, _, _ in craft_spec) - 0.18) < 0.03,
+       "the 'craft' ding is two rising notes, about 0.18 s (its buffer length is checked below)")
+    if sh.sfx.ok:
+        built = {k[0] for k in sh.sfx.cache}
+        ok(built == set(mt.Sfx.SPEC), "every sound was synthesised into the cache (missing %s)"
+           % sorted(set(mt.Sfx.SPEC) - built))
+        for (name, mul), snd in sh.sfx.cache.items():
+            span = max(d + dur for d, _, dur, _, _, _ in mt.Sfx.SPEC[name]) + 0.02
+            ok(abs(snd.get_length() - span) < 0.01,
+               "%s PCM is %.3fs, its note list spans %.3fs" % (name, snd.get_length(), span))
+        mt.FX_RNG.seed(3)
+        for _ in range(40):
+            sh.sfx.play("hit")
+        muls = {mul for (name, mul) in sh.sfx.cache if name == "hit"}
+        ok(muls == set(mt.Sfx.PITCH_STEPS),
+           "repeated hits use all three pitch variants %s, saw %s" % (mt.Sfx.PITCH_STEPS, muls))
+        ok(all(abs(m - 1) <= mt.HIT_PITCH_JITTER + 1e-9 for m in muls),
+           "hit pitch jitter stays within +-%d%%" % (mt.HIT_PITCH_JITTER * 100))
+        ok(all(mul == 1.0 for (name, mul) in sh.sfx.cache if name not in mt.Sfx.PITCHED),
+           "only hit sounds are pitch-jittered")
+        fmt = pygame.mixer.get_init()
+        ok((sh.sfx.rate, sh.sfx.channels) == (fmt[0], fmt[2]),
+           "Sfx builds PCM for the mixer format actually open %s" % (fmt,))
+        # pygame.init() opens the mixer at 44100 stereo, after which mixer.init()
+        # is a no-op: PCM built for 22050 mono then plays 4x fast.  Reopen it
+        # that way and check a fresh Sfx still produces sounds of the right length.
+        pygame.mixer.quit()
+        pygame.mixer.init(44100, -16, 2)
+        wide = mt.Sfx()
+        span = max(d + dur for d, _, dur, _, _, _ in mt.Sfx.SPEC["faint"]) + 0.02
+        snd = wide._build(mt.Sfx.SPEC["faint"]) if wide.ok else None
+        ok(snd is not None and abs(snd.get_length() - span) < 0.01,
+           "with the mixer already open at 44100 stereo, 'faint' still lasts %.2fs (%s)"
+           % (span, snd and round(snd.get_length(), 3)))
+        pygame.mixer.quit()
+        pygame.mixer.init(mt.Sfx.RATE, -16, 1, 512)
+    else:
+        print("  note: no mixer under this audio driver; only the no-op path is checked")
+    mute = mt.Sfx.__new__(mt.Sfx)
+    mute.cache, mute.ok = {}, False
+    mute.play("hit")
+    mute.play("no-such-sound")
+    ok(mute.cache == {}, "with no mixer, play() builds nothing and does not raise")
+
+    # -- sprites: every species, front/back, flipped/not ------------------------
+    kinds_drawn = set()
+    for sid, sp in mt.SPECIES.items():
+        masks = {}
+        raws = {}
+        for back in (False, True):
+            for flip in (False, True):
+                surf = pygame.Surface((200, 200), pygame.SRCALPHA)
+                surf.fill((0, 0, 0, 0))
+                blank = pygame.image.tobytes(surf, "RGBA")
+                try:
+                    mt.draw_creature(surf, sid, 100, 110, 80, flip, back, 0.7)
+                    err = None
+                except Exception as e:             # noqa: BLE001
+                    err = e
+                tag = "%s %s%s" % (sid, "back" if back else "front", " flipped" if flip else "")
+                ok(err is None, "draw_creature(%s) raised %r" % (tag, err))
+                if err:
+                    continue
+                raw = pygame.image.tobytes(surf, "RGBA")
+                # Threshold 127 skips the 56-alpha ground shadow: only body counts.
+                m = pygame.mask.from_surface(surf, 127)
+                ok(raw != blank and m.count() > 600,
+                   "%s painted a body (%d opaque px)" % (tag, m.count()))
+                bound = surf.get_bounding_rect(1)
+                ok(pygame.Rect(0, 0, 200, 200).contains(bound) and bound.width < 200,
+                   "%s stays inside its box (%s)" % (tag, bound))
+                masks[(back, flip)] = m
+                raws[(back, flip)] = raw
+        if len(masks) == 4:
+            kinds_drawn.add(sp["art"]["kind"])
+            for back in (False, True):
+                a, b = masks[(back, False)], masks[(back, True)]
+                ca, cb = a.centroid()[0], b.centroid()[0]
+                ok(abs((ca - 99.5) + (cb - 99.5)) <= 3,
+                   "%s %s: flip mirrors the sprite (centroid x %d vs %d)"
+                   % (sid, "back" if back else "front", ca, cb))
+                ok(abs(a.count() - b.count()) <= a.count() * 0.05,
+                   "%s: flipping keeps the same body area (%d vs %d)" % (sid, a.count(), b.count()))
+            ok(raws[(False, False)] != raws[(True, False)],
+               "%s: the back view differs from the front view (no eyes)" % sid)
+    all_kinds = {sp["art"]["kind"] for sp in mt.SPECIES.values()}
+    # Pickajoo now uses the rodent art family in place of the former spark sprite.
+    ok(kinds_drawn == all_kinds and len(all_kinds) == 12,
+       "all 12 art kinds drew cleanly (%d: missing %s)"
+       % (len(kinds_drawn), sorted(all_kinds - kinds_drawn)))
+
+    # Animation time actually animates the kinds that bob or spin.
+    moved = 0
+    for sid in mt.SPECIES:
+        frames = []
+        for t in (0.0, 0.5):
+            surf = pygame.Surface((200, 200), pygame.SRCALPHA)
+            mt.draw_creature(surf, sid, 100, 110, 80, False, False, t)
+            frames.append(pygame.image.tobytes(surf, "RGBA"))
+        moved += frames[0] != frames[1]
+    ok(moved >= 3, "anim time moves at least the animated kinds (%d species changed)" % moved)
+
+    # -- layout: the shaken arena can never reach the HP boxes ------------------
+    ok(180 + 60 + mt.SHAKE_MAX < MY_HP_BOX.top,
+       "foe platform bottom at full shake (%d) clears the HP box at y=%d"
+       % (240 + mt.SHAKE_MAX, MY_HP_BOX.top))
+    ok(int(mt.W * 0.26) - 150 + 300 + mt.SHAKE_MAX < MY_HP_BOX.left,
+       "player platform right edge at full shake clears the HP box")
+    overlaps = []
+    for sid in mt.SPECIES:
+        for ox in (-mt.SHAKE_MAX, mt.SHAKE_MAX):
+            for oy in (-mt.SHAKE_MAX, mt.SHAKE_MAX):
+                for side in ("foe", "mine"):
+                    surf = pygame.Surface((mt.W, mt.H), pygame.SRCALPHA)
+                    if side == "foe":
+                        mt.draw_creature(surf, sid, mt.W * 0.66 + ox, 178 + oy, 78, True, False, 0.3)
+                    else:
+                        mt.draw_creature(surf, sid, mt.W * 0.26 + ox, 306 + oy, 92, False, True, 0.3)
+                    r = surf.get_bounding_rect(1)
+                    if r.colliderect(MY_HP_BOX) or r.colliderect(FOE_HP_BOX):
+                        overlaps.append((sid, side, ox, oy, tuple(r)))
+    ok(not overlaps, "no sprite at +-SHAKE_MAX overlaps an HP box: %s" % overlaps[:3])
+
+    # -- tiles: every glyph, every region band ---------------------------------
+    TILE_LOG = []
+    _real_draw_tile = sh.draw_tile
+
+
+    def _recording_draw_tile(t, sx, sy, gx, gy, time):
+        TILE_LOG.append((t, gx, gy))
+        return _real_draw_tile(t, sx, sy, gx, gy, time)
+
+
+    sh.draw_tile = _recording_draw_tile
+
+
+    def band_of(gy):
+        if mt.in_cave(gy):
+            return "cave"
+        if mt.RUINS_BAND[0] <= gy <= mt.RUINS_BAND[1]:
+            return "ruins"
+        if mt.ROCK_BAND[0] <= gy <= mt.ROCK_BAND[1]:
+            return "rock"
+        return "normal"
+
+
+    def stand(x, y, mode="overworld"):
+        p = sg.player
+        p.tx, p.ty, p.px, p.py, p.moving = x, y, x * 32, y * 32, False
+        sg.mode, sg.battle, sg.fade, sg.fade_dir = mode, None, 0.0, 0
+
+
+    sg.party = [mt.make_mon("emberling", 12)]
+    sg.picked = set()
+    sg.toast_t = 0
+    first_at = {}
+    for y, row in enumerate(mt.MAP):
+        for x, ch in enumerate(row):
+            first_at.setdefault(ch, (x, y))
+            first_at.setdefault((ch, band_of(y)), (x, y))
+    render_errors = []
+    for key, (x, y) in sorted(first_at.items(), key=str):
+        stand(x, y)
+        try:
+            sh.render()
+        except Exception as e:                     # noqa: BLE001
+            render_errors.append("%s at %d,%d: %r" % (key, x, y, e))
+    for y1, y2, name in mt.REGIONS:
+        stand(43, (y1 + y2) // 2)
+        try:
+            sh.render()
+            ok(busy(sh.surf), "overworld frame in %s has content" % name)
+            keep("overworld-" + name.lower().replace(" ", "-"))
+        except Exception as e:                     # noqa: BLE001
+            render_errors.append("%s: %r" % (name, e))
+    ok(not render_errors, "overworld renders over every glyph and region: %s" % render_errors[:3])
+    glyphs_drawn = {t for t, _, _ in TILE_LOG}
+    ok(glyphs_drawn >= set("".join(mt.MAP)),
+       "every map glyph was drawn at least once (missing %s)"
+       % sorted(set("".join(mt.MAP)) - glyphs_drawn))
+    combos = {(t, band_of(gy)) for t, _, gy in TILE_LOG}
+    for combo in ((".", "rock"), ("#", "rock"), ("B", "ruins"), ("c", "cave"), ("C", "cave")):
+        ok(combo in combos, "drew %r inside the %s band" % combo)
+    bands_seen = {band_of(gy) for _, _, gy in TILE_LOG}
+    ok(bands_seen == {"cave", "ruins", "rock", "normal"}, "camera visited every band %s" % bands_seen)
+
+
+    def tile_img(t, gx, gy, time=0.0):
+        sh.surf.fill((255, 0, 255))
+        _real_draw_tile(t, 0, 0, gx, gy, time)
+        return sh.surf.subsurface(pygame.Rect(0, 0, mt.TILE, mt.TILE)).copy()
+
+
+    def colours(img):
+        raw = pygame.image.tobytes(img, "RGB")
+        return {raw[i:i + 3] for i in range(0, len(raw), 3)}
+
+
+    FALLBACK = {bytes((90, 165, 87))}
+    MAGENTA = bytes((255, 0, 255))
+    for ch in sorted(set("".join(mt.MAP))):
+        x, y = first_at[ch]
+        cols = colours(tile_img(ch, x, y))
+        ok(MAGENTA not in cols, "glyph %r covers its whole tile" % ch)
+        if ch != ".":
+            ok(cols != FALLBACK, "glyph %r has its own art, not the fallback square" % ch)
+
+    # The three bands that redraw tiles really do draw them differently.
+    ry = mt.RUINS_BAND[0]
+    ny = 104                                          # CEDAR TOWN, ordinary houses
+    rx = next(x for x in range(mt.MAP_W) if (x + ry) % 3 == 0)
+    nx_ = next(x for x in range(mt.MAP_W) if (x + ny) % 3 == 0)
+    WINDOW = bytes((201, 230, 255))
+    ok(WINDOW in colours(tile_img("B", nx_, ny)), "a town building has a window")
+    ok(WINDOW not in colours(tile_img("B", rx, ry)), "a ruins pillar never has a window")
+    rk = mt.ROCK_BAND[0]
+    ok(bytes((44, 107, 51)) in colours(tile_img("#", 0, 104)) or
+       bytes((39, 94, 45)) in colours(tile_img("#", 0, 104)), "outside the pass # is a tree")
+    rock_hash = colours(tile_img("#", 0, rk))
+    ok(not ({bytes((44, 107, 51)), bytes((39, 94, 45))} & rock_hash) and
+       bytes((148, 140, 124)) in rock_hash, "inside ROCK_BAND # is a boulder on scree")
+    ok(colours(tile_img(".", 5, rk)) & {bytes((148, 140, 124)), bytes((158, 150, 134))} and
+       not colours(tile_img(".", 5, rk)) & {bytes((90, 165, 87)), bytes((99, 172, 94))},
+       "inside ROCK_BAND . is scree, not lawn")
+    ok(pygame.image.tobytes(tile_img(",", 3, 95, 0.0), "RGB") !=
+       pygame.image.tobytes(tile_img(",", 3, 95, 0.4), "RGB"), "tall grass sways over time")
+    ok(pygame.image.tobytes(tile_img("~", 3, 70, 0.0), "RGB") !=
+       pygame.image.tobytes(tile_img("~", 3, 70, 0.6), "RGB"), "water ripples over time")
+
+    # Cave darkness: the lantern hole stays lit, everything past it goes black.
+    cx_, cy_ = first_at[("c", "cave")]
+    stand(cx_, cy_)
+    sh.render()
+    dark_frame = sh.surf.copy()
+    keep("overworld-cave-dark")
+    _real_dark = sh.draw_cave_dark
+    sh.draw_cave_dark = lambda x, y: None
+    sh.render()
+    lit_frame = sh.surf.copy()
+    sh.draw_cave_dark = _real_dark
+    cam = sh.cam
+    px_ = int(sg.player.px - cam[0] + mt.TILE / 2)
+    py_ = int(sg.player.py - cam[1] + mt.TILE / 2)
+    far = pygame.Rect(mt.W - 40, mt.H - 40, 40, 40) if px_ < mt.W / 2 else pygame.Rect(0, mt.H - 40, 40, 40)
+    ok(lum(dark_frame, far) < 20 and lum(lit_frame, far) > lum(dark_frame, far) + 15,
+       "CAVE_BAND darkens the far corner (%.0f lit vs %.0f dark)"
+       % (lum(lit_frame, far), lum(dark_frame, far)))
+    hole = pygame.Rect(px_ + 14, py_ - 4, 8, 8)
+    ok(abs(lum(dark_frame, hole) - lum(lit_frame, hole)) < 6,
+       "the lantern radius around the player stays lit")
+    stand(43, 104)
+    sh.render()
+    ok(lum(sh.surf, pygame.Rect(0, mt.H - 40, 40, 40)) > 60, "outside the cave nothing is darkened")
+
+    # Collected item balls draw as ground.
+    ox_, oy_ = first_at["o"]
+    stand(ox_, oy_ + 1)
+    TILE_LOG.clear()
+    sh.render()
+    ok(("o", ox_, oy_) in TILE_LOG, "an uncollected item ball draws as 'o'")
+    sg.picked.add((ox_, oy_))
+    TILE_LOG.clear()
+    sh.render()
+    cave_items = [p for p in mt.ITEMS if mt.in_cave(p[1])]
+    ok(len(cave_items) == 3 and all(mt.picked_ground(*p) == "c" for p in cave_items),
+       "every collected cave ball (incl. the GEODE's) leaves cave floor, not lawn: %s" % cave_items)
+    ok(mt.picked_ground(56, 100) == "." and mt.picked_ground(50, 51) == ".",
+       "a collected ball on grass or scree leaves plain ground")
+    ok((mt.picked_ground(ox_, oy_), ox_, oy_) in TILE_LOG and ("o", ox_, oy_) not in TILE_LOG,
+       "a collected item ball draws as plain ground")
+    sg.picked = set()
+
+    # Sandbox overlay: a mined boulder draws as scree, a built wall as W.
+    bx_, by_ = 33, 46
+    stand(bx_ + 1, by_)
+    sg.edits = {(bx_, by_): ".", (bx_ + 1, by_ - 1): mt.WALL}
+    TILE_LOG.clear()
+    sh.render()
+    ok((".", bx_, by_) in TILE_LOG and ("#", bx_, by_) not in TILE_LOG,
+       "a mined boulder draws as ground")
+    ok((mt.WALL, bx_ + 1, by_ - 1) in TILE_LOG, "a built wall draws as W")
+    keep("sandbox-edited")
+    wall_img = colours(tile_img(mt.WALL, bx_ + 1, by_ - 1))
+    ok(MAGENTA not in wall_img, "the WALL glyph covers its whole tile")
+    ok(wall_img != colours(tile_img("#", bx_, by_)) and wall_img != colours(tile_img(".", bx_, by_)),
+       "a WALL looks unlike both a boulder and scree")
+    ok(mt.MAP[by_][bx_] == "#", "drawing the overlay left MAP alone")
+    sg.edits = {}
+    sh.draw_tile = _real_draw_tile
+
+    # -- modes: every screen render() knows ------------------------------------
+    MODES_RENDERED = set()
+
+
+    def show(name):
+        sh.render()
+        MODES_RENDERED.add(sg.mode)
+        keep(name)
+        return snap()
+
+
+    def bag_shop_render():
+        """The overworld BAG, the party picker, the CENTRE shop (every H door)
+        and the polished battle BAG list: input flows, and every string they
+        draw stays inside its panel."""
+        texts = []
+        icons = []                      # (icon id, rect, index of the next text drawn)
+        real_text = sh.text
+        real_icon = sh.list_icon
+
+        def rec_text(s, x, y, font, color=mt.INK, align="left"):
+            r = real_text(s, x, y, font, color, align)
+            texts.append((str(s), r.copy()))
+            return r
+
+        def rec_icon(iid, x, y, h):
+            r = real_icon(iid, x, y, h)
+            icons.append((iid, r.copy(), len(texts)))
+            return r
+        sh.text = rec_text
+        sh.list_icon = rec_icon
+        try:
+            _bag_shop_render(texts, icons)
+        finally:
+            sh.text = real_text
+            del sh.list_icon            # back to the class method
+            sg.mode, sg.battle, sg.shop, sg.bag_pick, sg.dialogue = "overworld", None, None, None, None
+            sg.bag, sg.coins, sg.balls = {}, mt.START_COINS, 20
+
+
+    def _bag_shop_render(texts, icons):
+        inner = lambda r: pygame.Rect(*r).inflate(-8, -8)       # inside the panel's border
+
+        def drawn(name, rect, tag, need=1):
+            """Render the frame (and keep it), then redraw only this screen's
+            panel and check every string it draws lies inside ``rect``."""
+            show(name)
+            only = (sh.draw_bag_pick if rect == mt.BAG_PICK_RECT else
+                    sh.draw_bag if sg.mode == "bag" else sh.draw_shop)
+            del texts[:]
+            del icons[:]
+            only()
+            mine = list(texts)
+            bad = [(s, tuple(r)) for s, r in mine if not inner(rect).contains(r)]
+            ok(len(mine) >= need and not bad, "%s: %d strings, all inside %s (outside: %s)"
+               % (tag, len(mine), tuple(rect), bad[:3]))
+            return [s for s, _r in mine], len(mine)
+
+        def cue_px(x, y):
+            return tuple(sh.surf.get_at((x, y)))[:3] == mt.CUE_COL
+
+        def icon_px_bad(iid, r):
+            """Opaque pixels of the 1x icon that the surface does not show at r."""
+            img = sh.icon_surf(iid, 1)
+            return sum(1 for py in range(16) for px in range(16) if img.get_at((px, py))[3]
+                       and tuple(sh.surf.get_at((r.x + px, r.y + py)))[:3] != tuple(img.get_at((px, py)))[:3])
+
+        def row_rects(x0, y0, w0, rh, n):
+            return [pygame.Rect(x0, y0 + j * rh, w0, rh - 2) for j in range(n)]
+
+        def icons_ok(tag, rects, n_want, coins_in=None):
+            """Chunk 5: every list icon sits inside a row rect and shows its table
+            pixels; the name starts at or past its right edge + 4 px, about level
+            with it, and the next string on the row starts 4 px past the name.
+            With coins_in, exactly one COINS icon lies inside that rect, its text
+            at or past its right edge + 4 px."""
+            got = [(iid, r, ti) for iid, r, ti in icons if iid != "coins"]
+            bad = []
+            for iid, r, ti in got:
+                name, nr = texts[ti]
+                after = texts[ti + 1][1] if ti + 1 < len(texts) else None
+                if (not any(rr.contains(r) for rr in rects) or nr.x < r.right + 4
+                        or abs(nr.centery - r.centery) > 3 or icon_px_bad(iid, r)
+                        or (after is not None and after.y < nr.bottom and after.x < nr.right + 4)):
+                    bad.append((iid, tuple(r), name, tuple(nr)))
+            ok(len(got) == n_want and not bad,
+               "%s: %d row icons (want %d), inside their rows, name 4+ px right (bad: %s)"
+               % (tag, len(got), n_want, bad[:3]))
+            if coins_in is not None:
+                cs = [(r, ti) for iid, r, ti in icons if iid == "coins"]
+                good = [r for r, ti in cs if inner(coins_in).contains(r) and not icon_px_bad("coins", r)
+                        and texts[ti][0].startswith("COINS ") and texts[ti][1].x >= r.right + 4
+                        and abs(texts[ti][1].centery - r.centery) <= 3]
+                ok(len(cs) == 1 and len(good) == 1,
+                   "%s: the COINS icon sits inside %s, the text 4+ px right of it" % (tag, tuple(coins_in)))
+            return set(iid for iid, _r, _ti in got)
+
+        def bag_window():
+            """(number of icon rows, their kinds) in the BAG's visible window."""
+            rows_ = mt.bag_rows(sg.balls, sg.bag, sg.materials)
+            ent_ = mt.bag_entries(rows_)
+            top_ = mt.list_top(len(rows_), ent_[max(0, min(sg.bag_cursor, len(ent_) - 1))], mt.BAG_ROWS)
+            win = [r_[0] for r_ in rows_[top_:top_ + mt.BAG_ROWS] if r_[0] in ("item", "mat", "loot")]
+            return len(win), set(win)
+
+        bag_row_rects = row_rects(mt.BAG_RECT[0] + 16, mt.BAG_RECT[1] + 56, mt.BAG_RECT[2] - 32,
+                                  mt.BAG_ROW_H, mt.BAG_ROWS)
+        shop_row_rects = row_rects(mt.SHOP_RECT[0] + 16, mt.SHOP_RECT[1] + 56, mt.SHOP_RECT[2] - 32,
+                                   mt.SHOP_ROW_H, mt.SHOP_ROWS)
+        bbag_row_rects = row_rects(28, mt.H - 94 - 3, mt.BBAG_SPLIT_X - 40, mt.BBAG_ROW_H, mt.BBAG_ROWS)
+        kinds_seen = set()
+
+        mons = [mt.make_mon(s, lv) for s, lv in (("emberling", 12), ("nibbit", 8), ("dripling", 9),
+                                                 ("pyrelash", 40), ("sprigling", 5), ("ironclad", 24))]
+        stand(12, 107)
+        sg.party = mons
+        sg.toast_t = 0
+        bx, by, bw, bh = mt.BAG_RECT
+        ok(bx >= 0 and by >= 66 and bx + bw <= mt.W and by + bh <= 420,
+           "BAG_RECT %s sits below the HUD (y=66) and above the toast (y=420)" % (mt.BAG_RECT,))
+        ok(pygame.Rect(*mt.BAG_RECT).inflate(-8, -8).contains(pygame.Rect(*mt.BAG_PICK_RECT)),
+           "the party picker sits inside the BAG panel")
+        ok(by + 56 + mt.BAG_ROWS * mt.BAG_ROW_H + 4 + 8 + 2 * 16 <= by + bh - 28,
+           "8 BAG rows, the rule and a 2-line description end above the message line")
+        ok(mt.BAG_PICK_RECT[1] + 40 + 5 * 30 + 24 <= mt.BAG_PICK_RECT[1] + mt.BAG_PICK_RECT[3] - 4,
+           "six party rows fit inside the picker")
+        sx, sy, sw, sh_ = mt.SHOP_RECT
+        ok(sy >= 66 and sy + sh_ <= 420 and sy + 56 + mt.SHOP_ROWS * mt.SHOP_ROW_H + 4 + 8 + 2 * 16 <= sy + sh_ - 52,
+           "SHOP rows, rule and description end above the hint line")
+        mx, my, mw, mh = mt.SHOP_MENU_RECT
+        ok(my >= 38 + 8 and mx + mw <= mt.W and 42 + 26 * len(mt.SHOP_MAIN) + 8 <= mh
+           and not pygame.Rect(*mt.SHOP_MENU_RECT).colliderect(pygame.Rect(*mt.HUD_LEAD_RECT)),
+           "the SHOP / BUY-SELL-BACK menu sits below the lead-HP box and fits its rows")
+        bad_top = [(n, c, s) for n in range(0, 30) for s in (3, 6, 8) for c in range(n)
+                   if not (0 <= mt.list_top(n, c, s) <= c < mt.list_top(n, c, s) + s
+                           and mt.list_top(n, c, s) + min(s, n) <= n)]
+        ok(not bad_top, "list_top keeps the cursor row inside a full window for every list (%s)" % bad_top[:3])
+
+        # -- the menu's BAG row opens the screen (no more toast) --------------------
+        sg.mode, sg.menu_cursor = "menu", mt.MENU_ITEMS.index("BAG")
+        sg.balls, sg.bag, sg.materials, sg.coins = 0, {}, dict(stone=0, ore=0, wall=0), 100
+        sg.toast_t = 0
+        sg.confirm()
+        ok(sg.mode == "bag" and sg.bag_cursor == 0 and sg.toast_t <= 0, "MENU -> BAG opens the BAG screen")
+        strs, _ = drawn("bag-empty", mt.BAG_RECT, "BAG (empty)", 8)
+        n_win, k_win = bag_window()
+        icons_ok("BAG (empty) icons", bag_row_rects, n_win, mt.BAG_RECT)
+        kinds_seen |= k_win
+        ok("COINS 100" in strs and strs.count("(none)") == 2 and {"ITEMS", "MATERIALS", "LOOT"} <= set(strs),
+           "an empty BAG shows COINS, three sections and (none) twice: %s" % strs[:6])
+        ok(not cue_px(bx + bw - 24, by + 56 + mt.BAG_ROW_H // 2)
+           and not cue_px(bx + bw - 24, by + 56 + (mt.BAG_ROWS - 1) * mt.BAG_ROW_H + mt.BAG_ROW_H // 2),
+           "an 8-row BAG needs no scroll cue")
+        sg.confirm()
+        ok(sg.mode == "bag" and sg.bag_pick is None, "confirm on a material is read-only")
+        sg.cancel()
+        ok(sg.mode == "overworld", "cancel leaves the BAG")
+
+        # -- full: every item at BAG_MAX, the longest numbers --------------------------
+        sg.balls, sg.coins = mt.BAG_MAX, mt.COINS_MAX
+        sg.bag = {k: mt.BAG_MAX for k in mt.GOODS}
+        sg.materials = dict(stone=999, ore=999, wall=999)
+        sg.open_bag()
+        rows = mt.bag_rows(sg.balls, sg.bag, sg.materials)
+        n_ent = len(mt.bag_entries(rows))
+        strs, _ = drawn("bag-full", mt.BAG_RECT, "BAG (full)", 10)
+        n_win, k_win = bag_window()
+        ids = icons_ok("BAG (full) icons", bag_row_rects, n_win, mt.BAG_RECT)
+        ok("balls" in ids, "the BAG's BALL row draws the balls icon (icon_id maps ball -> balls)")
+        kinds_seen |= k_win
+        ok("COINS %d" % mt.COINS_MAX in strs and "x%d" % mt.BAG_MAX in strs, "the full BAG shows 99999 coins and x999")
+        ok(cue_px(bx + bw - 24, by + 56 + (mt.BAG_ROWS - 1) * mt.BAG_ROW_H + mt.BAG_ROW_H // 2),
+           "a long BAG shows the down scroll cue")
+        for _ in range(n_ent + 3):
+            sg.move_cursor(0, 1)
+        ok(sg.bag_cursor == n_ent - 1, "the BAG cursor clamps at the last row (%d)" % sg.bag_cursor)
+        strs, _ = drawn("bag-scrolled", mt.BAG_RECT, "BAG (scrolled)", 8)
+        n_win, k_win = bag_window()
+        icons_ok("BAG (scrolled) icons", bag_row_rects, n_win, mt.BAG_RECT)
+        kinds_seen |= k_win
+        ok(kinds_seen == {"item", "mat", "loot"}, "BAG icons were checked on item, mat and loot rows: %s"
+           % sorted(kinds_seen))
+        last = mt.bag_name(rows[mt.bag_entries(rows)[-1]][1])
+        ok(last in strs and "BALL" not in strs, "scrolled to the end: %s shows, BALL has scrolled off" % last)
+        ok(cue_px(bx + bw - 24, by + 56 + mt.BAG_ROW_H // 2), "a scrolled BAG shows the up scroll cue")
+        ok(mt.bag_desc(rows[mt.bag_entries(rows)[-1]][1]) in " ".join(strs),
+           "the selected row's description is drawn (wrapped)")
+
+        # -- the POTION party picker -------------------------------------------------
+        sg.bag = dict(potion=2, superpotion=1)
+        sg.balls = 3
+        sg.open_bag()
+        sg.move_cursor(0, 1)                        # BALL -> POTION
+        ok(sg.bag_selected()[1] == "potion", "the cursor reaches POTION")
+        sg.confirm()
+        ok(sg.bag_pick == "potion" and sg.mode == "bag", "confirm on POTION opens the party picker")
+        for m in mons:
+            m.hp = m.maxhp
+        mons[1].hp, mons[2].hp = 3, 0
+        strs, _ = drawn("bag-picker", mt.BAG_PICK_RECT, "party picker", 6 * 2 + 1)
+        ok("FAINTED" in strs and mt.BAG_MSG["pick"] % "POTION" in strs, "the picker names the item and shows FAINTED")
+        sg.confirm()                                # emberling at full HP
+        ok(sg.bag_pick == "potion" and sg.bag["potion"] == 2 and sg.bag_msg == mt.BAG_MSG["full"],
+           "full HP: refused, nothing used, the picker stays open")
+        drawn("bag-picker-refused", mt.BAG_RECT, "BAG + refusal message", 3)
+        sg.move_cursor(0, 2)                        # dripling, fainted
+        sg.confirm()
+        ok(mons[2].hp == 0 and sg.bag["potion"] == 2 and sg.bag_msg == mt.BAG_MSG["fainted"],
+           "fainted: never revived, nothing used")
+        sg.move_cursor(0, -1)                       # nibbit, 3 HP
+        sg.confirm()
+        healed = min(mt.GOODS["potion"]["heal"], mons[1].maxhp - 3)
+        ok(mons[1].hp == 3 + healed and sg.bag["potion"] == 1 and sg.bag_pick is None
+           and sg.bag_msg == mt.BAG_MSG["healed"] % (mons[1].name, healed),
+           "a POTION heals min(20, missing), uses one and closes the picker")
+        drawn("bag-healed", mt.BAG_RECT, "BAG + healed message", 3)
+        mons[1].hp = mons[1].maxhp - 5
+        sg.move_cursor(0, 1)                        # SUPER POTION
+        sg.confirm()
+        sg.move_cursor(0, 1)
+        sg.confirm()
+        ok(mons[1].hp == mons[1].maxhp and "superpotion" not in sg.bag,
+           "a SUPER POTION never overheals and the last one leaves the bag")
+        sg.move_cursor(0, -1)
+        sg.confirm()
+        sg.cancel()
+        ok(sg.mode == "bag" and sg.bag_pick is None, "cancel closes the picker first")
+        sg.cancel()
+        ok(sg.mode == "overworld", "then cancel leaves the BAG")
+
+        # -- the CENTRE shop, at every H door ---------------------------------------
+        doors = [(x, y) for y, row in enumerate(mt.MAP) for x, ch in enumerate(row) if ch == "H"]
+        opened = 0
+        for fx, fy in doors:
+            stand(fx, fy + 1)
+            sg.player.dir = "up"
+            sg.interact()
+            while sg.mode == "dialogue":
+                sg.confirm()
+            if sg.mode == "shop" and sg.shop["page"] == "offer":
+                opened += 1
+            sg.cancel()
+        ok(opened == len(doors) and sg.mode == "overworld",
+           "every H door (%d) offers SHOP / LEAVE after the heal, and cancel leaves" % len(doors))
+        stand(12, 107)
+        sg.player.dir = "up"
+        sg.interact()
+        ok(sg.dialogue["lines"][:2] == mt.CENTRE_HEAL, "the heal lines come first")
+        while sg.mode == "dialogue":
+            sg.confirm()
+        strs, _ = drawn("shop-offer", mt.SHOP_MENU_RECT, "SHOP / LEAVE", 3)
+        ok(strs[1:] == mt.SHOP_OFFER, "the offer menu lists SHOP and LEAVE")
+        mrect = (mx, my, mw, 42 + 26 * len(mt.SHOP_OFFER) + 8)
+        icons_ok("SHOP / LEAVE icons", [], 0, mrect)
+        sg.move_cursor(0, 1)
+        sg.confirm()
+        ok(sg.mode == "overworld" and sg.shop is None, "LEAVE closes the shop")
+        sg.open_shop()
+        sg.confirm()
+        strs, _ = drawn("shop-main", mt.SHOP_MENU_RECT, "BUY / SELL / BACK", 4)
+        ok(strs[1:] == mt.SHOP_MAIN, "SHOP opens BUY / SELL / BACK")
+        icons_ok("BUY / SELL / BACK icons", [], 0, (mx, my, mw, 42 + 26 * len(mt.SHOP_MAIN) + 8))
+
+        sg.coins, sg.balls, sg.bag = 1000, 5, {}
+        sg.confirm()                                # BUY
+        ok(sg.shop["page"] == "buy", "BUY opens the buy list")
+        strs, _ = drawn("shop-buy", mt.SHOP_RECT, "BUY", 15)
+        icons_ok("BUY icons", shop_row_rects, min(mt.SHOP_ROWS, len(mt.SHOP_STOCK)), mt.SHOP_RECT)
+        ok(all(mt.bag_name(k) in strs for k in mt.SHOP_STOCK) and "%d each" % mt.BALL_PRICE in strs,
+           "BUY lists BALL, GREAT BALL, POTION, SUPER POTION and SMOKE with prices")
+        for _ in range(mt.SHOP_QTY_MAX + 3):
+            sg.move_cursor(1, 0)
+        ok(sg.shop["qty"] == mt.SHOP_QTY_MAX, "RIGHT raises the quantity to SHOP_QTY_MAX and stops")
+        for _ in range(mt.SHOP_QTY_MAX + 3):
+            sg.move_cursor(-1, 0)
+        ok(sg.shop["qty"] == 1, "LEFT lowers it to 1 and stops")
+        sg.move_cursor(1, 0)
+        sg.move_cursor(1, 0)
+        strs, _ = drawn("shop-buy-qty", mt.SHOP_RECT, "BUY with a quantity", 15)
+        ok("< 3 >" in strs and "= %d" % (3 * mt.BALL_PRICE) in strs, "the quantity and total show: %s" % strs[-4:])
+        sg.confirm()
+        ok(sg.balls == 8 and sg.coins == 1000 - 3 * mt.BALL_PRICE and sg.bag == {}
+           and sg.shop["msg"] == mt.SHOP_MSG["bought"] % (3, "BALL", 3 * mt.BALL_PRICE),
+           "buying 3 BALLs fills the balls counter and costs exactly 60")
+        sg.move_cursor(0, 1)
+        ok(sg.shop["qty"] == 1 and sg.shop["msg"] == "", "moving rows resets the quantity")
+        sg.coins = 59
+        sg.confirm()
+        ok(sg.bag == {} and sg.coins == 59 and sg.shop["msg"] == "Not enough coins.",
+           "a GREAT BALL at 59 coins: Not enough coins., nothing changes")
+        drawn("shop-buy-refused", mt.SHOP_RECT, "BUY refusal", 10)
+        sg.coins, sg.bag = 1000, dict(greatball=mt.BAG_MAX)
+        sg.confirm()
+        ok(sg.bag["greatball"] == mt.BAG_MAX and sg.coins == 1000 and sg.shop["msg"] == "Your bag is full.",
+           "a GREAT BALL with 999 owned: Your bag is full.")
+        sg.cancel()
+        ok(sg.shop["page"] == "main" and sg.shop["cursor"] == 0, "cancel from BUY returns to the menu on BUY")
+
+        sg.bag = dict(pearl=2, twig=12, potion=3)
+        sg.move_cursor(0, 1)
+        sg.confirm()                                # SELL
+        ok(sg.shop["page"] == "sell", "SELL opens the sell list")
+        strs, _ = drawn("shop-sell", mt.SHOP_RECT, "SELL", 10)
+        icons_ok("SELL icons", shop_row_rects, len(mt.shop_rows("sell", sg.bag)), mt.SHOP_RECT)
+        ok("TWIG" in strs and "PEARL" in strs and "POTION" not in strs, "SELL lists owned loot only")
+        for _ in range(mt.SHOP_QTY_MAX + 3):
+            sg.move_cursor(1, 0)
+        ok(sg.shop["qty"] == mt.SHOP_QTY_MAX, "selling TWIG (12 owned) caps the quantity at 10")
+        c0 = sg.coins
+        sg.confirm()
+        ok(sg.coins == c0 + 10 * mt.GOODS["twig"]["price"] and sg.bag["twig"] == 2,
+           "selling 10 TWIG pays exactly 60")
+        sg.move_cursor(0, 1)
+        for _ in range(5):
+            sg.move_cursor(1, 0)
+        ok(sg.shop["qty"] == 2, "selling PEARL (2 owned) caps the quantity at 2")
+        sg.confirm()
+        sg.move_cursor(0, -1)
+        sg.move_cursor(1, 0)
+        sg.confirm()
+        ok(sg.bag == dict(potion=3) and sg.shop["msg"].endswith(mt.SHOP_MSG["empty"]),
+           "selling the last loot says there is nothing left to sell")
+        strs, _ = drawn("shop-sell-empty", mt.SHOP_RECT, "SELL (empty)", 3)
+        icons_ok("SELL (empty) icons", shop_row_rects, 0, mt.SHOP_RECT)
+        ok(mt.SHOP_MSG["empty"] in strs, "an empty SELL list says so")
+        sg.coins, sg.bag = mt.COINS_MAX - 5, dict(relicshard=1)
+        sg.confirm()
+        ok(sg.bag == dict(relicshard=1) and sg.coins == mt.COINS_MAX - 5
+           and sg.shop["msg"] == mt.SHOP_MSG["purse"], "a sale past COINS_MAX is refused")
+        sg.cancel()
+        ok(sg.shop["page"] == "main" and sg.shop["cursor"] == 1, "cancel from SELL returns to the menu on SELL")
+        sg.move_cursor(0, 1)
+        sg.confirm()
+        ok(sg.mode == "overworld" and sg.shop is None, "BACK leaves the shop")
+
+        # -- the polished battle BAG list ------------------------------------------
+        stand(12, 107)
+        for m in mons:
+            m.hp = m.maxhp
+        sg.balls, sg.bag = 999, {k: mt.BAG_MAX for k in mt.BATTLE_BAG}
+        sg.start_battle(mt.make_mon("sprigling", 5))
+        for _ in range(3000):
+            b = sg.battle
+            if b.phase == "menu" and not b.step and not b.queue:
+                break
+            if b.step and b.step["t"] == "msg":
+                sg.confirm()
+            sg.update(DT, NO_KEYS)
+        b = sg.battle
+        b.cursor = 1
+        sg.confirm()
+        ok(b.phase == "bag", "BAG opens the battle BAG list")
+        panel = (16, mt.H - 118, mt.W - 32, 102)
+        for i, name in ((0, "battle-bag"), (len(sg.battle_bag_items()) - 1, "battle-bag-scrolled")):
+            b.cursor = i
+            del texts[:]
+            del icons[:]
+            show(name)
+            icons_ok("battle BAG (cursor %d) icons" % i, bbag_row_rects,
+                     min(mt.BBAG_ROWS, len(sg.battle_bag_items())))
+            low = [(s, r) for s, r in texts if r.top >= mt.H - 118]
+            bad = [(s, tuple(r)) for s, r in low if not inner(panel).contains(r)
+                   or r.colliderect(pygame.Rect(mt.W - 284, 248, 260, 66))]
+            item = sg.battle_bag_items()[i]
+            ok(len(low) >= 7 and not bad and mt.bag_name(item) in [s for s, _r in low],
+               "battle BAG (cursor %d): %d strings inside the bottom panel, clear of the HP box (outside: %s)"
+               % (i, len(low), bad[:3]))
+        ok(cue_px(mt.BBAG_SPLIT_X - 18, mt.H - 94 + 6), "the scrolled battle BAG shows the up cue")
+        longest = max(["ball"] + list(mt.BATTLE_BAG), key=lambda k_: sh.f13.size(mt.bag_name(k_))[0])
+        name_end = 50 + mt.LIST_ICON_GAP + sh.f13.size(mt.bag_name(longest))[0]
+        cnt_left = mt.BBAG_SPLIT_X - 30 - sh.f13.size("x%d" % mt.BAG_MAX)[0]
+        ok(name_end + 4 <= cnt_left,
+           "battle BAG: the longest name (%s) ends at x=%d, 4+ px left of x%d (x=%d) and BBAG_SPLIT_X=%d"
+           % (mt.bag_name(longest), name_end, mt.BAG_MAX, cnt_left, mt.BBAG_SPLIT_X))
+        all_rows = mt.shop_rows("buy", {}) + mt.shop_rows("sell", {k_: 1 for k_ in mt.GOODS})
+        tight = [(r_[1], mt.SHOP_RECT[0] + 44 + mt.LIST_ICON_GAP + sh.f15.size(r_[1])[0],
+                  mt.SHOP_RECT[0] + 262 - sh.f13.size("%d each" % r_[2])[0]) for r_ in all_rows]
+        ok(all(e + 4 <= p for _n, e, p in tight),
+           "shop: every BUY/SELL name (%d) ends 4+ px left of its price (tightest: %s)"
+           % (len(tight), min(tight, key=lambda t_: t_[2] - t_[1])))
+        b.cursor = 0
+        show("battle-bag")
+        ok(cue_px(mt.BBAG_SPLIT_X - 18, mt.H - 94 + (mt.BBAG_ROWS - 1) * mt.BBAG_ROW_H + 6)
+           and not cue_px(mt.BBAG_SPLIT_X - 18, mt.H - 94 + 6), "the top of the battle BAG shows only the down cue")
+        sg.cancel()
+        ok(b.phase == "menu", "cancel closes the battle BAG")
+        sg.battle, sg.mode = None, "overworld"
+
+
+    stand(43, 104, "title")
+    if os.path.exists(mt.SAVE_PATH):
+        os.remove(mt.SAVE_PATH)
+    sg.cursor = 0
+    one_opt = show("title")
+    ok(busy(sh.surf), "title screen has content")
+    ok(set(d[0] for d in DRAWN[-3:]) == {"emberling", "dripling", "sprigling"},
+       "title shows the three starters")
+    sg.save_game()
+    title_new = show("title-save")
+    ok(title_new != one_opt, "CONTINUE appears on the title once a save exists")
+    sg.move_cursor(0, 1)
+    ok(sg.cursor == 1 and show("title-continue") != title_new, "title cursor moves to CONTINUE")
+    os.remove(mt.SAVE_PATH)
+
+    stand(43, 104, "starter")
+    starter_frames = []
+    for i in range(len(mt.STARTERS)):
+        sg.cursor = i
+        starter_frames.append(show("starter-%d" % i))
+    ok(len(set(starter_frames)) == len(mt.STARTERS) == 4, "all four starter selections draw different screens")
+    sg.move_cursor(1, 0)
+    ok(sg.cursor == 0, "starter cursor wraps right->left")
+
+    stand(43, 104)
+    plain = show("overworld")
+    sg.show_toast("Toast test.")
+    ok(show("overworld-toast") != plain, "a toast draws over the overworld")
+    sg.toast_t = 0
+
+    sg.mode, sg.menu_cursor = "menu", 0
+    menu_frames = [show("menu-0")]
+    for i in range(1, len(mt.MENU_ITEMS)):
+        sg.move_cursor(0, 1)
+        menu_frames.append(show("menu-%d" % i))
+    ok(len(set(menu_frames)) == len(mt.MENU_ITEMS) and sg.menu_cursor == len(mt.MENU_ITEMS) - 1,
+       "all %d menu cursor rows draw" % len(mt.MENU_ITEMS))
+    sg.move_cursor(0, 1)
+    ok(sg.menu_cursor == 0, "the menu cursor wraps")
+    sg.cancel()
+    ok(sg.mode == "overworld", "X closes the menu")
+
+    # -- sandbox: HUD counts, CRAFT screen, build mode -------------------------
+    stand(34, 46)
+    no_pick = show("overworld-pass")
+    sg.flags["pick"] = True
+    sg.materials = dict(stone=3, ore=1, wall=0)
+    hud = show("overworld-pass-hud")
+    ok(hud != no_pick, "with a PICK the HUD shows material counts")
+    sg.materials["stone"] = 7
+    ok(show("overworld-pass-hud-2") != hud, "the HUD counts redraw when materials change")
+    sg.mode, sg.menu_cursor = "menu", 3
+    sg.confirm()
+    ok(sg.mode == "craft", "menu CRAFT opens the craft screen")
+    craft_frames = []
+    for i in range(len(mt.craft_cells(sg))):
+        sg.craft_cursor = i
+        craft_frames.append(show("craft-%d" % i))
+        ok(busy(sh.surf), "craft screen cell %d has content" % i)
+    ok(len(set(craft_frames)) == len(craft_frames), "every CRAFT cell highlights differently")
+    sg.craft_cursor = 0
+    sg.confirm()
+    ok(sg.materials["wall"] == 1 and sg.craft_msg.startswith("Crafted"), "CRAFT row 1 crafts a WALL")
+    crafted = show("craft-crafted")
+    ok(crafted != craft_frames[0], "the craft result message and new counts draw")
+    sg.craft_cursor = 1
+    sg.confirm()
+    ok(sg.craft_msg.startswith("Need"), "CRAFT says what is missing")
+    show("craft-need")
+    n_cells = len(mt.craft_cells(sg))
+    sg.craft_cursor = 0
+    for _ in range(3):
+        sg.move_cursor(-1, 0)
+        sg.move_cursor(0, -1)
+    ok(sg.craft_cursor == 0, "the CRAFT cursor clamps at the top-left (no wrap)")
+    for _ in range(n_cells):
+        sg.move_cursor(1, 0)
+    ok(sg.craft_cursor == mt.CRAFT_COLS - 1, "right stops at the end of the row (%d)" % sg.craft_cursor)
+    for _ in range(n_cells):
+        sg.move_cursor(0, 1)
+    ok(sg.craft_cursor == n_cells - 1, "down clamps at the last cell (%d)" % sg.craft_cursor)
+    sg.move_cursor(0, -1)
+    ok(sg.craft_cursor == n_cells - 1 - mt.CRAFT_COLS and sg.craft_msg == "",
+       "up moves one row and clears the message")
+    sg.cancel()
+    ok(sg.mode == "overworld", "X closes CRAFT")
+    sg.building = True
+    sg.player.dir = "down"
+    build = show("overworld-building")
+    sg.building = False
+    ok(show("overworld-not-building") != build, "build mode draws a banner and a target box")
+    sg.flags.pop("pick", None)
+    sg.materials = dict(stone=0, ore=0, wall=0)
+
+    sg.party = []
+    sg.mode = "party"
+    empty_party = show("party-empty")
+    team = [mt.make_mon(s, 10 + i) for i, s in enumerate(["emberling", "dripling", "sprigling",
+                                                          "nocturn", "cogling", "psywisp"])]
+    team[3].hp = 0
+    sg.party, sg.party_cursor = team, 0
+    party0 = show("party-0")
+    ok(party0 != empty_party, "party screen lists a team")
+    ok({d[0] for d in DRAWN[-6:]} == {m.id for m in team}, "party screen draws all six members")
+    sg.move_cursor(0, 1)
+    ok(sg.party_cursor == 1 and show("party-1") != party0, "party cursor highlight moves")
+
+    stand(43, 104)
+    sg.say(["First line of a test dialogue.", "Second line."])
+    d1 = show("dialogue-overworld")
+    sg.confirm()
+    d2 = show("dialogue-overworld-2")
+    ok(d1 != d2 and sg.mode == "dialogue", "dialogue advances to its second line")
+    sg.confirm()
+    ok(sg.mode == "overworld", "dialogue returns to the overworld")
+
+    sg.party = [mt.make_mon("pyrelash", 30)] + team[:5]
+    sg.mode = "victory"
+    vic = show("victory")
+    ok(busy(sh.surf) and {d[0] for d in DRAWN[-6:]} == {m.id for m in sg.party},
+       "victory screen draws the whole team")
+    sg.confirm()
+    ok(sg.mode == "overworld", "Z leaves the victory screen")
+
+    # Fade veil darkens the frame.
+    stand(43, 104)
+    sh.render()
+    before = lum(sh.surf, sh.surf.get_rect())
+    sg.fade = 0.8
+    sh.render()
+    ok(lum(sh.surf, sh.surf.get_rect()) < before * 0.4, "the fade veil darkens the frame")
+    sg.fade = 0.0
+
+    # -- battles: driven frame by frame through the real input path -------------
+    BALL_RED = (232, 74, 74)
+
+
+    def red_px():
+        return pygame.mask.from_threshold(sh.surf, BALL_RED, (1, 1, 1, 255)).count()
+
+
+    def new_rec():
+        return dict(msgs=[], hits=[], frames=[], phases=set(), modes=set(), cursor={},
+                    ball_shakes=set(), ball_px=0, noball_px=None, errors=[])
+
+
+    def probe_hits(rec):
+        """Route the impact hook through the shell's juice, recording its state
+        on either side of every hit."""
+        j = sh.juice
+
+        def probe(side, eff, crit, mtype):
+            before = dict(trauma=j.trauma, freeze=j.freeze, active=active(j))
+            j.hit(sg.battle, side, eff, crit, mtype)
+            rec["hits"].append(dict(
+                side=side, eff=eff, crit=crit, type=mtype, frame=len(rec["frames"]),
+                before=before, trauma=j.trauma, freeze=j.freeze, flash=j.flash_t,
+                flash_side=j.flash_side, active=active(j),
+                cols={p[7] for p in j.parts if p[4] > 0}))
+        sg.fx_hit = probe
+
+
+    def nav(g, target, rec, render):
+        """Walk the cursor to ``target`` one key at a time, drawing each stop."""
+        b = g.battle
+        for _ in range(6):
+            if render:
+                sh.render()
+                rec["cursor"][(b.phase, b.cursor)] = snap(BOTTOM_PANEL)
+                rec["phases"].add(b.phase)
+            if b.cursor == target:
+                return
+            if b.phase == "bag":                  # the BAG list is one column
+                g.move_cursor(0, 1 if target > b.cursor else -1)
+                continue
+            dx = (target % 2) - (b.cursor % 2)
+            dy = (target // 2) - (b.cursor // 2)
+            if dx:
+                g.move_cursor(dx, 0)
+            else:
+                g.move_cursor(0, dy)
+
+
+    MENU_INDEX = dict(fight=0, ball=1, swap=2, run=3)    # "ball" opens BAG, then picks BALL
+
+
+    def drive(g, policy, rec=None, render=False, max_frames=30000):
+        """Tick a battle at 60 Hz, press through every message, and answer every
+        prompt with move_cursor/confirm exactly as the keyboard would.  With
+        ``render`` the shell's juice is advanced and a frame drawn each tick, in
+        the same order as Shell.run()."""
+        rec = rec if rec is not None else new_rec()
+        j = sh.juice
+        for _ in range(max_frames):
+            if g.battle is None and g.fade_dir == 0:
+                break
+            g.update(DT, NO_KEYS)
+            b = g.battle
+            if render:
+                j.bind(b)
+                f0, a0 = j.freeze, j.anim_t
+                j.update(DT, b)
+                off = j.offset()
+                rec["frames"].append(dict(
+                    freeze=f0, anim0=a0, anim1=j.anim_t, trauma=j.trauma, active=active(j),
+                    pool=len(j.parts), off=off, flash=j.flash_t, battle=b,
+                    disp=(b.disp_foe, b.disp_mine) if b else None,
+                    mine=(b.mine.id, b.mine.hp) if b else None,
+                    ball=(b.ball_anim["caught"], b.ball_anim["t"]) if b and b.ball_anim else None))
+                if b:
+                    rec["phases"].add(b.phase)
+                    if b.ball_anim:
+                        rec["ball_shakes"].add(b.ball_anim["shakes"])
+                rec["modes"].add(g.mode)
+                n0 = len(DRAWN)
+                try:
+                    sh.render()
+                except Exception as e:             # noqa: BLE001
+                    rec["errors"].append(repr(e))
+                    break
+                rec["frames"][-1]["drawn"] = DRAWN[n0:]
+                if b and g.mode == "battle":
+                    if b.ball_anim:
+                        rec["ball_px"] = max(rec["ball_px"], red_px())
+                    elif rec["noball_px"] is None:
+                        rec["noball_px"] = red_px()
+            if b is None or g.mode != "battle":
+                continue
+            if b.step and b.step["t"] == "msg":
+                rec["msgs"].append(b.step["s"])
+                g.confirm()
+                continue
+            if b.step:
+                continue
+            if b.phase == "menu":
+                act = policy(b)
+                nav(g, MENU_INDEX[act[0]], rec, render)
+                g.confirm()
+                if act[0] == "fight" and b.phase == "fight":
+                    nav(g, b.mine.moves.index(act[1]), rec, render)
+                    g.confirm()
+                elif act[0] == "swap" and b.phase == "swap":
+                    nav(g, act[1], rec, render)
+                    g.confirm()
+                elif act[0] == "ball" and b.phase == "bag":
+                    nav(g, g.battle_bag_items().index(act[1] if len(act) > 1 else "ball"), rec, render)
+                    g.confirm()
+            elif b.phase == "swap" and b.forced_swap:
+                idx = next(i for i, m in enumerate(g.party) if m.hp > 0)
+                nav(g, idx, rec, render)
+                g.confirm()
+        rec["done"] = g.battle is None
+        return rec
+
+
+    def setup(g, mine, foe, trainer=None, foe_moves=None, balls=20):
+        g.party = mine if isinstance(mine, list) else [mine]
+        g.balls = balls
+        g.fade, g.fade_dir, g.fade_cb, g.mode = 0.0, 0, None, "overworld"
+        g.wander_t = 0.0
+        if foe_moves:
+            foe.moves = list(foe_moves)
+        g.start_battle(foe, trainer)
+        return g.battle
+
+
+    def fight(move):
+        """Always use ``move``, teaching it into slot 0 if the moveset lacks it."""
+        def pol(b):
+            if move not in b.mine.moves:
+                b.mine.moves[0] = move
+            return ("fight", move)
+        return pol
+
+
+    def strongest(b):
+        return ("fight", max(b.mine.moves, key=lambda m: mt.MOVES[m]["pow"]))
+
+
+    def script(*first, then=strongest):
+        """Play ``first`` actions in order, then fall back to ``then``."""
+        st = {"n": 0}
+
+        def pol(b):
+            st["n"] += 1
+            return first[st["n"] - 1] if st["n"] <= len(first) else then(b)
+        return pol
+
+
+    def expect(eff, crit):
+        """What Juice.hit promises for a hit of this kind (as tuned)."""
+        sup, weak = eff >= 2, eff < 1
+        add = ((mt.TRAUMA_SUPER if sup else mt.TRAUMA_WEAK if weak else mt.TRAUMA_HIT)
+               + (mt.TRAUMA_CRIT if crit else 0.0))
+        stop = (mt.HITSTOP_CRIT if crit else mt.HITSTOP_SUPER if sup
+                else mt.HITSTOP_WEAK if weak else mt.HITSTOP_NORMAL)
+        n = mt.PARTICLE_BURST_SUPER if (sup or crit) else mt.PARTICLE_BURST
+        if mt.REDUCED_MOTION:
+            stop, n = 0.0, mt.PARTICLE_BURST_REDUCED
+        return add, stop, n
+
+
+    def check_juice_frames(rec, label):
+        """Frame-level juice invariants that must hold through any battle."""
+        fr = rec["frames"]
+        live = [f for f in fr if f["battle"] is not None]
+        ok(not rec["errors"], "%s rendered every frame: %s" % (label, rec["errors"][:1]))
+        ok(rec["done"], "%s ran to the end and returned to the world" % label)
+        ok(live and live[0]["trauma"] == 0 and live[0]["active"] == 0,
+           "%s: juice starts clean for the new battle" % label)
+        ok(all((f["anim1"] == f["anim0"]) if f["freeze"] > 0
+               else abs(f["anim1"] - f["anim0"] - DT) < 1e-9 for f in live),
+           "%s: anim_t holds still exactly while hit-stop counts down, else advances" % label)
+        ok(all(f["pool"] == mt.PARTICLE_MAX and f["active"] <= mt.PARTICLE_MAX for f in fr),
+           "%s: particle pool stays at PARTICLE_MAX" % label)
+        ok(all(abs(f["off"][0]) <= mt.SHAKE_MAX and abs(f["off"][1]) <= mt.SHAKE_MAX for f in fr),
+           "%s: shake offset never exceeds SHAKE_MAX" % label)
+        hit_frames = {h["frame"] for h in rec["hits"]}
+        rising = [i for i in range(1, len(fr))
+                  if fr[i]["trauma"] > fr[i - 1]["trauma"] + 1e-12 and i not in hit_frames
+                  and fr[i]["battle"] is fr[i - 1]["battle"]]
+        ok(not rising, "%s: trauma only rises on a hit frame (rose at %s)" % (label, rising[:3]))
+        for h in rec["hits"]:
+            tag = "%s: eff %.1f%s hit" % (label, h["eff"], " crit" if h["crit"] else "")
+            if h["eff"] == 0:
+                ok(h["trauma"] == h["before"]["trauma"] and h["freeze"] == h["before"]["freeze"]
+                   and h["active"] == h["before"]["active"],
+                   "%s adds no shake, freeze or particles" % tag)
+                continue
+            add, stop, n = expect(h["eff"], h["crit"])
+            ok(abs(h["trauma"] - min(1.0, h["before"]["trauma"] + add)) < 1e-9,
+               "%s adds %.2f trauma" % (tag, add))
+            ok(abs(h["freeze"] - max(h["before"]["freeze"], stop)) < 1e-9,
+               "%s freezes %.2fs" % (tag, stop))
+            want_flash = 0.0 if mt.REDUCED_MOTION else mt.FLASH_TIME
+            ok(h["flash"] == want_flash and h["flash_side"] == h["side"],
+               "%s flashes the %s sprite for %.2fs" % (tag, h["side"], want_flash))
+            ok(h["active"] == min(mt.PARTICLE_MAX, h["before"]["active"] + n),
+               "%s spawned %d particles (%d -> %d)" % (tag, n, h["before"]["active"], h["active"]))
+            ok(mt.TYPE_COLOR[h["type"]] in h["cols"],
+               "%s: particles carry the %s colour" % (tag, h["type"]))
+
+
+    # 1. Juice active vs inactive must leave the engine's random stream alone.
+    def scripted(g, seed, render):
+        random.seed(seed)
+        mt.FX_RNG.seed(seed * 7 + 1)
+        # Same loot_seed inputs for both Games, so the loot line is compared too.
+        g.player.tx, g.player.ty = mt.START_TILE
+        g.player.px, g.player.py = g.player.tx * 32, g.player.ty * 32
+        g.steps, g.battles = 0, 0
+        setup(g, [mt.make_mon("emberling", 22), mt.make_mon("dripling", 20)],
+              mt.make_mon("sprigling", 21))
+        turn = {"n": 0}
+
+        def pol(b):
+            turn["n"] += 1
+            if turn["n"] == 2 and b.mine.id != "dripling" and g.party[1].hp > 0:
+                return ("swap", 1)
+            return ("fight", b.mine.moves[turn["n"] % len(b.mine.moves)])
+        rec = drive(g, pol, render=render)
+        return rec, [(m.id, m.hp, m.level, m.xp) for m in g.party], random.getstate()
+
+
+    plain_game = mt.Game()
+    for seed in (11, 12, 13):
+        probe_hits(new_rec())                          # juice on, through the real hook
+        rec_on, party_on, state_on = scripted(sg, seed, render=True)
+        rec_off, party_off, state_off = scripted(plain_game, seed, render=False)
+        ok(rec_on["msgs"] == rec_off["msgs"] and len(rec_on["msgs"]) > 5,
+           "seed %d: identical battle transcript with juice on and off" % seed)
+        ok(party_on == party_off, "seed %d: identical HP/level/XP with juice on and off" % seed)
+        ok(state_on == state_off, "seed %d: the global random stream ends in the same state" % seed)
+
+    random.seed(5)
+    state = random.getstate()
+    setup(sg, mt.make_mon("emberling", 20), mt.make_mon("sprigling", 20))
+    for _ in range(6):
+        sh.juice.hit(sg.battle, "foe", 2.0, True, "Fire")
+        sh.juice.update(DT, sg.battle)
+        sh.juice.offset()
+        sh.sfx.play("hit_strong")
+        sh.draw_battle()
+    ok(random.getstate() == state, "hit/update/offset/sfx/draw use FX_RNG, never `random`")
+
+    # 2. Damaging hits: neutral, super-effective, resisted, crit, no effect.
+    BATTLE_PHASES = set()
+    ALL_MODES = set()
+
+
+    def scenario(label, mine, foe, policy, trainer=None, foe_moves=("harden",), balls=20, seed=1):
+        random.seed(seed)
+        rec = new_rec()
+        probe_hits(rec)
+        setup(sg, mine, foe, trainer, list(foe_moves) if foe_moves else None, balls)
+        drive(sg, policy, rec, render=True)
+        BATTLE_PHASES.update(rec["phases"])
+        ALL_MODES.update(rec["modes"])
+        check_juice_frames(rec, label)
+        return rec
+
+
+    def landed(rec, side="foe"):
+        return [h for h in rec["hits"] if h["side"] == side]
+
+
+    def frozen_run(rec, h):
+        n = 0
+        for f in rec["frames"][h["frame"]:]:
+            if f["freeze"] <= 0:
+                break
+            n += 1
+        return n
+
+
+    NAME = {k: v["name"] for k, v in mt.SPECIES.items()}
+    normal = scenario("neutral hit", mt.make_mon("nibbit", 20), mt.make_mon("gnawtl", 20),
+                      fight("tackle"))
+    ok(normal["msgs"][0] == "A wild %s appeared!" % NAME["gnawtl"]
+       and normal["msgs"][1] == "Go, %s!" % NAME["nibbit"], "wild intro messages come first")
+    super_ = scenario("super-effective hit", mt.make_mon("emberling", 20),
+                      mt.make_mon("sprigling", 20), fight("ember"))
+    weak = scenario("resisted hit", mt.make_mon("emberling", 20),
+                    mt.make_mon("dripling", 25), fight("ember"))
+    ok(any(h["eff"] == 1.0 for h in landed(normal)), "a neutral hit landed")
+    ok(any(h["eff"] >= 2 for h in landed(super_)), "a super-effective hit landed")
+    ok(any(h["eff"] < 1 for h in landed(weak)), "a not-very-effective hit landed")
+    ok(any("super effective" in s for s in super_["msgs"]), "super-effective was narrated")
+    ok(any("not very effective" in s for s in weak["msgs"]), "not-very-effective was narrated")
+    for rec, eff_ok in ((normal, lambda e: e == 1.0), (super_, lambda e: e >= 2),
+                        (weak, lambda e: e < 1)):
+        h = next(h for h in landed(rec) if eff_ok(h["eff"]))
+        _, stop, _ = expect(h["eff"], h["crit"])
+        want = math.ceil(stop / DT - 1e-6)
+        ok(want <= frozen_run(rec, h) <= want + 1,
+           "eff %.1f hit-stop lasts %d frames (want ~%d)" % (h["eff"], frozen_run(rec, h), want))
+        drained = any(f["freeze"] > 0 and f["disp"] and p["disp"] and f["disp"][0] != p["disp"][0]
+                      for p, f in zip(rec["frames"], rec["frames"][1:]))
+        ok(drained, "eff %.1f: the HP bar keeps draining during hit-stop (queue not blocked)"
+           % h["eff"])
+        after_hit = rec["frames"][h["frame"]:h["frame"] + 20]
+        if h["eff"] >= 1:
+            ok(any(f["off"] != (0, 0) for f in after_hit),
+               "eff %.1f: the arena actually shakes after the hit" % h["eff"])
+        else:
+            # TRAUMA_WEAK^2 * SHAKE_MAX is under half a pixel: resisted hits
+            # deliberately read as a flinch (flash, stop, particles), not a shake.
+            ok(all(max(abs(f["off"][0]), abs(f["off"][1])) <= 1 for f in after_hit),
+               "eff %.1f: a resisted hit barely moves the arena" % h["eff"])
+    ok(max(f["trauma"] for f in super_["frames"]) > max(f["trauma"] for f in weak["frames"][:60]),
+       "a super-effective hit shakes harder than a resisted one")
+
+    flash_frames = [f for f in super_["frames"] if f["flash"] > 0]
+    ok(flash_frames and len(flash_frames) <= 3 * (math.ceil((mt.FLASH_TIME + mt.HITSTOP_CRIT) / DT) + 1),
+       "the flash is time-boxed (%d flashing frames over the fight)" % len(flash_frames))
+
+    # The flash is visible: the struck sprite turns white, then returns exactly.
+    setup(sg, mt.make_mon("emberling", 20), mt.make_mon("pebblit", 20))
+    sg.battle.step, sg.battle.queue, sg.battle.phase = None, [], "menu"
+    j = sh.juice
+    j.bind(sg.battle)
+    foe_rect = pygame.Rect(int(mt.W * 0.66) - 60, 178 - 60, 120, 120)
+
+
+    def whites(rect):
+        m = pygame.mask.from_threshold(sh.surf, (235, 235, 235), (21, 21, 21, 255))
+        sub = pygame.mask.Mask(rect.size, fill=True)
+        return m.overlap_area(sub, rect.topleft)
+
+
+    sh.render()
+    no_flash = snap()
+    w0 = whites(foe_rect)
+    j.flash_side, j.flash_t = "foe", mt.FLASH_TIME
+    sh.render()
+    keep("battle-flash-foe")
+    w1 = whites(foe_rect)
+    ok(w1 > w0 + 400, "the white flash covers the foe sprite (%d -> %d white px)" % (w0, w1))
+    j.flash_side = "mine"
+    sh.render()
+    w_mine = whites(foe_rect)
+    ok(w_mine <= w0 + 20, "a flash on our side leaves the foe sprite alone")
+    j.flash_t = 0.0
+    sh.render()
+    ok(snap() == no_flash, "the frame returns to normal once the flash ends")
+
+    noeff = scenario("PSYCHIC into DARK", mt.make_mon("psywisp", 20), mt.make_mon("nocturn", 20),
+                     script(("fight", "confusion"), then=lambda b: ("run",)))
+    ok(any("no effect" in s for s in noeff["msgs"]), "no-effect was narrated")
+    zero = [h for h in noeff["hits"] if h["eff"] == 0]
+    ok(zero and all(h["active"] == 0 and h["trauma"] == 0 for h in zero),
+       "a 0x hit reaches the hook but spawns no particles or shake")
+    noeff2 = scenario("POISON into STEEL", mt.make_mon("mirepuff", 20), mt.make_mon("cogling", 20),
+                      script(("fight", "poisonsting"), then=lambda b: ("run",)))
+    ok(any(h["eff"] == 0 for h in noeff2["hits"]), "POISON into STEEL reached the juice as 0x")
+
+    # Crit: the engine reads the global stream, so find a seed that crits on the
+    # juice-free Game, then replay that seed through the rendering shell.
+    crit_seed = None
+    for s in range(500):
+        random.seed(s)
+        setup(plain_game, mt.make_mon("nibbit", 30), mt.make_mon("pebblit", 30), foe_moves=["harden"])
+        if any("critical" in m for m in drive(plain_game, fight("tackle"))["msgs"]):
+            crit_seed = s
+            break
+    ok(crit_seed is not None, "found a seed that rolls a critical hit")
+    if crit_seed is not None:
+        crit = scenario("critical hit", mt.make_mon("nibbit", 30), mt.make_mon("pebblit", 30),
+                        fight("tackle"), seed=crit_seed)
+        ok(any("critical" in m for m in crit["msgs"]),
+           "the same seed crits again with juice and rendering on")
+        ch = [h for h in crit["hits"] if h["crit"]]
+        ok(ch, "the crit reached the juice hook as crit=True")
+        if ch:
+            want = math.ceil(max(mt.HITSTOP_CRIT, ch[0]["before"]["freeze"]) / DT - 1e-6)
+            ok(want <= frozen_run(crit, ch[0]) <= want + 1,
+               "crit hit-stop lasts ~%d frames (%d)" % (want, frozen_run(crit, ch[0])))
+    ok(expect(0.5, False)[1] < expect(1, False)[1] < expect(2, False)[1] < expect(2, True)[1],
+       "hit-stop is tuned weak < normal < super < crit")
+
+    # 3. Faint, EXP, level-up, a learned move, evolution.
+    evo = mt.make_mon("emberling", 15)
+    evo.xp = mt.xp_for_level(16) - 1
+    evo.moves = ["ember", "scratch", "growl"]
+    lvl = scenario("level-up + evolution", evo, mt.make_mon("sprigling", 8), fight("ember"))
+    for frag in ("Wild %s fainted" % NAME["sprigling"], "gained", "grew to LV 16",
+                 "is evolving", "evolved into %s" % NAME["pyrelash"]):
+        ok(any(frag in s for s in lvl["msgs"]), "narrated '%s'" % frag)
+    ok(evo.id == "pyrelash", "the monster really evolved")
+    before_evo = [f for f in lvl["frames"] if f["mine"] and f["mine"][0] == "emberling"]
+    after_evo = [f for f in lvl["frames"] if f["mine"] and f["mine"][0] == "pyrelash"]
+    ok(before_evo and all(("emberling", False, True) in f["drawn"] for f in before_evo
+                          if f["drawn"]), "the unevolved form is drawn from behind")
+    ok(after_evo and any(("pyrelash", False, True) in f["drawn"] for f in after_evo),
+       "the evolved form is drawn from behind afterwards")
+    learn = mt.make_mon("pyrelash", 18)
+    learn.xp = mt.xp_for_level(19) - 1
+    learn.moves = ["ember", "scratch", "quickattack", "growl"]
+    lrn = scenario("move swap on level-up", learn, mt.make_mon("sprigling", 10), fight("ember"))
+    FLAME = mt.MOVES["flameburst"]["name"]
+    ok(any("forgot" in s for s in lrn["msgs"]) and any("learned %s" % FLAME in s for s in lrn["msgs"]),
+       "a full moveset narrates forgot... and learned")
+    learn2 = mt.make_mon("pyrelash", 18)
+    learn2.xp = mt.xp_for_level(19) - 1
+    learn2.moves = ["ember", "scratch"]
+    lrn2 = scenario("move learned on level-up", learn2, mt.make_mon("sprigling", 10), fight("ember"))
+    ok(any("learned %s" % FLAME in s for s in lrn2["msgs"])
+       and not any("forgot" in s for s in lrn2["msgs"]), "a short moveset just learns the move")
+
+    # 4. Balls: forced 0..4 shakes through the real throw path.
+    _real_catch = mt.catch_roll
+    try:
+        for k in range(5):
+            mt.catch_roll = lambda mon, bonus, rng=None, throw_scale=1, k=k: dict(caught=k == 4, shakes=k)
+            rec = scenario("ball, %d shakes" % k, mt.make_mon("dripling", 25),
+                           mt.make_mon("nibbit", 5), script(("ball",)))
+            ok(k in rec["ball_shakes"], "the ball animation ran with %d shakes" % k)
+            ok(rec["noball_px"] is not None and rec["ball_px"] > rec["noball_px"] + 50,
+               "the ball was drawn (%s -> %d red px)" % (rec["noball_px"], rec["ball_px"]))
+            want = {0: "instantly", 1: "It broke free!", 2: "It broke free!", 3: "So close",
+                    4: "Gotcha"}[k]
+            ok(any(want in s for s in rec["msgs"]), "%d shakes narrates '%s'" % (k, want))
+            if k == 4:
+                ok(len(sg.party) == 2 and sg.party[1].id == "nibbit", "the caught monster joined")
+                hidden = [f for f in rec["frames"] if f["ball"] and f["ball"][0] and f["ball"][1] > 0.4]
+                ok(hidden and all(("nibbit", True, False) not in f["drawn"] for f in hidden),
+                   "the caught foe vanishes into the ball")
+            else:
+                ok(len(sg.party) == 1, "a monster that broke free did not join")
+    finally:
+        mt.catch_roll = _real_catch
+
+    # 5. Swap (voluntary and forced), run, refusals, loss, trainer and gym.
+    rec = scenario("voluntary swap", [mt.make_mon("emberling", 20), mt.make_mon("dripling", 20)],
+                   mt.make_mon("nibbit", 6), script(("swap", 1)))
+    ok(any("Come back, %s" % NAME["emberling"] in s for s in rec["msgs"]),
+       "a voluntary swap is narrated")
+    ok(("swap", 1) in rec["cursor"], "the swap list was drawn with its cursor on the pick")
+    ok(any(("dripling", False, True) in f["drawn"] for f in rec["frames"] if f.get("drawn")),
+       "the swapped-in monster is drawn")
+
+    forced = scenario("forced swap after a faint",
+                      [mt.make_mon("sprigling", 4), mt.make_mon("tidecoil", 60)],
+                      mt.make_mon("pyrelash", 30), fight("tackle"), foe_moves=("flameburst",))
+    ok(any("%s fainted" % NAME["sprigling"] == s.rstrip("!") for s in forced["msgs"]),
+       "our monster fainted")
+    ok(any(s == "Go, %s!" % NAME["tidecoil"] for s in forced["msgs"]),
+       "the forced replacement was sent out")
+    ok(any(k[0] == "swap" for k in forced["cursor"]), "the forced swap prompt was drawn")
+    dead = [f for f in forced["frames"] if f["mine"] == ("sprigling", 0) and f.get("drawn")]
+    ok(dead and all(("sprigling", False, True) not in f["drawn"] for f in dead),
+       "a fainted monster is not drawn (%d frames)" % len(dead))
+
+    ran = scenario("run away", mt.make_mon("zapmote", 40), mt.make_mon("pebblit", 3),
+                   lambda b: ("run",))
+    ok(any("Got away" in s for s in ran["msgs"]), "running away is narrated")
+
+    lost = scenario("a lost battle", mt.make_mon("sprigling", 3), mt.make_mon("pyrelash", 50),
+                    fight("tackle"), foe_moves=("flameburst",))
+    ok(any("no monsters left" in s for s in lost["msgs"]), "a wipe is narrated")
+    ok(sg.mode == "dialogue" and sg.prev == "overworld", "a loss ends in the CENTRE dialogue")
+    show("dialogue-after-loss")
+    ok(busy(sh.surf), "the post-loss dialogue draws over the overworld")
+    while sg.mode == "dialogue":
+        sg.confirm()
+
+    tr = mt.npc_by_id("t2")
+    refuse = scenario("trainer battle", mt.make_mon("tidecoil", 60),
+                      mt.make_mon(tr["team"][0][0], tr["team"][0][1]),
+                      script(("run",), ("ball",)), trainer=tr, foe_moves=None)
+    ok(refuse["msgs"][0] == "%s: %s" % (tr["name"], tr["intro"]), "a trainer opens with their intro")
+    ok(any("can't run" in s for s in refuse["msgs"]), "running from a trainer is refused")
+    ok(any("can't catch" in s for s in refuse["msgs"]), "balling a trainer's monster is refused")
+    ok(sum(1 for s in refuse["msgs"] if "sent out" in s) == len(tr["team"]),
+       "the trainer's whole team was sent out")
+    ok(any(tr["defeat"] in s for s in refuse["msgs"]), "the trainer's defeat line is shown")
+
+    nob = scenario("no balls / no one to swap", mt.make_mon("tidecoil", 60),
+                   mt.make_mon("nibbit", 3), script(("ball",), ("swap", 0)), balls=0)
+    ok(any("Your bag is empty!" in s for s in nob["msgs"]), "an empty bag is narrated")
+    ok(any("No one else" in s for s in nob["msgs"]), "swapping with no one is refused")
+
+    gym = scenario("gym battle", mt.make_mon("pyrelash", 95), mt.make_mon("zapmote", 28),
+                   strongest, trainer=mt.GYM_LEADER, foe_moves=None)
+    ok(sg.mode == "victory" and sg.flags["gym"], "beating the gym leader lands on the victory screen")
+    show("victory-after-gym")
+    sg.flags["gym"] = False
+
+    # Cursor rendering, FIGHT submenu, and X-cancel out of FIGHT and SWAP.
+    setup(sg, [mt.make_mon("emberling", 20), mt.make_mon("dripling", 20)], mt.make_mon("nibbit", 6))
+    b = sg.battle
+    b.step, b.queue, b.phase, b.cursor = None, [], "menu", 0
+    sh.juice.reset(b)
+    menu_panels = []
+    for c in range(4):
+        b.cursor = c
+        sh.render()
+        menu_panels.append(snap(BOTTOM_PANEL))
+        keep("battle-menu-%d" % c)
+    ok(len(set(menu_panels)) == 4, "FIGHT/BAG/SWAP/RUN each draw their own cursor")
+    b.cursor = 0
+    sg.confirm()
+    ok(b.phase == "fight", "FIGHT opens the move list")
+    fight_panels = []
+    for c in range(len(b.mine.moves)):
+        b.cursor = c
+        sh.render()
+        fight_panels.append(snap(BOTTOM_PANEL))
+        keep("battle-fight-%d" % c)
+    ok(len(b.mine.moves) >= 2 and len(set(fight_panels)) == len(b.mine.moves),
+       "each move row draws its own cursor and power/accuracy line")
+    ok(not set(fight_panels) & set(menu_panels), "the move list replaces the action menu")
+    sg.cancel()
+    sh.render()
+    ok(b.phase == "menu" and snap(BOTTOM_PANEL) == menu_panels[0], "X backs out of FIGHT to the menu")
+    b.cursor = 2
+    sg.confirm()
+    ok(b.phase == "swap" and not b.forced_swap, "SWAP opens the team list")
+    sh.render()
+    keep("battle-swap")
+    ok(snap(BOTTOM_PANEL) not in menu_panels, "the swap list draws")
+    sg.cancel()
+    sh.render()
+    ok(b.phase == "menu" and snap(BOTTOM_PANEL) == menu_panels[0], "X backs out of SWAP to the menu")
+    b.cursor = 0
+    sg.move_cursor(0, 1)
+    ok(b.cursor == 2, "down from FIGHT lands on SWAP")
+    sg.move_cursor(1, 0)
+    ok(b.cursor == 3, "right from SWAP lands on RUN")
+    sg.move_cursor(1, 0)
+    ok(b.cursor == 3, "the cursor does not wrap off the grid")
+    b.step = dict(t="msg", s="A queued message.")
+    sg.move_cursor(-1, 0)
+    ok(b.cursor == 3, "the cursor is locked while a message is up")
+    b.step = None
+
+    # Dialogue over a battle: render() draws the battle underneath.
+    sg.say("A test line spoken mid-battle.")
+    ok(sg.prev == "battle", "dialogue remembers it opened over a battle")
+    n0 = len(DRAWN)
+    show("dialogue-over-battle")
+    ok({"emberling", "nibbit"} <= {d[0] for d in DRAWN[n0:]},
+       "dialogue over a battle still draws both monsters")
+    sg.confirm()
+    ok(sg.mode == "battle", "the dialogue hands back to the battle")
+    sg.battle = None
+    sg.mode = "overworld"
+
+    bag_shop_render()
+
+    ok(BATTLE_PHASES >= {"anim", "menu", "fight", "bag", "swap", "over"},
+       "every battle phase was drawn (%s)" % sorted(BATTLE_PHASES))
+    MODES_RENDERED |= ALL_MODES
+    want_modes = {"title", "starter", "overworld", "menu", "craft", "party", "dialogue", "battle",
+                  "victory", "bag", "shop"}
+    ok(MODES_RENDERED >= want_modes, "every Game mode was rendered (missing %s)"
+       % sorted(want_modes - MODES_RENDERED))
+
+    # -- sandbox juice: mining, build box, WALL pop-in, labels, ORE tell --------
+    w = sh.wfx
+    sg.battle, sg.mode, sg.fade, sg.fade_dir = None, "overworld", 0.0, 0
+    sg.flags.update(starter=True, pick=True)
+    sg.edits, sg.picked, sg.building, sg.toast_t = {}, set(), False, 0
+    sg.materials = dict(stone=0, ore=0, wall=0)
+    w.reset()
+    WORLD_HUD = [pygame.Rect(8, 8, 150, 30), pygame.Rect(*mt.HUD_MAT_RECT),
+                 pygame.Rect(*mt.HUD_LEAD_RECT)]
+
+
+    def tick(n=1):
+        for _ in range(n):
+            w.update(DT)
+
+
+    def hud_bytes():
+        return [snap(r.inflate(-12, -8)) for r in WORLD_HUD]   # rounded corners show the world
+
+
+    def clamp_cam(g):
+        p = g.player
+        return (mt.clamp(p.px + mt.TILE / 2 - mt.W / 2, 0, mt.MAP_W * mt.TILE - mt.W),
+                mt.clamp(p.py + mt.TILE / 2 - mt.H / 2, 0, mt.MAP_H * mt.TILE - mt.H))
+
+
+    def tile_rect(x, y):
+        return pygame.Rect(int(x * mt.TILE - sh.cam[0]), int(y * mt.TILE - sh.cam[1]),
+                           mt.TILE, mt.TILE)
+
+
+    ok(sh.ore_spots == set(ORE_TILES), "the shell's ORE spots are exactly mine_drop's %d"
+       % len(ORE_TILES))
+
+    # Mining an ORE boulder: crack frame, debris + glints, nudge, two labels.
+    random.seed(11)
+    rstate = random.getstate()
+    stand(34, 46)
+    sg.player.dir = "left"
+    sg.interact()
+    ok(sg.tile(33, 46) == "." and w.cracks.get((33, 46), [0, None])[1] == "#",
+       "mining sets a crack frame that remembers the boulder")
+    ok(w.live() == mt.DEBRIS_BURST + mt.DEBRIS_BURST_ORE,
+       "an ORE break sprays %d chips + %d glints" % (mt.DEBRIS_BURST, mt.DEBRIS_BURST_ORE))
+    ok(any(p[7] == mt.ORE_GLINT for p in w.parts if p[4] > 0)
+       and any(p[7] in mt.STONE_CHIPS for p in w.parts if p[4] > 0),
+       "debris is stone-coloured with orange-gold glints for ORE")
+    ok(abs(w.trauma - mt.TRAUMA_MINE_ORE) < 1e-9, "an ORE break adds TRAUMA_MINE_ORE")
+    labels = sorted(f[1] for f in w.floats if f[4] is not None)
+    ok(len(labels) == 2 and labels == [0.0, mt.FLOAT_STAGGER],
+       "two floating labels (+1 STONE, +1 ORE), the second staggered")
+    ok(sg.toast and "STONE" in sg.toast and "ORE" in sg.toast, "the toast still names the drops")
+    sh.render()
+    keep("sandbox-mine-crack")
+    tr = tile_rect(33, 46)
+    ok(lum(sh.surf, tr) > lum(sh.surf, tile_rect(32, 46)) + 25,
+       "the broken tile flashes white on its crack frame")
+    hud0 = hud_bytes()
+    crack_frames, shook, peak_off, peak_live = 0, False, 0, 0
+    for f in range(90):
+        tick()
+        if w.cracks:
+            crack_frames += 1
+        sh.render()
+        if f == 8:
+            keep("sandbox-mine-debris")
+        off = max(abs(sh.cam[0] - clamp_cam(sg)[0]), abs(sh.cam[1] - clamp_cam(sg)[1]))
+        shook = shook or off > 0
+        peak_off = max(peak_off, off)
+        peak_live = max(peak_live, w.live())
+        if f < 4:
+            ok(hud_bytes() == hud0, "frame %d: the HUD never moves with the nudge" % f)
+    ok(1 <= crack_frames + 1 <= 4, "the crack lasts 2-4 frames (%d)" % (crack_frames + 1))
+    ok(shook and peak_off <= mt.WORLD_SHAKE_MAX,
+       "the camera nudges, at most WORLD_SHAKE_MAX px (peak %d)" % peak_off)
+    ok(peak_live <= mt.DEBRIS_MAX, "debris never exceeds DEBRIS_MAX")
+    ok(w.trauma == 0 and w.live() == 0 and not w.cracks
+       and all(f[4] is None for f in w.floats), "after 1.5 s the mining juice has fully settled")
+    ok(random.getstate() == rstate, "mining juice and its frames never touch `random`")
+
+    # Pool bound, trauma clamp, trauma^2 and per-second decay.
+    ids = [id(p) for p in w.parts]
+    for i in range(20):
+        w.event("mine", 33, 46, "#", {"stone": 1, "ore": 1})
+    ok(w.live() == mt.DEBRIS_MAX and [id(p) for p in w.parts] == ids,
+       "mining spam saturates the debris pool at DEBRIS_MAX without allocating")
+    ok(sum(1 for f in w.floats if f[4] is not None) == mt.FLOAT_MAX, "labels cap at FLOAT_MAX")
+    ok(w.trauma == 1.0, "overworld trauma clamps at 1.0")
+    mt.FX_RNG.seed(3)
+    peak = max(max(abs(a), abs(b)) for a, b in (w.offset() for _ in range(3000)))
+    ok(peak == mt.WORLD_SHAKE_MAX, "full trauma nudges exactly WORLD_SHAKE_MAX (%d)" % peak)
+    w.reset()
+    w.trauma = 1.0
+    for _ in range(5):
+        w.update(1 / 30)
+    t30 = w.trauma
+    w.trauma = 1.0
+    for _ in range(24):
+        w.update(1 / 144)
+    ok(abs(t30 - w.trauma) < 1e-6, "overworld trauma decays per second, not per frame")
+    w.reset()
+    sg.edits = {}
+
+    # Build box: green where placement_ok allows, red where it refuses.
+    sg.building, sg.materials["wall"] = True, 1
+    stand(30, 44)
+    sg.player.dir = "up"
+    calls0 = sh.target_calls
+    sh.render()
+    want = mt.placement_ok(30, 43, sg.edits, sg.picked, sg.npc_tiles(), (30, 44))
+    ok(want[0] and sh.build_target() == want, "build_target agrees with placement_ok (allowed)")
+    r = tile_rect(30, 43)
+    ok(sh.surf.get_at((r.x, r.y + 16))[:3] == mt.TARGET_OK, "an allowed tile gets a TARGET_OK box")
+    keep("sandbox-target-ok")
+    for _ in range(30):
+        sh.render()
+    ok(sh.target_calls == calls0 + 1, "31 frames facing one tile ran placement_ok once (%d)"
+       % (sh.target_calls - calls0))
+    sg.materials["wall"] = 0
+    sh.render()
+    ok(sh.surf.get_at((r.x, r.y + 16))[:3] == mt.TARGET_BAD and sh.target_calls == calls0 + 1,
+       "with no WALLs left the box turns red (no new BFS)")
+    sg.materials["wall"] = 1
+    sg.edits = mt.with_edit(sg.edits, 30, 43, mt.WALL)        # injected: the cache must notice
+    sh.render()
+    ok(sh.target_calls == calls0 + 2 and sh.build_target()[0] is False,
+       "a new overlay invalidates the cache and the result follows it")
+    sg.edits = {}
+    stand(41, 45)
+    sg.player.dir = "right"
+    sh.render()
+    want = mt.placement_ok(42, 45, sg.edits, sg.picked, sg.npc_tiles(), (41, 45))
+    ok(not want[0] and sh.build_target() == want, "build_target agrees with placement_ok (refused)")
+    r = tile_rect(42, 45)
+    ok(sh.surf.get_at((r.x, r.y + 16))[:3] == mt.TARGET_BAD, "a refused tile gets a TARGET_BAD box")
+    keep("sandbox-target-bad")
+    sg.interact()
+    ok("bare ground" in (sg.toast or ""), "confirm on a refused tile still toasts the reason")
+
+    # WALL pop-in: easeOutBack from POP_FROM, overshoots, settles to the plain tile.
+    stand(30, 44)
+    sg.player.dir = "up"
+    sg.interact()
+    ok(sg.tile(30, 43) == mt.WALL and (30, 43) in w.pops, "placing a WALL starts its pop-in")
+    ok(abs(w.pop_scale((30, 43)) - mt.POP_FROM) < 1e-9, "the pop starts at POP_FROM")
+    scales, frames = [], 0
+    while (30, 43) in w.pops and frames < 60:
+        scales.append(w.pop_scale((30, 43)))
+        sh.render()
+        if frames == 5:
+            keep("sandbox-wall-pop")
+        tick()
+        frames += 1
+    ok(frames <= round(mt.POP_TIME / DT) + 1, "the pop-in settles in %d frames" % frames)
+    ok(max(scales) > 1.05, "the pop overshoots (peak scale %.2f)" % max(scales))
+    sg.building = False
+    while w.live():
+        tick()
+    sh.render()
+    r = tile_rect(30, 43)
+    settled = snap(pygame.Rect(r.x, r.y, mt.TILE, 26))         # the player's hat pokes in below
+    plain = tile_img(mt.WALL, 30, 43).subsurface(pygame.Rect(0, 0, mt.TILE, 26))
+    ok(settled == pygame.image.tobytes(plain, "RGB"),
+       "after the pop the WALL draws exactly as the plain tile")
+
+    # Mining your own WALL back puffs dust.
+    sg.interact()
+    ok(sg.tile(30, 43) == "." and w.live() == mt.DEBRIS_BURST + mt.DUST_BURST
+       and any(p[7] == mt.DUST_COL for p in w.parts if p[4] > 0),
+       "mining a WALL back sprays chips and a dust puff")
+    ok(any(f[4] is not None for f in w.floats), "and floats its +2 STONE")
+    w.reset()
+
+    # ORE tell: only ORE boulders, only near the player, only while unmined.
+    sg.edits = {}
+    stand(34, 46)
+    seen = set()
+    rstate = random.getstate()
+    for i in range(int(2 * mt.SPARKLE_PERIOD / DT)):
+        sg.time = i * DT
+        for x, y, k in sh.ore_tells():
+            seen.add((x, y))
+            if not 0 <= k <= 1:
+                ok(False, "glint strength %.2f outside 0..1" % k)
+    ok(seen and seen <= sh.ore_spots, "only ORE boulders glint (%s)" % sorted(seen))
+    ok((33, 46) in seen, "the ORE boulder beside the player glints within two periods")
+    ok(all(max(abs(x - 34), abs(y - 46)) <= mt.SPARKLE_RADIUS for x, y in seen),
+       "no glint beyond SPARKLE_RADIUS")
+    t_on = None
+    for i in range(400):
+        sg.time = i * DT
+        if any((x, y) == (33, 46) and k > 0.9 for x, y, k in sh.ore_tells()):
+            t_on = sg.time
+            break
+    sg.time = t_on
+    sh.render()
+    keep("sandbox-ore-sparkle")
+    ok(bytes(mt.ORE_GLINT) in colours(sh.surf.subsurface(tile_rect(33, 46))),
+       "a glinting ORE boulder shows ORE_GLINT pixels")
+    sg.time = t_on + mt.SPARKLE_PERIOD / 2
+    sh.render()
+    ok(not any((x, y) == (33, 46) for x, y, _ in sh.ore_tells())
+       and bytes(mt.ORE_GLINT) not in colours(sh.surf.subsurface(tile_rect(33, 46))),
+       "between glints the boulder is plain")
+    far = next((x, y) for y in range(mt.ROCK_BAND[0], mt.ROCK_BAND[1] + 1)
+               for x in range(2, mt.MAP_W - 2)
+               if not sg.blocked_for(x, y) and all(
+                   max(abs(x - a), abs(y - b)) > mt.SPARKLE_RADIUS for a, b in sh.ore_spots))
+    stand(*far)
+    far_tells = 0
+    for i in range(100):
+        sg.time = i * 0.05
+        far_tells += len(sh.ore_tells())
+    ok(far_tells == 0, "standing at %s, far from ORE, nothing glints (no map-wide reveal)" % (far,))
+    stand(34, 46)
+    sg.edits = mt.with_edit({}, 33, 46, ".")
+    mined_tells = 0
+    for i in range(100):
+        sg.time = i * 0.05
+        mined_tells += sum(1 for x, y, _ in sh.ore_tells() if (x, y) == (33, 46))
+    ok(mined_tells == 0, "a mined ORE boulder stops glinting")
+    sg.edits = {}
+    ok(random.getstate() == rstate, "the ORE tell never touches `random`")
+
+    # REDUCED_MOTION: no nudge, no crack flash, instant WALL, steady glint.
+    try:
+        mt.REDUCED_MOTION = True
+        w.reset()
+        stand(34, 46)
+        sg.player.dir = "left"
+        sg.interact()
+        ok(w.trauma > 0 and all(w.offset() == (0, 0) for _ in range(200)),
+           "reduced motion: mining accrues trauma but never nudges")
+        ok(w.live() == mt.DEBRIS_BURST_REDUCED + 1, "reduced motion: %d chips + 1 glint"
+           % mt.DEBRIS_BURST_REDUCED)
+        sh.render()
+        tr = tile_rect(33, 46)
+        ok(lum(sh.surf, tr) < lum(sh.surf, tile_rect(32, 46)) + 25,
+           "reduced motion: the crack frame does not flash")
+        w.event("place", 30, 43, mt.WALL, {})
+        ok(w.pop_scale((30, 43)) == 1.0, "reduced motion: a WALL appears at full size")
+        stand(34, 46)
+        sg.edits = {}
+        steady = []
+        for t_ in (0.0, 0.7, 1.3, 2.9):
+            sg.time = t_
+            steady.append(sorted(sh.ore_tells()))
+        ok(steady[0] and all(s_ == steady[0] for s_ in steady),
+           "reduced motion: the ORE tell is steady, not blinking")
+    finally:
+        mt.REDUCED_MOTION = False
+    w.reset()
+
+    # A one-frame tap: KEYDOWN and KEYUP between two frames still turns and steps.
+    stand(30, 44)
+    sg.player.dir = "up"
+    idle = dict(up=False, down=False, left=False, right=False, run=False)
+    ok(mt.held_with_taps(idle, set()) is idle, "no taps: held keys pass through untouched")
+    sg.update(DT, idle)
+    ok(sg.player.dir == "up" and not sg.player.moving, "without the latch a missed tap does nothing")
+    sg.update(DT, mt.held_with_taps(idle, {"left"}))
+    ok(sg.player.dir == "left" and sg.player.moving and sg.player.tx == 29,
+       "a latched tap turns the player and starts a step, like a one-frame hold")
+    held_up = dict(idle, up=True)
+    ok(mt.held_with_taps(held_up, {"up"}) == held_up, "a real hold is unchanged by its own tap")
+
+    # CRAFT sits clear of the HUD and the toast strip.
+    craft_r = pygame.Rect(*mt.CRAFT_RECT)
+    toast_r = pygame.Rect(mt.W // 2 - 140, mt.H - 60, 280, 34)
+    ok(not any(craft_r.colliderect(h) for h in WORLD_HUD + [toast_r]),
+       "the CRAFT panel overlaps no HUD panel or the toast")
+    ok(craft_r.bottom <= mt.H and craft_r.top >= 0, "the CRAFT panel fits in %dx%d" % (mt.W, mt.H))
+    stand(34, 46)
+    sg.materials = dict(stone=3, ore=1, wall=2)
+    sg.show_toast("A toast under CRAFT.")
+    sh.render()
+    hud_ow = hud_bytes() + [snap(toast_r)]
+    sg.mode, sg.craft_cursor = "craft", 0
+    sh.render()
+    keep("sandbox-craft")
+    ok(hud_bytes() + [snap(toast_r)] == hud_ow, "with CRAFT open the HUD and toast are untouched")
+
+    # -- the CRAFT grid scrolls by rows in a CRAFT_GRID_ROWS window: HUD/toast never move, cues track it --
+    cqx, cqy, _cqw, _cqh = mt.CRAFT_RECT
+    pitch = mt.CRAFT_SLOT + mt.CRAFT_GAP
+
+    def craft_cue(up):
+        cy = cqy + mt.CRAFT_GRID_Y + (8 if up else (mt.CRAFT_GRID_ROWS - 1) * pitch + mt.CRAFT_SLOT - 8)
+        return tuple(sh.surf.get_at((cqx + mt.CRAFT_CUE_X, cy)))[:3] == mt.CUE_COL
+
+    def walk_craft(label):
+        n = len(mt.craft_cells(sg))
+        rows = -(-n // mt.CRAFT_COLS)
+        seen_up = seen_dn = False
+        for cur in range(n):
+            sg.craft_cursor = cur
+            sh.render()
+            ok(hud_bytes() + [snap(toast_r)] == hud_ow,
+               "%s: CRAFT at cursor %d/%d leaves the HUD and toast untouched" % (label, cur, n))
+            top = mt.list_top(rows, cur // mt.CRAFT_COLS, mt.CRAFT_GRID_ROWS)
+            ok(sh.craft_top(n) == top, "%s: the grid's top row %d tracks cursor %d" % (label, top, cur))
+            want_up, want_dn = top > 0, top + mt.CRAFT_GRID_ROWS < rows
+            ok(craft_cue(True) == want_up and craft_cue(False) == want_dn,
+               "%s: CRAFT cursor %d/%d shows up cue %s, down cue %s" % (label, cur, n, want_up, want_dn))
+            r = sh.craft_cell_rect(cur, top)
+            ok(craft_r.contains(r.inflate(8, 8))
+               and tuple(sh.surf.get_at((r.x - 3, r.centery)))[:3] == mt.CRAFT_SEL_LINE,
+               "%s: the cursor cell %d is on screen inside CRAFT_RECT with its yellow outline" % (label, cur))
+            seen_up, seen_dn = seen_up or want_up, seen_dn or want_dn
+        return seen_up, seen_dn
+
+    n_ship = len(mt.craft_cells(sg))
+    ok(walk_craft("shipped") == (-(-n_ship // mt.CRAFT_COLS) > mt.CRAFT_GRID_ROWS,) * 2,
+       "the shipped %d-cell CRAFT grid shows scroll cues only if it outgrows CRAFT_GRID_ROWS" % n_ship)
+    real_cells = mt.craft_cells
+    try:
+        base = real_cells(sg)
+        mt.craft_cells = lambda g_: [dict(base[k % len(base)]) for k in range(23)]
+        ok(walk_craft("long") == (True, True), "a 23-cell CRAFT grid scrolls by rows and shows both cues")
+        sg.craft_cursor = 0
+        for _ in range(30):
+            sg.move_cursor(0, 1)
+        ok(sg.craft_cursor == 20, "down walks a 23-cell grid's first column to its last row (%d)" % sg.craft_cursor)
+        for _ in range(30):
+            sg.move_cursor(1, 0)
+        ok(sg.craft_cursor == 22, "right then stops on the last cell (%d)" % sg.craft_cursor)
+        sh.render()
+        keep("sandbox-craft-scrolled")
+    finally:
+        mt.craft_cells = real_cells
+    sg.craft_cursor = 0
+    sg.mode, sg.toast_t = "overworld", 0
+
+    # -- the IRON PICK cell, the tool chip, and every cell inside CRAFT_RECT ---
+    cx0, cy0, cw0, ch0 = mt.CRAFT_RECT
+    iron_i = next(i for i, r in enumerate(mt.RECIPES) if r.get("sets_tier"))
+    sg.mode, sg.craft_cursor, sg.craft_msg = "craft", iron_i, ""
+    sg.flags["pick"] = 1
+    sg.materials = dict(stone=0, ore=0, wall=0)
+    iron_short = show("craft-iron-short")
+    ok(mt.craft_cells(sg)[iron_i]["state"] == "locked", "a short IRON PICK cell is locked")
+    sg.materials = dict(stone=6, ore=3, wall=0)
+    iron_ready = show("craft-iron-ready")
+    ok(iron_ready != iron_short, "the IRON PICK cell redraws when it becomes craftable")
+    all_cells = mt.craft_cells(sg)
+    cell_rs = [sh.craft_cell_rect(k, sh.craft_top(len(all_cells))) for k in range(len(all_cells))]
+    ok(all(craft_r.contains(r.inflate(8, 8)) for r in cell_rs)
+       and not any(a.colliderect(b) for i_, a in enumerate(cell_rs) for b in cell_rs[i_ + 1:]),
+       "every CRAFT cell (with its outline) sits inside CRAFT_RECT, none overlapping")
+    ok(busy(sh.surf.subsurface(cell_rs[iron_i]), 4), "the IRON PICK cell has content")
+    tier_r = pygame.Rect(cx0 + 116, cy0 + 16, 160, 26)
+    tier1 = snap(tier_r)
+    sg.confirm()
+    ok(sg.flags["pick"] == 2, "confirming the IRON PICK cell crafts it")
+    sh.crfx.skip()
+    iron_owned = show("craft-iron-owned")
+    ok(snap(tier_r) != tier1, "the CRAFT header's PICK chip changes to IRON PICK")
+    ok(iron_owned != iron_ready, "an owned IRON PICK cell draws differently")
+    ok(bytes(mt.CRAFT_OK) in colours(sh.surf.subsurface(cell_rs[iron_i]).copy()),
+       "an owned cell carries the green check")
+
+    # -- icons: every id blits pixel for pixel ---------------------------------
+    icon_bad = []
+    for iid, rows_ in mt.ICONS.items():
+        img = sh.icon_surf(iid, 1)
+        for py_, row_ in enumerate(rows_):
+            for px_, ch_ in enumerate(row_):
+                c_ = img.get_at((px_, py_))
+                good = c_.a == 0 if ch_ == "." else (c_.a == 255 and tuple(c_)[:3] == mt.ICON_PALETTE[ch_][:3])
+                if not good:
+                    icon_bad.append((iid, px_, py_))
+    ok(not icon_bad and len(mt.ICONS) > 0, "all %d icons match their table pixel for pixel %s"
+       % (len(mt.ICONS), icon_bad[:3]))
+    grey_sat = [iid for iid in mt.ICONS for c_ in colours(sh.icon_surf(iid, 1, "grey"))
+                if max(c_) - min(c_) >= 24 and c_ != bytes((0, 0, 0))]
+    ok(not grey_sat, "grey icons carry no saturated pixel %s" % grey_sat[:3])
+
+    # -- the cell states, Z on cells, the craft animation ---------------------
+    axe_ci = [r["id"] for r in mt.RECIPES].index("axe")
+    wall_ci = [r["id"] for r in mt.RECIPES].index("wall")
+    build_ci = len(mt.RECIPES)
+
+    def craft_fresh(cursor=0):
+        stand(34, 46, "craft")
+        sg.flags.pop("pick", None)
+        sg.flags["axe"] = 0
+        sg.materials = dict(stone=0, ore=0, wall=0)
+        sg.bag, sg.balls, sg.lantern, sg.pulses = {}, 0, 100, 0
+        sg.found = {"balls", "lantern"}
+        sg.craft_cursor, sg.craft_msg, sg.building = cursor, "", False
+        sh.crfx.clear()
+
+    def icon_box(k):
+        r = sh.craft_cell_rect(k, sh.craft_top(len(mt.craft_cells(sg))))
+        return [tuple(sh.surf.get_at((r.x + 8 + i_, r.y + 8 + j_)))[:3] for j_ in range(32) for i_ in range(32)]
+
+    craft_fresh(0)
+    ok(mt.craft_cells(sg)[axe_ci]["state"] == "hidden", "a fresh game hides the AXE cell")
+    show("craft-fresh")
+    allowed = {mt.ICON_SHADOW, mt.CRAFT_SLOT_FILL, (255, 255, 255), (0, 0, 0)}
+    stray = {c_ for c_ in icon_box(axe_ci) if c_ not in allowed}
+    ok(not stray, "the hidden AXE cell shows only its silhouette and a white ? on the slot %s" % sorted(stray)[:3])
+    ok((255, 255, 255) in icon_box(axe_ci) and mt.ICON_SHADOW in icon_box(axe_ci),
+       "the hidden cell draws both the silhouette and the ?")
+    craft_fresh(1)
+    ok(mt.craft_cells(sg)[wall_ci]["state"] == "locked", "a fresh WALL cell is locked")
+    sh.render()
+    sat = [c_ for c_ in icon_box(wall_ci) if c_ != mt.CRAFT_SLOT_FILL and max(c_) - min(c_) >= 24]
+    ok(not sat, "the locked WALL cell has no saturated icon pixel %s" % sat[:3])
+
+    # Z on cells (spec 4 "Crafting through cells"), through Shell.key like a real key
+    craft_fresh(axe_ci)
+    hold = (dict(sg.bag), dict(sg.materials), sg.balls, dict(sg.flags))
+    ok(sh.key(pygame.K_z) and sg.mode == "craft" and sg.craft_msg == mt.CRAFT_MSG["hidden"]
+       and (dict(sg.bag), dict(sg.materials), sg.balls, dict(sg.flags)) == hold and not sh.crfx.active(),
+       "Z on a hidden cell crafts nothing and says %r" % sg.craft_msg)
+    craft_fresh(build_ci)
+    sh.key(pygame.K_z)
+    ok(sg.mode == "craft" and not sg.building and sg.craft_msg == mt.CRAFT_MSG["nowall"],
+       "Z on BUILD with no WALLs stays in CRAFT: %r" % sg.craft_msg)
+    show("craft-build-nowall")
+    sg.materials["wall"] = 1
+    sh.key(pygame.K_z)
+    ok(sg.mode == "overworld" and sg.building, "Z on BUILD with a WALL enters build mode")
+    sg.building = False
+    craft_fresh(0)
+    sh.key(pygame.K_x)
+    ok(sg.mode == "overworld", "X closes CRAFT")
+
+    # the animation: a real AXE craft, frame by frame
+    def axe_ready():
+        craft_fresh(axe_ci)
+        sg.bag = {"twig": 2, "flint": 1}
+        mt.note_found(sg)
+
+    axe_ready()
+    still_before = show("craft-axe-ready")
+    sounds = []
+    real_sfx = sg.sfx
+    sg.sfx = lambda name: (sounds.append(name), real_sfx(name))
+    rs_anim, fx_anim = random.getstate(), mt.FX_RNG.getstate()
+    try:
+        sh.key(pygame.K_z)
+    finally:
+        sg.sfx = real_sfx
+    ok(sg.flags["axe"] == 1 and sounds == ["craft"], "a craft plays one 'craft' ding, not 'level': %s" % sounds)
+    ok(sh.crfx.active() and sh.crfx.recipe == axe_ci and sh.crfx.before == {"twig": 2, "flint": 1},
+       "a craft starts CraftFx with the before counts %r" % sh.crfx.before)
+    ok(mt.FX_RNG.getstate() != fx_anim and len(sh.crfx.sparks) == mt.CRAFT_SPARKS,
+       "the sparks come from FX_RNG (%d)" % len(sh.crfx.sparks))
+    anim = {}
+    for t_ in (0.0, 0.15, 0.3, 0.425, 0.5):
+        if sh.crfx.active() and t_ > sh.crfx.t:
+            sh.crfx.update(t_ - sh.crfx.t)
+        sh.render()
+        anim[t_] = (snap(), sh.crfx.active())
+        if t_ == 0.15:
+            keep("craft-fly")
+            fly_counts = colours(sh.surf.subsurface((cqx + 440, cqy + 170, 40, 44)).copy())
+        if t_ == 0.425:
+            keep("craft-pop")
+            pop_cols = colours(sh.surf.subsurface((cqx + 340, cqy + 32, 100, 100)).copy())
+    ok(all(anim[t_][1] for t_ in anim), "the animation is still running at t = 0.5")
+    sh.crfx.update(mt.CRAFT_FLY_T + mt.CRAFT_POP_T - sh.crfx.t + 1e-9)
+    ok(not sh.crfx.active(), "the animation ends at CRAFT_FLY_T + CRAFT_POP_T = %.2f s"
+       % (mt.CRAFT_FLY_T + mt.CRAFT_POP_T))
+    still = show("craft-axe-owned")
+    outside = [pygame.Rect(0, 0, mt.W, cqy), pygame.Rect(0, cqy + _cqh, mt.W, mt.H - cqy - _cqh),
+               pygame.Rect(0, cqy, cqx, _cqh), pygame.Rect(cqx + _cqw, cqy, mt.W - cqx - _cqw, _cqh)]
+
+    def outside_of(raw):
+        img = pygame.image.frombytes(raw, (mt.W, mt.H), "RGB")
+        return [pygame.image.tobytes(img.subsurface(r_), "RGB") for r_ in outside]
+    ok(all(outside_of(anim[t_][0]) == outside_of(still) for t_ in anim),
+       "every animation frame (t = 0, 0.15, 0.3, 0.425, 0.5) changes nothing outside CRAFT_RECT")
+    ok(all(anim[t_][0] != still for t_ in anim) and still != still_before,
+       "every animation frame differs from the settled frame, which shows the owned AXE")
+    ok(bytes(mt.CRAFT_OK) in fly_counts, "while flying the need rows show the before counts (green)")
+    ok(bytes(mt.CRAFT_SPARK_COL) in pop_cols and bytes(mt.CRAFT_GLOW_COL) in pop_cols,
+       "mid-pop draws sparks over the glow")
+    ok(random.getstate() == rs_anim, "the craft and its animation never touch the engine random stream")
+
+    # a key during the fly skips to the end and is still handled
+    axe_ready()
+    sh.key(pygame.K_z)
+    sh.crfx.update(0.1)
+    ok(sh.crfx.flying(), "the second craft is mid-fly")
+    sh.key(pygame.K_z)
+    ok(not sh.crfx.active() and sg.craft_msg == "You already have the AXE.",
+       "Z mid-fly skips the animation and is handled: %r" % sg.craft_msg)
+    # leaving CRAFT clears it on the next shell frame
+    axe_ready()
+    sh.key(pygame.K_z)
+    sg.mode = "overworld"
+    sh.update_cave_fx(1 / 60)
+    ok(not sh.crfx.active(), "the first shell frame outside CRAFT clears CraftFx")
+
+    # reduced motion: no fly, pop or sparks; a short glow and the icon at exactly 3x
+    try:
+        mt.REDUCED_MOTION = True
+        axe_ready()
+        fx_calm = mt.FX_RNG.getstate()
+        sh.key(pygame.K_z)
+        ok(sh.crfx.active() and sh.crfx.sparks == [] and mt.FX_RNG.getstate() == fx_calm
+           and not sh.crfx.flying() and sh.crfx.total() == mt.CRAFT_GLOW_T,
+           "reduced motion: no sparks, no FX_RNG draw, no fly, a %.1f s glow" % mt.CRAFT_GLOW_T)
+        sh.render()
+        keep("craft-calm-glow")
+        res = pygame.Rect(cqx + 360, cqy + 52, 60, 60)
+        art = mt.ICONS[mt.icon_id("axe")]
+        exact = all(tuple(sh.surf.get_at((res.x + 6 + px_ * 3 + d_, res.y + 6 + py_ * 3 + e_)))[:3]
+                    == mt.ICON_PALETTE[ch_][:3]
+                    for py_, row_ in enumerate(art) for px_, ch_ in enumerate(row_) if ch_ != "."
+                    for d_ in range(3) for e_ in range(3))
+        ok(exact, "reduced motion draws the result icon at exactly 3x")
+        ok(tuple(sh.surf.get_at((res.x - 3, res.centery)))[:3] == mt.CRAFT_GLOW_COL, "reduced motion glows")
+        sh.crfx.update(mt.CRAFT_GLOW_T)
+        ok(not sh.crfx.active(), "the glow ends after CRAFT_GLOW_T")
+    finally:
+        mt.REDUCED_MOTION = False
+    craft_fresh(0)
+    sg.mode = "overworld"
+
+    # -- the older Shell.key branches, kept by the CRAFT rework ----------------
+    keep_state = (sg.mode, sg.new_game_confirm, sg.focused, sg.menu_cursor,
+                  sg.settings["reducedMotion"], mt.REDUCED_MOTION, sh.cfx.lunge_age, sh.pending_confirm)
+    try:
+        sg.mode, sg.new_game_confirm = "title", False
+        ok(sh.key(pygame.K_x) is False, "X on the title (no KEEP SAVE / START NEW prompt) quits: key() is False")
+        sg.mode = "menu"
+        was_rm = sg.settings["reducedMotion"]
+        sh.key(pygame.K_F3)
+        ok(sg.settings["reducedMotion"] == (not was_rm) and mt.REDUCED_MOTION == (not was_rm),
+           "F3 on the menu flips settings reducedMotion and REDUCED_MOTION together")
+        sh.key(pygame.K_F3)
+        ok(sg.settings["reducedMotion"] == was_rm and mt.REDUCED_MOTION == was_rm, "F3 again flips them back")
+        sg.focused, sg.mode = False, "menu"
+        cur0 = sg.menu_cursor
+        ok(sh.key(pygame.K_DOWN) is True and sg.mode == "menu" and sg.menu_cursor == cur0,
+           "an unfocused window ignores a key: mode and cursor unchanged")
+        sg.focused, sg.mode = True, "overworld"
+        sh.pending_confirm, sh.cfx.lunge_age = False, 0.0
+        sh.key(pygame.K_z)
+        ok(sh.pending_confirm is True and sg.mode == "overworld",
+           "Z during the lunge flare is buffered in pending_confirm, not dropped")
+    finally:
+        (sg.mode, sg.new_game_confirm, sg.focused, sg.menu_cursor, sg.settings["reducedMotion"],
+         mt.REDUCED_MOTION, sh.cfx.lunge_age, sh.pending_confirm) = keep_state
+
+    # -- the THICK TREE: a marked forest tree, and ordinary ground once cut ----
+    def near_trunk(img):
+        raw = pygame.image.tobytes(img, "RGB")
+        return sum(1 for i in range(0, len(raw), 3)
+                   if all(abs(raw[i + k] - mt.TREE_TRUNK[k]) <= 12 for k in range(3)))
+    TRUNK_MIN = 80        # the 5x25 trunk band is 125 px; three notch wedges take ~25 of them
+    t_img, f_img = tile_img(mt.TREE, 19, 84), tile_img("#", 18, 84)
+    ok(pygame.image.tobytes(t_img, "RGB") != pygame.image.tobytes(f_img, "RGB"),
+       "the THICK TREE (T) at (19,84) draws unlike the forest tree (#) beside it")
+    t_trunk = near_trunk(t_img)
+    ok(t_trunk >= TRUNK_MIN and near_trunk(f_img) == 0,
+       "the THICK TREE shows its pale trunk band: %d px within 12 of TREE_TRUNK (need >= %d; # has 0)"
+       % (t_trunk, TRUNK_MIN))
+    ok(bytes(mt.TREE_NOTCH) in colours(t_img), "the THICK TREE trunk carries its axe notches")
+    ok(t_img.get_at((0, 0))[:3] == mt.ground_tone(19, 84),
+       "the THICK TREE borrows its ground through ground_tone")
+    tree_rects = {}
+    for gx_, sx_, name in ((19, 21, "deepwood-tree-west"), (71, 69, "deepwood-tree-east")):
+        sg.edits = {}
+        stand(sx_, 84)
+        sh.render()
+        keep(name)
+        r = pygame.Rect(int(gx_ * mt.TILE - sh.cam[0]), int(84 * mt.TILE - sh.cam[1]), mt.TILE, mt.TILE)
+        ok(near_trunk(sh.surf.subsurface(r).copy()) >= TRUNK_MIN,
+           "on screen, the THICK TREE at (%d,84) shows its trunk band" % gx_)
+        tree_rects[gx_] = r
+    sg.edits = mt.with_edit({}, 19, 84, ".")
+    stand(21, 84)
+    sh.render()
+    keep("deepwood-tree-west-cut")
+    cut = sh.surf.subsurface(tree_rects[19]).copy()
+    ok(sg.tile(19, 84) == "." and near_trunk(cut) == 0
+       and pygame.image.tobytes(cut, "RGB") == pygame.image.tobytes(tile_img(".", 19, 84), "RGB"),
+       "a cut THICK TREE draws as ordinary ground, exactly the '.' tile")
+    sg.edits = {}
+
+    # -- sealed glades draw as forest until their THICK TREE is cut -----------
+    # From the path beside each gate, the tile log over the glade must hold no
+    # grass or ball while sealed, and the hollow's dark grass once cut.
+    def glade_log(gx_, sx_):
+        stand(sx_, 84)
+        TILE_LOG.clear()
+        sh.draw_tile = _recording_draw_tile
+        sh.render()
+        sh.draw_tile = _real_draw_tile
+        rect = next(r for r in mt.GLADES if r[0] <= gx_ <= r[2])
+        return {(t, x, y) for t, x, y in TILE_LOG if rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]}
+    for gx_, sx_, probe in ((19, 21, (12, 85)), (71, 69, (75, 84))):
+        sg.edits, sg.picked = {}, set()
+        sealed = glade_log(gx_, sx_)
+        keep("glade-sealed-%d" % gx_)
+        ok(sealed and not any(t in (";", ",", "o", ".") for t, _, _ in sealed) and ("#",) + probe in sealed
+           and (mt.TREE, gx_, 84) in sealed,
+           "sealed glade at gate (%d,84): only forest and its THICK TREE draw over the glade (%d tiles)"
+           % (gx_, len(sealed)))
+        sg.edits = mt.with_edit({}, gx_, 84, ".")
+        opened_ = glade_log(gx_, sx_)
+        keep("glade-cut-%d" % gx_)
+        ok((";",) + probe in opened_ and (".", gx_, 84) in opened_,
+           "cut glade at gate (%d,84): its dark grass draws (%s)" % (gx_, probe,))
+    # Pixels over (10,85): exactly the '#' tile while sealed, not once cut.
+    def glade_px():
+        stand(14, 84)
+        sh.render()
+        r = pygame.Rect(int(10 * mt.TILE - sh.cam[0]), int(85 * mt.TILE - sh.cam[1]), mt.TILE, mt.TILE)
+        return pygame.image.tobytes(sh.surf.subsurface(r).copy(), "RGB")
+    forest_px = pygame.image.tobytes(tile_img("#", 10, 85), "RGB")
+    sg.edits = {}
+    sealed_px = glade_px()
+    sg.edits = mt.with_edit({}, 19, 84, ".")
+    cut_px = glade_px()
+    ok(sealed_px == forest_px and cut_px != forest_px,
+       "on screen, MOSS HOLLOW's (10,85) is exactly a '#' tile while sealed and not once cut")
+    sg.edits = {}
+
+    # -- the cracked seam: its own art, and readable under the cave darkness ---
+    seam_img = colours(tile_img(mt.SEAM, 70, 34))
+    ok(MAGENTA not in seam_img and seam_img != colours(tile_img("C", 71, 34)),
+       "the seam (K) covers its tile and looks unlike a cave wall")
+    ok(bytes(mt.SEAM_EDGE) in seam_img and bytes(mt.ORE_GLINT) in seam_img,
+       "the seam carries its lit lip and ORE flecks")
+    sg.edits, sg.picked = {}, set()
+    stand(70, 35)
+    sg.player.dir = "up"
+    sh.render()
+    keep("geode-seam-dark")
+    k_r = pygame.Rect(int(70 * mt.TILE - sh.cam[0]), int(34 * mt.TILE - sh.cam[1]), mt.TILE, mt.TILE)
+    k_dark = sh.surf.subsurface(k_r).copy()
+    warm = sum(1 for c in colours(k_dark) if c[0] > c[2] + 60 and c[0] > 90)
+    ok(warm >= 3, "inside the lantern the seam still shows warm, bright pixels (%d colours)" % warm)
+    sg.edits = {(70, 34): "C"}                       # render-only: the same view with a plain wall
+    sh.render()
+    ok(pygame.image.tobytes(sh.surf.subsurface(k_r), "RGB") != pygame.image.tobytes(k_dark, "RGB"),
+       "under the darkness the seam is distinguishable from a cave wall")
+    warm_c = sum(1 for c in colours(sh.surf.subsurface(k_r).copy()) if c[0] > c[2] + 60 and c[0] > 90)
+    ok(warm >= warm_c + 3, "the seam shows more warm colours than a plain wall in the same spot "
+       "(%d vs %d; the player's head overlaps both)" % (warm, warm_c))
+    sg.edits = {}
+
+    # Mining it reuses the world fx: crack frame of K, ORE glints, a +2 ORE label.
+    w = sh.wfx
+    w.reset()
+    sg.flags["pick"], sg.materials = 2, dict(stone=0, ore=0, wall=0)
+    sg.interact()
+    ok(sg.tile(70, 34) == "c" and w.cracks.get((70, 34), [0, None])[1] == mt.SEAM,
+       "mining the seam leaves a crack frame of the seam")
+    ok(any(p[4] > 0 and p[7] in (mt.ORE_GLINT, mt.ORE_GLINT_HI) for p in w.parts),
+       "mining the seam sprays ORE glints")
+    ok(any(f[4] is not None for f in w.floats), "mining the seam floats a pickup label")
+    TILE_LOG.clear()
+    sh.draw_tile = _recording_draw_tile
+    sh.render()
+    keep("geode-seam-crack")
+    ok((mt.SEAM, 70, 34) in TILE_LOG, "during its crack frames the broken seam still draws as K")
+    for _ in range(60):
+        w.update(1 / 30)
+    TILE_LOG.clear()
+    stand(70, 32)
+    sh.render()
+    keep("geode-interior")
+    sh.draw_tile = _real_draw_tile
+    ok(("c", 70, 34) in TILE_LOG and (";", 70, 32) in TILE_LOG and ("o", 75, 30) in TILE_LOG,
+       "the opened seam draws as floor, with the GEODE grass and ball behind it")
+    ok(busy(sh.surf), "the GEODE interior frame has content")
+    w.reset()
+    sg.edits = {}
+    sg.materials = dict(stone=0, ore=0, wall=0)
+    sg.flags["pick"] = False
+    sg.party = [mt.make_mon("emberling", 12)]
+
+    # -- polish: the GEODE's crystals, the seam tell, the tier-2 break, HUD, menu --
+    w = sh.wfx
+    w.reset()
+    sg.edits, sg.picked, sg.building, sg.toast_t = {}, set(), False, 0
+    sg.materials = dict(stone=0, ore=0, wall=0)
+    gx1, gy1, gx2, gy2 = mt.GEODE
+    in_geode = lambda x, y: gx1 <= x <= gx2 and gy1 <= y <= gy2
+    ok(mt.GEODE_DOOR == (70, 34) and mt.MAP[34][70] == mt.SEAM,
+       "GEODE_DOOR is the seam on the GEODE's bottom row %s" % (mt.GEODE_DOOR,))
+    ok(sh.geode_spots and all(in_geode(x, y) and mt.MAP[y][x] in "c;," for x, y in sh.geode_spots),
+       "%d GEODE crystals, all on open tiles inside GEODE" % len(sh.geode_spots))
+    ok(set(sh.seam_spots) == {(x, y) for y, r in enumerate(mt.MAP) for x, c in enumerate(r)
+                              if c == mt.SEAM}, "the shell's seam spots are exactly the MAP's K tiles")
+    rstate = random.getstate()
+
+
+    def glints_over(fn, periods=2.0, period=mt.GEODE_GLINT_PERIOD):
+        seen_, bad_ = set(), []
+        for i in range(int(periods * period / DT)):
+            sg.time = i * DT
+            for x, y, k in fn():
+                seen_.add((x, y))
+                if not 0 <= k <= 1:
+                    bad_.append(k)
+        return seen_, bad_
+
+
+    # Sealed: no glints, and the lantern shows rock where the pocket is.
+    sg.flags["pick"] = 2
+    stand(70, 35)
+    sg.player.dir = "up"
+    ok(not sh.geode_open(), "with the entrance seam unmined the GEODE is sealed")
+    sealed_glints, _ = glints_over(sh.geode_glints)
+    ok(not sealed_glints, "no GEODE glints while the seam is unmined")
+    TILE_LOG.clear()
+    sh.draw_tile = _recording_draw_tile
+    sh.render()
+    sh.draw_tile = _real_draw_tile
+    keep("geode-sealed-lantern")
+    pocket_drawn = {(t, x, y) for t, x, y in TILE_LOG if in_geode(x, y)}
+    ok(not any(t in (";", "o") for t, _, _ in pocket_drawn) and ("C", 70, 33) in pocket_drawn,
+       "sealed: the lantern shows rock, not the GEODE's grass or ball, through the wall")
+    ok((mt.SEAM, 70, 34) in pocket_drawn and (mt.SEAM, 65, 33) in pocket_drawn,
+       "sealed: both seams still draw as seams")
+    ok(bytes(mt.GEODE_GLINT) not in colours(sh.surf), "sealed: no GEODE_GLINT pixel on screen")
+    ok(not sh.geode_masked(70, 35) and not sh.geode_masked(64, 32), "the mask never touches tiles outside GEODE")
+
+    # The seam tell: IRON PICK only, near, unmined, and only on an open face.
+    sg.flags["pick"] = 1
+    t1, _ = glints_over(sh.seam_tells, period=mt.SPARKLE_PERIOD)
+    ok(not t1, "with the plain PICK no seam sparkles")
+    sg.flags["pick"] = 2
+    t2, bad = glints_over(sh.seam_tells, period=mt.SPARKLE_PERIOD)
+    ok(t2 == {(70, 34)} and not bad, "with the IRON PICK the faced seam sparkles (%s)" % sorted(t2))
+    t_on = None
+    for i in range(400):
+        sg.time = i * DT
+        if any(k > 0.9 for _, _, k in sh.seam_tells()):
+            t_on = sg.time
+            break
+    sg.time = t_on
+    sh.render()
+    keep("geode-seam-sparkle")
+    k_r = tile_rect(70, 34)
+    on_bytes = snap(k_r)
+    ok(bytes(mt.ORE_GLINT_HI) in colours(sh.surf.subsurface(k_r)),
+       "a sparkling seam shows ORE_GLINT_HI pixels")
+    sg.time = t_on + mt.SPARKLE_PERIOD / 2
+    sh.render()
+    ok(not sh.seam_tells() and snap(k_r) != on_bytes, "between sparkles the seam is plain")
+    stand(62, 33)                                        # outside, 3 tiles from the inner seam
+    t3, _ = glints_over(sh.seam_tells, period=mt.SPARKLE_PERIOD)
+    ok(not t3, "the sealed GEODE's inner seam (65,33) has no open face, so it never sparkles")
+    stand(30, 44)
+    t4, _ = glints_over(sh.seam_tells, period=mt.SPARKLE_PERIOD)
+    ok(not t4, "far from any seam nothing sparkles")
+    sg.flags["pick"] = 1
+    stand(70, 35)
+    sg.player.dir = "up"
+    sg.time = t_on
+    sh.render()
+    ok(not sh.seam_tells() and snap(k_r) != on_bytes, "a plain-PICK frame at the same moment shows no sparkle")
+    sg.flags["pick"] = 2
+
+    # The tier-2 break: heavier trauma (clamped), a short world-fx hit-stop, more debris.
+    SFX_LOG = []
+    real_sfx = sg.sfx
+    sg.sfx = lambda name: (SFX_LOG.append(name), real_sfx(name))
+    w.reset()
+    sg.interact()
+    ok(sg.tile(70, 34) == "c" and SFX_LOG[-1:] == ["mine_heavy"], "a seam break plays mine_heavy")
+    ok(mt.TRAUMA_MINE_HEAVY > mt.TRAUMA_MINE_ORE and abs(w.trauma - min(1.0, mt.TRAUMA_MINE_HEAVY)) < 1e-9
+       and w.trauma <= 1.0, "a seam break adds TRAUMA_MINE_HEAVY (%.2f), more than a boulder" % w.trauma)
+    ok(abs(w.freeze - mt.MINE_HITSTOP) < 1e-9, "a seam break starts a MINE_HITSTOP world-fx hold")
+    ok(w.live() == mt.DEBRIS_BURST_HEAVY + mt.DEBRIS_BURST_HEAVY_ORE
+       and mt.DEBRIS_BURST_HEAVY > mt.DEBRIS_BURST,
+       "a seam break sprays %d chips + %d ORE glints (a boulder: %d)"
+       % (mt.DEBRIS_BURST_HEAVY, mt.DEBRIS_BURST_HEAVY_ORE, mt.DEBRIS_BURST))
+    sh.render()
+    keep("geode-heavy-break")
+    parts0 = [tuple(p[:5]) for p in w.parts]
+    floats0 = [tuple(f[:2]) for f in w.floats]
+    cracks0 = {k: v[0] for k, v in w.cracks.items()}
+    trauma0, time0 = w.trauma, sg.time
+    held_frames = 0
+    ok(random.getstate() == rstate, "the seam tell and the heavy break never touch `random`")
+    sg.update(DT, dict(NO_KEYS, left=True))            # the game runs on during the hold
+    while w.freeze > 0 and held_frames < 30:
+        w.update(DT)
+        held_frames += 1
+        if w.freeze > 0:
+            ok([tuple(p[:5]) for p in w.parts] == parts0 and [tuple(f[:2]) for f in w.floats] == floats0
+               and {k: v[0] for k, v in w.cracks.items()} == cracks0 and w.trauma == trauma0,
+               "hit-stop frame %d: debris, labels, crack and shake decay all hold" % held_frames)
+    ok(held_frames == math.ceil(mt.MINE_HITSTOP / DT - 1e-9),
+       "the hold lasts MINE_HITSTOP (%d frames at 60 Hz)" % held_frames)
+    ok(sg.player.dir == "left" and sg.player.moving and sg.time > time0,
+       "input is never blocked: during the hold the player turned and started a step")
+    w.update(DT)
+    ok([tuple(p[:5]) for p in w.parts] != parts0 and w.trauma < trauma0, "after the hold the debris moves on")
+    sg.update(1.0, NO_KEYS)
+    rstate = random.getstate()                         # Game.update may roll (wanderers); juice must not
+    stand(70, 35)
+    sg.player.dir = "up"
+    w.reset()
+    sg.edits = {}
+    sg.interact()
+    peak_off, shook = 0, False
+    for f in range(90):
+        sh.render()
+        off = max(abs(sh.cam[0] - clamp_cam(sg)[0]), abs(sh.cam[1] - clamp_cam(sg)[1]))
+        peak_off, shook = max(peak_off, off), shook or off > 0
+        if f == 0:
+            hud0 = hud_bytes()
+        elif f < 6:
+            ok(hud_bytes() == hud0, "heavy-break frame %d: the HUD never moves" % f)
+        if f == 4:
+            keep("geode-heavy-debris")
+        w.update(DT)
+    ok(shook and peak_off <= mt.WORLD_SHAKE_MAX,
+       "the heavy break shakes the world at most WORLD_SHAKE_MAX px (peak %d)" % peak_off)
+    for _ in range(5):
+        w.event("mine", 70, 34, mt.SEAM, {"ore": 2})
+    mt.FX_RNG.seed(5)
+    peak = max(max(abs(a), abs(b)) for a, b in (w.offset() for _ in range(3000)))
+    ok(w.trauma == 1.0 and peak <= mt.WORLD_SHAKE_MAX and abs(w.freeze - mt.MINE_HITSTOP) < 1e-9,
+       "stacked seam breaks clamp trauma at 1.0 (offset %d px) and never stack the hold" % peak)
+    ok(w.live() <= mt.DEBRIS_MAX, "stacked seam breaks stay inside the DEBRIS_MAX pool")
+    w.reset()
+    stand(34, 46)
+    sg.player.dir = "left"
+    sg.interact()
+    ok(SFX_LOG[-1:] == ["mine"] and w.freeze == 0, "a boulder still plays mine and never holds")
+    sg.sfx = real_sfx
+    lo = lambda name: min(min(f, sl) if sl else f
+                          for _, f, _, wv, _, sl in mt.Sfx.SPEC[name] if wv != "noise")
+    span = lambda name: max(d + dur for d, _, dur, _, _, _ in mt.Sfx.SPEC[name])
+    ok(lo("mine_heavy") < lo("mine") and span("mine_heavy") > span("mine"),
+       "mine_heavy is deeper and longer than mine")
+    w.reset()
+
+    # Opened: the GEODE glints, inside its bounds only, with a violet wash over the dark.
+    sg.edits = {(70, 34): "c"}
+    stand(70, 32)
+    ok(sh.geode_open() and not sh.geode_masked(70, 32), "with the entrance mined the GEODE is open")
+    open_glints, bad = glints_over(sh.geode_glints)
+    ok(open_glints and open_glints <= set(sh.geode_spots) and not bad,
+       "after the seam is mined %d crystals glint, all inside GEODE" % len(open_glints))
+    t_on = None
+    for i in range(400):
+        sg.time = i * DT
+        hits = [(x, y) for x, y, k in sh.geode_glints() if k > 0.9]
+        if hits:
+            t_on, spot = sg.time, hits[0]
+            break
+    sg.time = t_on
+    TILE_LOG.clear()
+    sh.draw_tile = _recording_draw_tile
+    sh.render()
+    sh.draw_tile = _real_draw_tile
+    keep("geode-glints-open")
+    ok((";", 70, 32) in TILE_LOG and ("o", 75, 30) in TILE_LOG, "opened: the pocket draws its grass and ball")
+    ok(bytes(mt.GEODE_GLINT) in colours(sh.surf.subsurface(tile_rect(*spot))),
+       "a glinting crystal at %s shows GEODE_GLINT pixels" % (spot,))
+    stand(70, 35)
+    sg.time = t_on
+    sh.render()
+    far_r = tile_rect(66, 31)
+    lit = pygame.transform.average_color(sh.surf, far_r)
+    sh.draw_geode_light = lambda cx, cy: None
+    sh.render()
+    unlit = pygame.transform.average_color(sh.surf, far_r)
+    del sh.draw_geode_light
+    ok(lit[2] > unlit[2] + 4 and lit[2] > lit[1],
+       "beyond the lantern the opened pocket carries a violet wash (%s vs %s)" % (lit[:3], unlit[:3]))
+    stand(66, 33)
+    t5, _ = glints_over(sh.seam_tells, period=mt.SPARKLE_PERIOD)
+    ok((65, 33) in t5, "once the GEODE is open its inner seam sparkles from inside")
+    ok(random.getstate() == rstate, "glints, the seam tell and the heavy break never touch `random`")
+
+    # REDUCED_MOTION: no glints, no shake, no hold; the seam tell is steady, not blinking.
+    try:
+        mt.REDUCED_MOTION = True
+        stand(70, 32)
+        rm_glints, _ = glints_over(sh.geode_glints)
+        ok(not rm_glints, "reduced motion: no GEODE glints")
+        w.reset()
+        w.event("mine", 70, 34, mt.SEAM, {"ore": 2})
+        ok(w.freeze == 0 and w.trauma > 0 and all(w.offset() == (0, 0) for _ in range(200)),
+           "reduced motion: a seam break never holds and never shakes")
+        ok(w.live() == mt.DEBRIS_BURST_REDUCED + 1, "reduced motion: a seam break sprays %d chips + 1 glint"
+           % mt.DEBRIS_BURST_REDUCED)
+        sg.edits = {}
+        stand(70, 35)
+        steady = []
+        for t_ in (0.0, 0.7, 1.3, 2.9):
+            sg.time = t_
+            steady.append(sorted(sh.seam_tells()))
+        ok(steady[0] and all(s_ == steady[0] for s_ in steady),
+           "reduced motion: the seam tell is steady, not blinking")
+    finally:
+        mt.REDUCED_MOTION = False
+    w.reset()
+
+    # HUD: the materials panel names the pick tier.
+    mat_r = pygame.Rect(*mt.HUD_MAT_RECT)
+    stand(30, 44)
+    sg.edits = {}
+    sg.materials = dict(stone=99, ore=99, wall=99)
+    labels = {}
+    for tier in (0, 1, 2):
+        sg.flags["pick"] = tier
+        sh.render()
+        labels[tier] = colours(sh.surf.subsurface(mat_r))
+        if tier == 2:
+            keep("hud-iron-pick")
+    ok(bytes(mt.HUD_TIER_COL[1]) in labels[1] and bytes(mt.HUD_TIER_COL[2]) not in labels[1],
+       "tier 1: the HUD says PICK in its colour")
+    ok(bytes(mt.HUD_TIER_COL[2]) in labels[2] and bytes(mt.HUD_TIER_COL[1]) not in labels[2],
+       "tier 2: the HUD says IRON PICK in ORE gold")
+    ok(labels[0] != labels[1] and bytes(mt.HUD_TIER_COL[1]) not in labels[0],
+       "no pick: no materials panel and no tier label")
+    wide = 10 + sh.f11.size("IRON PICK  ")[0] + sh.f11.size("STONE 99  ORE 99  WALL 99")[0]
+    ok(wide <= mat_r.w - 4, "the widest HUD line (%d px) fits HUD_MAT_RECT (%d)" % (wide, mat_r.w))
+    ok(mat_r.bottom <= mt.CRAFT_RECT[1], "the materials panel ends above CRAFT_RECT")
+
+    # MENU: clear of every HUD panel, by rectangle and by pixels.
+    menu_r = pygame.Rect(mt.W - mt.MENU_W - 16, mt.MENU_Y, mt.MENU_W, 26 * len(mt.MENU_ITEMS) + 24)
+    build_r = pygame.Rect(mt.W // 2 - 148, 8, 296, 30)
+    toast_r = pygame.Rect(mt.W // 2 - 140, mt.H - 60, 280, 34)
+    hits = [r for r in WORLD_HUD + [build_r, toast_r] if menu_r.colliderect(r)]
+    ok(not hits, "the MENU panel %s overlaps no HUD panel (%s)" % (tuple(menu_r), hits))
+    ok(pygame.Rect(0, 0, mt.W, mt.H).contains(menu_r), "the MENU fits in %dx%d" % (mt.W, mt.H))
+    ok(not build_r.colliderect(mat_r) and not build_r.colliderect(pygame.Rect(*mt.HUD_LEAD_RECT)),
+       "the BUILDING banner clears the wider materials panel and the lead box")
+    sg.flags["pick"] = 2
+    sg.party[0].hp = sg.party[0].maxhp
+    sg.mode = "overworld"
+    sh.render()
+    hud_before = hud_bytes()
+    sg.mode, sg.menu_cursor = "menu", 0
+    sh.render()
+    keep("menu-no-overlap")
+    ok(hud_bytes() == hud_before, "with the MENU open every HUD panel is pixel-identical")
+    lead_r = pygame.Rect(*mt.HUD_LEAD_RECT)
+    gap = pygame.Rect(lead_r.x, lead_r.bottom, lead_r.w, menu_r.y - lead_r.bottom)
+    ok(gap.h > 0 and sh.surf.get_at((menu_r.right - 12, menu_r.centery))[:3] == mt.PAPER,
+       "the MENU draws its paper panel %d px below the lead box" % gap.h)
+    sg.mode = "overworld"
+
+    # The picked-ball line matches the ground it is on.
+    want_text = {"c": "cave floor", "s": "sand", "_": "path"}
+    for (ix, iy) in mt.ITEMS:
+        g_ = mt.picked_ground(ix, iy)
+        word = want_text.get(g_, "scree" if mt.ROCK_BAND[0] <= iy <= mt.ROCK_BAND[1] else "grass")
+        ok(word in mt.picked_text(ix, iy), "a taken ball at %d,%d says %r" % (ix, iy, mt.picked_text(ix, iy)))
+    sg.picked = {(20, 28)}
+    sg.pick_up(20, 28)
+    ok(sg.dialogue and "cave floor" in sg.dialogue["lines"][0], "the taken cave ball says cave floor")
+    sg.dialogue, sg.mode, sg.picked = None, "overworld", set()
+    sg.edits = {}
+    sg.flags["pick"] = False
+    sg.materials = dict(stone=0, ore=0, wall=0)
+
+    # -- juice unit checks: saturation, clamp, trauma^2, per-second decay -------
+    setup(sg, mt.make_mon("emberling", 20), mt.make_mon("sprigling", 20))
+    j = sh.juice
+    j.bind(sg.battle)
+    pool_ids = [id(p) for p in j.parts]
+    for _ in range(12):
+        j.hit(sg.battle, "foe", 2.0, True, "Fire")
+    ok(active(j) == mt.PARTICLE_MAX and [id(p) for p in j.parts] == pool_ids,
+       "hit spam saturates the pool at PARTICLE_MAX without allocating")
+    ok(j.trauma == 1.0, "trauma clamps at 1.0")
+    mt.FX_RNG.seed(9)
+    peak = max(max(abs(x), abs(y)) for x, y in (j.offset() for _ in range(3000)))
+    ok(peak == mt.SHAKE_MAX, "full trauma shakes out to exactly SHAKE_MAX (peak %d)" % peak)
+    j.trauma = 0.5
+    peak_half = max(max(abs(x), abs(y)) for x, y in (j.offset() for _ in range(3000)))
+    ok(1 <= peak_half <= round(0.25 * mt.SHAKE_MAX),
+       "half trauma shakes a quarter as far (trauma^2): peak %d" % peak_half)
+    j.trauma = 0.0
+    ok(all(j.offset() == (0, 0) for _ in range(50)), "zero trauma means zero shake")
+
+
+    def decay_after(dt, steps):
+        j.reset(sg.battle)
+        j.trauma = 1.0
+        for _ in range(steps):
+            j.update(dt, sg.battle)
+        return j.trauma
+
+
+    ok(abs(decay_after(1 / 30, 5) - decay_after(1 / 144, 24)) < 1e-6,
+       "trauma decays per second, not per frame (30 Hz and 144 Hz agree after 1/6 s)")
+    ok(abs(decay_after(DT, 15) - (1 - mt.TRAUMA_DECAY * 0.25)) < 1e-6,
+       "trauma loses TRAUMA_DECAY per second")
+    j.reset(sg.battle)
+    j.hit(sg.battle, "foe", 2.0, True, "Fire")
+    frames_to_zero = 0
+    while (j.trauma > 0 or j.freeze > 0 or j.flash_t > 0 or active(j)) and frames_to_zero < 600:
+        j.update(DT, sg.battle)
+        frames_to_zero += 1
+    budget = (max(min(1.0, mt.TRAUMA_SUPER + mt.TRAUMA_CRIT) / mt.TRAUMA_DECAY,
+                  mt.PARTICLE_LIFE * 1.4, mt.FLASH_TIME) + mt.HITSTOP_CRIT) / DT + 2
+    ok(frames_to_zero <= budget,
+       "after a crit, shake/freeze/flash/particles all settle in %d frames (budget %.0f)"
+       % (frames_to_zero, budget))
+    sg.battle = None
+    j.update(DT, None)
+    ok(j.battle is None and j.trauma == 0 and active(j) == 0, "leaving battle resets the juice")
+
+    # -- REDUCED_MOTION: no shake, no freeze, no flash, fewer particles --------
+    try:
+        mt.REDUCED_MOTION = True
+        setup(sg, mt.make_mon("emberling", 20), mt.make_mon("sprigling", 20))
+        j.bind(sg.battle)
+        j.hit(sg.battle, "foe", 2.0, True, "Fire")
+        ok(j.freeze == 0 and j.flash_t == 0, "reduced motion: no hit-stop and no flash")
+        ok(j.trauma > 0 and all(j.offset() == (0, 0) for _ in range(200)),
+           "reduced motion: trauma accrues but the offset stays (0, 0)")
+        ok(active(j) == mt.PARTICLE_BURST_REDUCED,
+           "reduced motion: only %d particles" % mt.PARTICLE_BURST_REDUCED)
+        sh.render()
+        calm_frame = snap()
+        j.trauma = 0.0
+        sh.render()
+        ok(snap() == calm_frame, "reduced motion: the arena does not move with trauma")
+        sg.battle = None
+        calm = scenario("reduced-motion battle", mt.make_mon("emberling", 20),
+                        mt.make_mon("sprigling", 22), fight("ember"))
+        fr = [f for f in calm["frames"] if f["battle"] is not None]
+        ok(calm["hits"] and all(f["off"] == (0, 0) for f in fr), "reduced motion: no frame shook")
+        ok(all(f["freeze"] == 0 for f in fr), "reduced motion: animation never froze")
+        ok(all(f["flash"] == 0 for f in fr), "reduced motion: no frame flashed")
+    finally:
+        mt.REDUCED_MOTION = False
+    ok(mt.REDUCED_MOTION is False, "REDUCED_MOTION restored")
+
+    # -- the hunt battle's jumpscare: every scare phase draws, GLOOMSTALK too ----
+    ARENA = pygame.Rect(0, 120, mt.W, 100)          # sky band behind the foe's platform
+
+    def hunt_frames(calm):
+        """Render a hunt intro frame by frame, pressing through each line."""
+        mt.REDUCED_MOTION = calm
+        try:
+            sg.party = [mt.make_mon("pyrelash", 26)]
+            sg.fade, sg.fade_dir, sg.fade_cb, sg.mode, sg.battle = 0.0, 0, None, "overworld", None
+            sg.start_hunt(mt.make_mon("gloomstalk", 25))
+            if sg.fade_cb:                                   # calm: the normal fade
+                cb, sg.fade_cb, sg.fade_dir, sg.fade = sg.fade_cb, None, 0, 0.0
+                cb()
+            frames, errors = [], []
+            guard = 0
+            while sg.battle and sg.battle.phase != "menu" and guard < 2000:
+                guard += 1
+                b = sg.battle
+                sg.update_battle(DT)
+                sh.juice.update(DT, b)
+                del DRAWN[:]
+                try:
+                    sh.render()
+                except Exception as e:                       # noqa: BLE001
+                    errors.append(repr(e))
+                foe_drawn = any(d[0] == "gloomstalk" and d[1] for d in DRAWN)
+                frames.append(dict(scare=b.scare, t=b.scare_t, foe=foe_drawn,
+                                   flash=sh.juice.scare_flash, trauma=sh.juice.trauma,
+                                   pose=sh.foe_pose(b), lum=lum(sh.surf, ARENA),
+                                   box=lum(sh.surf, FOE_HP_BOX),
+                                   off=sh.juice.offset()))
+                if b.step and b.step["t"] == "msg" and guard % 20 == 0:
+                    if FRAME_DIR and b.scare:
+                        keep("hunt-%s-%s" % ("calm" if calm else "motion", b.scare))
+                    b.step = None
+            return frames, errors
+        finally:
+            mt.REDUCED_MOTION = False
+
+    setup(sg, mt.make_mon("pyrelash", 26), mt.make_mon("gloomstalk", 25))
+    sh.render()
+    plain_lum = lum(sh.surf, ARENA)
+    sg.battle = None
+    for calm in (False, True):
+        tag = "hunt intro (%s)" % ("reduced motion" if calm else "motion on")
+        fr, errs = hunt_frames(calm)
+        dark = [f for f in fr if f["scare"] == "dark"]
+        rev = [f for f in fr if f["scare"] == "reveal"]
+        after = [f for f in fr if f["scare"] is None]
+        ok(not errs and dark and rev and after, "%s: dark, reveal and settled phases all rendered %s"
+           % (tag, errs[:1]))
+        ok(not any(f["foe"] for f in dark), "%s: GLOOMSTALK stays hidden while it is dark" % tag)
+        ok(all(f["foe"] for f in rev + after), "%s: GLOOMSTALK is drawn from the reveal on" % tag)
+        ok(max(f["lum"] for f in dark) < plain_lum * 0.25,
+           "%s: the hidden phase is near black (%.0f vs %.0f)" % (tag, max(f["lum"] for f in dark), plain_lum))
+        ok(all(f["lum"] < plain_lum for f in after), "%s: the hunt is fought under a veil" % tag)
+        ok(max(f["box"] for f in dark) < 60 < min(f["box"] for f in rev + after),
+           "%s: the foe's HP box stays hidden until the reveal names it" % tag)
+        rises = [i for i in range(1, len(fr)) if fr[i]["flash"] > fr[i - 1]["flash"] + 1e-12]
+        if calm:
+            ok(all(f["flash"] == 0 and f["off"] == (0, 0) for f in fr),
+               "%s: no flash and no shake on any frame" % tag)
+            ok(all(f["pose"][2] == 78 for f in fr), "%s: no lunge - the foe is simply there" % tag)
+        else:
+            ok(len(rises) == 1 and fr[rises[0]]["scare"] == "reveal",
+               "%s: exactly one flash, at the reveal (never a strobe)" % tag)
+            ok(rev[0]["pose"][2] > 78 and abs(after[0]["pose"][2] - 78) < 1e-9,
+               "%s: the foe lunges in large and settles on its platform" % tag)
+            ok(max(f["trauma"] for f in rev) >= mt.SCARE_TRAUMA - 0.05,
+               "%s: the reveal shakes the arena" % tag)
+            ok(all(f["flash"] == 0 for f in after[-5:]), "%s: the flash has faded by the menu" % tag)
+
+    cave_render(sh, sg, lum, keep, stand, DRAWN)
+    cave_feel_render(sh, sg, lum, keep, stand, DRAWN)
+
+
+try:
+    render_section()
+except Exception as e:                         # noqa: BLE001
+    import traceback
+    where = traceback.extract_tb(e.__traceback__)[-1]
+    ok(False, "RENDER aborted: %r at %s:%d" % (e, os.path.basename(where.filename), where.lineno))
+finally:
+    mt.draw_creature = _real_draw_creature
+    mt.REDUCED_MOTION = False
+    pygame.display.quit()
+    if os.path.exists(mt.SAVE_PATH):
+        os.remove(mt.SAVE_PATH)
+print("  %d render checks in %.1fs" % (PASSED - _render_p0, _time.perf_counter() - _render_t0))
+
+# ---------------------------------------------------------------- PARITY
+section("PARITY - the .py and .html builds carry identical tables")
+
+HTML_PATH = os.path.join(HERE, "claude's monsters.html")
+# The glade-mask matrix's probe tiles: grass, balls and corners inside each
+# glade, each gate, authored '#' inside a rect, and tiles just outside.
+GLADE_PROBES = [[10, 85], [5, 82], [4, 81], [19, 84], [19, 85], [20, 84], [3, 84],
+                [75, 84], [83, 82], [84, 87], [71, 84], [71, 85], [70, 84], [85, 84], [70, 32]]
+JS_DUMP = r"""
+const fs = require('fs');
+(0, eval)(fs.readFileSync(process.argv[2], 'utf8').match(/<script>([\s\S]*)<\/script>/)[1]);
+const GLADE_PROBES = %GLADE_PROBES%;
+const g = globalThis.__GAME__;
+// The seam, the GEODE and the backstop as the engine computes them.
+function seamData(g) {
+  const seams = [], tier1 = [];
+  for (let y = 0; y < g.MAP_H; y++) {
+    for (let x = 0; x < g.MAP_W; x++) {
+      const t = g.tileAt(x, y);
+      if (g.canMine(t, x, y, 2) && !g.canMine(t, x, y, 1)) seams.push([x, y]);
+      if (g.canMine(t, x, y, 1)) tier1.push([x, y]);
+    }
+  }
+  const dug = Object.fromEntries(g.ORE_DEPOSITS.map(([x, y]) => [x + ',' + y, '.']));
+  const oneLeft = Object.fromEntries(g.ORE_DEPOSITS.slice(1).map(([x, y]) => [x + ',' + y, '.']));
+  const backstop = [];
+  for (const tier of [0, 1, 2]) for (const ore of [0, 2, 3]) for (const ed of [dug, oneLeft, {}]) {
+    const r = g.quarryBackstop({ stone: 1, ore }, tier, ed);
+    backstop.push(r ? [r.stone, r.ore] : null);
+  }
+  const le = g.loadEdits({ '70,34': 'c', '65,33': 'c', '64,33': 'c', '70,35': 'K', '30,45': 'K',
+                           '70,34 ': '.', '33,46': '.', '30,44': 'W', '69,31': 'c' });
+  // The glade gates: only an authored T breaks, and only to '.'.
+  const gladeEdits = [{ '19,84': '.' }, { '71,84': '.' }, { '20,84': '.' }, { '19,84': 'W' }]
+    .map(e => { const r = g.loadEdits(e); return Object.keys(r).sort().map(k => [k, r[k]]); });
+  // Sealed glades draw as forest: gladeMasked over probe tiles x {uncut, west cut, east cut, both cut}.
+  const gladeMask = GLADE_PROBES.map(([x, y]) => [{}, { '19,84': '.' }, { '71,84': '.' }, { '19,84': '.', '71,84': '.' }]
+    .map(e => g.gladeMasked(x, y, e)));
+  // Part B: axeTier over JSON-representable junk, the canMine matrix, and craftCells for five fixed states.
+  const junk = [null, true, false, 0, 1, 2, -3, '1', 1.5, [], {}];
+  const canMineMatrix = [];
+  const row85 = g.MAP[85];
+  for (const t of Object.keys(g.BLOCKS).sort()) {
+    g.MAP[85] = row85.slice(0, 20) + t + row85.slice(21);      // (20, 85): an authored glyph for this block
+    try {
+      for (const [x, y] of [[20, 85], [30, 44], [21, 85]]) {
+        for (const tier of [0, 1, 2]) for (const axe of [0, 1]) canMineMatrix.push(g.canMine(t, x, y, tier, axe));
+      }
+    } finally { g.MAP[85] = row85; }
+  }
+  const G = g.G, keep = { flags: G.flags, bag: G.bag, materials: G.materials, balls: G.balls, lantern: G.lantern,
+                          pulses: G.pulses, found: G.found };
+  const craftStates = [
+    [{ pick: 0, axe: 0 }, {}, { stone: 0, ore: 0, wall: 0 }],
+    [{ pick: 1, axe: 0 }, { twig: 2, flint: 1 }, { stone: 8, ore: 4, wall: 1 }],
+    [{ pick: 2, axe: 1 }, { leaf: 2, dewdrop: 1, potion: g.BAG_MAX, flint: 2, copperwire: 1 }, { stone: 3, ore: 1, wall: 0 }],
+  ];
+  const craftCellsOut = [];
+  const foundStates = [new Set(), new Set(), new Set(), new Set(['balls', 'lantern']), new Set(['twig'])];
+  const craftStates5 = craftStates.concat([
+    [{ pick: 0, axe: 0 }, {}, { stone: 0, ore: 0, wall: 0 }],
+    [{ pick: 0, axe: 0 }, {}, { stone: 0, ore: 0, wall: 0 }],
+  ]);
+  try {
+    craftStates5.forEach(([fl, bag, mats], si) => {
+      G.flags = Object.assign({}, fl); G.bag = Object.assign({}, bag); G.materials = Object.assign({}, mats);
+      G.balls = 3; G.lantern = 60; G.pulses = 1; G.found = new Set(foundStates[si]);
+      craftCellsOut.push(g.craftCells().map(c => Object.assign({}, c)));
+    });
+  } finally { Object.assign(G, keep); }
+  const gridMoveOut = [];
+  for (let n = 1; n <= 15; n++) for (let i = 0; i < n; i++)
+    for (const d of ['left', 'right', 'up', 'down']) gridMoveOut.push(g.gridMove(i, d, n, g.CRAFT_COLS));
+  const cleanFoundOut = [['twig', 'axe'], ['twig', 3, null, 'nosuch'], null, 'twig', {}]
+    .map(v => Array.from(g.cleanFound(v)).sort());
+  // The shared line-breaking rule over a fixed fake measure (7 px per char).
+  const wrapOut = ['one two three four five six', 'a  b', 'supercalifragilistic word', 'Stuns the stalker. Have 3/3.'].map(s => [null, 1, 2].map(ml => g.wrapLines(s, 70, t => t.length * 7, ml)));
+  const easeOutOut = [0, 0.25, 0.5, 0.75, 1].map(u => g.easeOut(u));
+  const iconColourOut = Object.keys(g.ICON_PALETTE).sort().map(ch => ['normal', 'grey', 'shadow'].map(m => Array.from(g.iconColour(ch, m))));
+  return {
+    easeOut: easeOutOut, iconColour: iconColourOut,
+    icons: g.ICONS, iconPalette: g.ICON_PALETTE, iconShadow: g.ICON_SHADOW,
+    iconIds: ['ball', 'nosuch'].concat(Object.keys(g.ICONS).sort()).map(k => g.iconId(k)),
+    craftCols: g.CRAFT_COLS, craftBlurb: g.CRAFT_BLURB, craftMsg: g.CRAFT_MSG,
+    gridMove: gridMoveOut, cleanFound: cleanFoundOut, craftCells: craftCellsOut, wrapLines: wrapOut,
+    axeMax: g.AXE_MAX, tree: g.TREE, axeTiers: junk.map(v => g.axeTier(v)), canMineMatrix,
+    seam: g.SEAM, grass: g.GRASS, pickMax: g.PICK_MAX, geode: g.GEODE, backstopOre: g.BACKSTOP_ORE,
+    seams, tier1Count: tier1.length, deposits: g.ORE_DEPOSITS,
+    tiers: [true, false, null, 0, 1, 2, 3, -1, '2'].map(v => g.pickTier(v)),
+    backstop, loadEdits: Object.keys(le).sort().map(k => [k, le[k]]),
+    geodeItem: g.ITEMS['75,30'] || 0,
+    items: Object.keys(g.ITEMS).sort().map(k => [k, g.ITEMS[k]]),
+    gatedRegions: g.GATED_REGIONS, gladeEdits, gladeMask,
+    gladeGates: g.GLADE_GATES.map(([r, p]) => [r, p]),
+    pickedGround: Object.keys(g.ITEMS).map(k => k.split(',').map(Number)).sort((a, b) => a[0] - b[0] || a[1] - b[1])
+      .map(([x, y]) => [x + ',' + y, g.pickedGround(x, y)]),
+    seamProbe: [[70, 34], [65, 33], [70, 35], [30, 45], [64, 33], [0, 0]].map(([x, y]) =>
+      [0, 1, 2].map(t => g.canMine(g.SEAM, x, y, t))),
+    pickedText: Object.keys(g.ITEMS).map(k => k.split(',').map(Number)).sort((a, b) => a[0] - b[0] || a[1] - b[1])
+      .map(([x, y]) => [x + ',' + y, g.pickedText(x, y)]) };
+}
+// The shell juice constants that must match by name and value.
+const SHELL_KEYS = ['SCENE_SKY', 'WEATHER_2D', 'WORLD_SHAKE_MAX', 'TRAUMA_MINE', 'TRAUMA_MINE_ORE', 'TRAUMA_MINE_HEAVY', 'MINE_HITSTOP',
+  'DEBRIS_MAX', 'DEBRIS_BURST', 'DEBRIS_BURST_ORE', 'DEBRIS_BURST_HEAVY', 'DEBRIS_BURST_HEAVY_ORE',
+  'DEBRIS_SPEED_HEAVY', 'SPARKLE_RADIUS', 'SPARKLE_PERIOD', 'SPARKLE_TIME', 'GEODE_GLINT_ONE_IN',
+  'GEODE_GLINT_PERIOD', 'GEODE_GLINT_TIME', 'GEODE_GLOW_ALPHA', 'GEODE_GLOW_STEPS', 'HUD_MAT_RECT',
+  'HUD_LEAD_RECT', 'MENU_W', 'MENU_Y', 'GEODE_DOOR', 'CRAFT_TIER_NAME', 'HUD_CAVE_RECT',
+  // the CRAFT grid and its animation
+  'CRAFT_RECT', 'CRAFT_COLS', 'CRAFT_GRID_X', 'CRAFT_GRID_Y', 'CRAFT_SLOT', 'CRAFT_GAP', 'CRAFT_GRID_ROWS', 'CRAFT_CUE_X',
+  'CRAFT_FLY_T', 'CRAFT_POP_T', 'CRAFT_POP_SCALE', 'CRAFT_SPARKS', 'CRAFT_GLOW_T', 'CRAFT_SLOT_FILL',
+  'CRAFT_SLOT_DARK', 'CRAFT_SLOT_LIGHT', 'CRAFT_SEL_FILL', 'CRAFT_SEL_LINE', 'CRAFT_OK', 'CRAFT_BAD',
+  'CRAFT_SPARK_COL', 'CRAFT_SPARK_EDGE', 'CRAFT_SPARK_R0', 'CRAFT_GLOW_COL', 'CRAFT_BTN_ON', 'CRAFT_BTN_OFF',
+  'TREE_TRUNK', 'TREE_NOTCH', 'TREE_BAND', 'TREE_NOTCHES',
+  // the DARK CAVE look, sound and feel
+  'LAMP_TINT', 'LAMP_TINT_ALPHA', 'LAMP_DARK', 'LAMP_DARK_ALPHA', 'LAMP_FEATHER',
+  'LAMP_FLICKER_BELOW', 'LAMP_FLICKER_ALPHA', 'LAMP_FLICKER_RATE', 'HUD_CAVE_BAR_X',
+  'HUD_CAVE_BAR_W', 'HUD_CAVE_BAR_H', 'HUD_CAVE_ROWS', 'HUD_TENSION_FROM', 'HUD_LAMP_LOW',
+  'VIGNETTE_FROM', 'VIGNETTE_MIN', 'VIGNETTE_MAX', 'VIGNETTE_PULSE', 'HEART_HZ_MIN',
+  'HEART_HZ_MAX', 'HEART_DUB', 'GRAIN_TILE', 'GRAIN_ALPHA', 'GRAIN_FPS', 'TEAR_EVERY',
+  'TEAR_TIME', 'TEAR_SHIFT', 'TEAR_MAX', 'EYE_COL', 'EYE_STUN_COL', 'EYE_BLINK_EVERY',
+  'EYE_BLINK_TIME', 'EYE_BOB', 'STALKER_SHADE', 'STALKER_GLIDE', 'TRAIL_MAX', 'TRAIL_TIME',
+  'LUNGE_TIME', 'LUNGE_TRAUMA', 'LUNGE_EYE_SCALE', 'LUNGE_FLASH_ALPHA', 'PULSE_RING_TIME',
+  'PULSE_RING_FADE', 'PULSE_RING_ALPHA', 'PULSE_HIT_COL', 'PULSE_MISS_COL', 'PULSE_HIT_TRAUMA',
+  'PULSE_SPARKS', 'DRONE_VOL',
+  // the BAG screen, the CENTRE shop and the battle BAG list (layout and strings)
+  'BAG_RECT', 'BAG_ROWS', 'BAG_ROW_H', 'BAG_PICK_RECT', 'SHOP_RECT', 'SHOP_ROWS', 'SHOP_ROW_H',
+  'SHOP_MENU_RECT', 'BBAG_ROWS', 'BBAG_ROW_H', 'BBAG_SPLIT_X', 'LIST_ICON_GAP', 'COIN_ICON_GAP', 'BAG_BALL_DESC', 'BAG_MAT_DESC',
+  'BAG_MSG', 'SHOP_STOCK', 'SHOP_OFFER', 'SHOP_MAIN', 'SHOP_MSG'];
+function shellData(g) {
+  const out = Object.fromEntries(SHELL_KEYS.map(k => [k, g[k]]));
+  out.geodeSpots = g.GEODE_SPOTS; out.seamSpots = g.SEAM_SPOTS;
+  out.feel = feelData(g);
+  out.lists = listData(g);
+  return out;
+}
+// What the BAG/shop list builders compute (mirrors python_lists).
+function listData(g) {
+  const mats0 = { stone: 0, ore: 0, wall: 0 }, all = {};
+  Object.keys(g.GOODS).forEach((k, i) => { all[k] = 1 + (i * 37) % 999; });
+  const bags = [[0, {}, mats0], [5, { potion: 2, twig: 3, smoke: 1 }, { stone: 4, ore: 1, wall: 0 }],
+                [999, all, { stone: 9, ore: 99, wall: 999 }], [0, { pearl: 1 }, { stone: 1 }]];
+  const rows = bags.map(([b, bag, m]) => g.bagRows(b, bag, m));
+  const sell = g.shopRows('sell', { pearl: 2, twig: 12, potion: 3, relicshard: 999 });
+  const tops = [];
+  for (const n of [0, 3, 8, 13, 26]) for (const size of [3, 6, 8]) for (let c = 0; c < Math.max(n, 1); c++) tops.push(g.listTop(n, c, size));
+  const ids = ['ball'].concat(Object.keys(g.GOODS), g.MATERIALS, ['nosuch']);
+  return { rows, entries: rows.map(r => g.bagEntries(r)), buy: g.shopRows('buy', {}), sell,
+           caps: sell.map(r => g.shopQtyCap('sell', r)).concat([g.shopQtyCap('buy', ['ball', 'BALL', 20])]),
+           tops, names: ids.map(g.bagName), descs: ids.map(g.bagDesc),
+           msgs: [g.fmtMsg(g.BAG_MSG.healed, 'NIBBIT', 20), g.fmtMsg(g.SHOP_MSG.bought, 3, 'POTION', 90)] };
+}
+// What the cave-feel helpers compute, so a tweak to one build's maths shows up.
+function feelData(g) {
+  const T = [...Array(101).keys()];
+  const caveNpcs = new Set(g.NPCS.filter(n => g.inCave(n.y)).map(n => n.x + ',' + n.y));
+  const profile = [];
+  for (let b = 0; b <= g.LANTERN.buckets; b++) {
+    const c = Math.floor(b * g.LANTERN.max / g.LANTERN.buckets), lit = Math.round(g.lanternRadius(c) * 32);
+    for (let d = 0; d <= g.lampHoleRadius(c) + 2; d += 3) { const [rgb, a] = g.lampProfile(d, lit); profile.push([b, d, rgb, a]); }
+  }
+  const hud = [];
+  for (const c of [0, 1, 19, 20, 50, 99, 100, 150, -3]) for (const t of [0, 24, 25, 74, 75, 100, 130]) {
+    const h = g.caveHudBars(c, t);
+    hud.push([h.lamp, h.lampFill, h.low, h.tension, h.tensionFill, h.fear, h.label]);
+  }
+  const fx = [];
+  for (const t of [0, 49, 50, 74, 75, 100]) for (const calm of [false, true]) {
+    const f = g.tensionFx(t, calm); fx.push([f.vignette, f.pulse, f.grain, f.tears, f.heart]);
+  }
+  const eyes = [[38, 30, 'hunt', 0, 0, 0], [33, 30, 'hunt', 0, 100, 0], [33, 30, 'hunt', 0, 100, 100], [38, 30, 'patrol', 0, 0, 0],
+                [38, 30, 'hunt', 3, 0, 0]].map(([x, y, mode, stun, c, t]) =>
+    g.stalkerEyes(Object.assign(g.newStalker(x, y), { mode, stun }), [43, 30], c, t));
+  return {
+    vignette: T.map(g.vignetteAlpha), heart: T.map(g.heartHz), hole: T.map(g.lampHoleRadius),
+    flicker: T.map(c => g.lampFlickerAmp(c, false)), profile, hud, fx, eyes,
+    flare: [...Array(20).keys()].map(i => g.lungeFlare(i / 60)),
+    env: [0, 0.1, 0.18, 0.3, 0.9].map(g.heartEnv),
+    ring: g.pulseRing(g.caveDist([43, 30], {}, new Set(), caveNpcs, true)),
+    ringWall: g.pulseRing(g.caveDist([30, 28], {}, new Set(), caveNpcs, true)) };
+}
+// The DARK CAVE kit: its tables and what the engine computes from them,
+// including full stalker traces on the shared mulberry32 (a scripted walk
+// that draws every event: hunt, retreat, lost, lunge, and two PULSEs).
+const TRACE_WALK = [[48, 30], [50, 30], [52, 30], [54, 30], [56, 31], [79, 35], [60, 31], [58, 31],
+                    [55, 31], [52, 31], [20, 30], [24, 30], [28, 30], [32, 31], [38, 30], [40, 31]];
+function caveData(g) {
+  const CN = new Set(g.NPCS.map(n => n.x + ',' + n.y)), NO = new Set();
+  const seams = {};
+  g.MAP.forEach((r, y) => [...r].forEach((c, x) => { if (c === g.SEAM) seams[x + ',' + y] = 'c'; }));
+  const dom = [];
+  for (let y = 0; y < g.MAP_H; y++) for (let x = 0; x < g.MAP_W; x++) if (g.stalkerWalkable(x, y, seams, NO, CN)) dom.push([x, y]);
+  const trace = seed => {
+    const rng = g.mulberry32(seed);
+    let s = g.newStalker(60, 30);
+    const out = [];
+    for (let k = 0; k < 300; k++) {
+      const pp = TRACE_WALK[Math.floor(k / 10) % TRACE_WALK.length];
+      if (k === 150 || k === 230) s = g.pulseApply(s, pp, {}, NO, CN)[0];
+      const r = g.stalkerTick(s, pp, Math.max(0, 100 - k), Math.min(100, Math.floor(k / 2)), {}, NO, CN, rng);
+      s = r[0];
+      out.push([s.x, s.y, s.mode, s.wp, s.stun, s.grace, s.tick, r[1]]);
+    }
+    return out;
+  };
+  const r42 = g.mulberry32(42);
+  const L = g.LANTERN, T = g.TENSION, H = g.HUNT_AI, P = g.PULSE;
+  return {
+    enc: [0, 1, 25, 50, 74, 75, 99, 100].map(g.encounterRate),
+    lantern: [L.max, L.drain, L.oil, L.rMax, L.rMin, L.corePx, L.buckets],
+    tension: [T.max, T.base, T.dim, T.dark, T.hunted, T.safe, T.fear, T.encBonus, T.events],
+    keepOut: g.KEEP_OUT,
+    hunt: [H.rows, H.safeR, H.mouths, H.lair, H.patrol, H.pacePatrol, H.paceHunt, H.pause, H.senseBase,
+           H.senseDark, H.senseDiv, H.loseTrack, H.restLose, H.restRun, H.grace],
+    pulse: [P.max, P.range, P.stun, P.push], dirs: g.STALKER_DIRS,
+    radius: Array.from({ length: 101 }, (_, c) => g.lanternRadius(c)),
+    bucket: Array.from({ length: 101 }, (_, c) => g.lanternBucket(c)),
+    keep: [0, 19, 20, 49, 50, 100].map(c => [0, 74, 75, 100].map(t => g.keepOut(c, t))),
+    sense: [0, 13, 37, 50, 63, 87, 100].map(c => [0, 24, 25, 99, 100].map(t => g.stalkerSense(c, t))),
+    tstep: [0, 19, 20, 49, 50, 100].map(c => [[3, false, false], [3, true, false], [99, true, false], [1, false, true]]
+      .map(([t, h, s]) => g.tensionStep(t, c, h, s))),
+    domain: dom, safe: [[42, 30], [42, 29], [38, 27], [47, 27], [42, 33], [42, 34]].map(([x, y]) => g.inSafeZone(x, y)),
+    spawn: [[43, 30], [7, 33], [79, 30], [42, 38], [60, 36]].map(p => g.stalkerSpawn(p, {}, NO, CN)),
+    pulseHits: [[12, 31], [10, 28], [14, 31], [15, 31]].map(([x, y]) => {
+      const r = g.pulseApply(g.newStalker(x, y), [10, 31], {}, NO, CN);
+      return [r[0].x, r[0].y, r[0].stun, r[1]];
+    }),
+    rng: [r42(), r42(), r42(), r42(), r42()],
+    traces: [1, 2, 3].map(trace)
+  };
+}
+// Battle conditions: tables, the seed, the roll, the scene, the arena kind and the
+// damage nudge over fixed inputs - mirrored by python_conditions().
+const COND_TRIPLES = [[0, 0, 0], [1, 2, 3], [10000000, 87, 109], [5, 43, 107], [123, 28, 80], [999, 70, 35],
+  [4242, 10, 30], [77, 50, 82], [1, 1, 1], [2, 2, 2], [31, 0, 0], [0, 87, 0], [0, 0, 109], [65535, 44, 44],
+  [100000, 12, 20], [250, 60, 70], [3000, 5, 95], [8, 66, 31], [16, 75, 30], [4294967, 87, 109]];
+const COND_ARENA_CASES = [['DARK CAVE', '.', false, true, false], ['DEEPWOOD', '.', true, false, false],
+  ['SPIRE RUINS', '.', false, false, false], ['ROCKY PASS', '.', false, false, false],
+  ['DEEPWOOD', '.', false, false, true], ['SEASIDE', '.', false, false, false], ['DEEPWOOD', ',', false, false, false],
+  ['DEEPWOOD', '~', false, false, false], ['CEDAR TOWN', '_', false, false, false], ['TRAIL SUMMIT', '.', false, false, false],
+  ['THE TRAIL', '.', false, false, false]];
+function condData(g) {
+  const seeds = COND_TRIPLES.map(([s, x, y]) => g.conditionSeed(s, x, y));
+  const regions = Object.keys(g.REGION_CONDITIONS).concat(['NOWHERE']);
+  const rolls = [];
+  for (const r of regions) for (let s = 0; s < 45; s++) rolls.push(g.battleCondition(r, null, false, s));
+  const fixed = [];
+  for (const s of seeds) fixed.push(g.battleCondition('DEEPWOOD', { id: 'gym' }, false, s),
+                                     g.battleCondition('DEEPWOOD', null, true, s), g.battleCondition('DEEPWOOD', null, false, s));
+  const kinds = ['meadow', 'pass', 'ruins', 'cave', 'shore'];
+  const scenes = [];
+  for (const c of Object.keys(g.CONDITIONS)) for (const k of kinds)
+    for (const s of [0, 1, 2, 3].concat(seeds.slice(0, 6))) {
+      const sc = g.battleScene(c, k, s);
+      scenes.push([sc.layout, sc.time, sc.weather, sc.camera]);
+    }
+  const firstOfType = {};
+  for (const [m, v] of Object.entries(g.MOVES)) if (v.pow > 0 && !(v.type in firstOfType)) firstOfType[v.type] = m;
+  const dmg = [];
+  const atk = g.makeMon('pyrelash', 20);
+  for (const d of ['nibbit', 'dripling', 'nocturn', 'ironclad']) {
+    const dm = g.makeMon(d, 20);
+    for (const m of Object.values(firstOfType)) for (const c of Object.keys(g.CONDITIONS))
+      for (const rolls of [[0.5, 0.9, 0.5], [0.95, 0.9, 0.5], [0.0, 0.01, 0.99]]) {
+        let i = 0;
+        const r = g.damageCalc(atk, dm, m, {}, {}, () => rolls[i++], 1, 0, c);
+        dmg.push([r.missed, r.dmg, r.eff, r.crit]);
+      }
+  }
+  return {
+    tables: { conditions: g.CONDITIONS, regions: g.REGION_CONDITIONS, times: g.SCENE_TIMES, weather: g.SCENE_WEATHER,
+              extra: g.SCENE_EXTRA, cameras: g.CAMERA_PRESETS, defaultScene: g.DEFAULT_SCENE,
+              salts: [g.CONDITION_SALT, g.SCENE_SALT] },
+    seeds, rolls, fixed, scenes, dmg,
+    arenas: COND_ARENA_CASES.map(a => g.arenaKind(...a)),
+  };
+}
+// Loot, coins, the shop and save cleaning: tables, constants, every pure rule over
+// fixed cases, and the CENTRE strings - mirrored by python_loot().
+const LOOT_CONST_KEYS = ['BALL_PRICE', 'START_COINS', 'COINS_MAX', 'BAG_MAX', 'COUNT_MAX', 'LOOT_WIN_CHANCE',
+  'LOOT_AREA_SHARE', 'LOOT_SALT', 'SAFETY_BALLS', 'GYM_BONUS', 'WILD_COIN_RATE', 'TRAINER_COIN_RATE', 'SHOP_QTY_MAX',
+  'BATTLE_BAG', 'NURSE_GIFT', 'CENTRE_HEAL'];
+const LOOT_SEED_CASES = [[0, 0, 0, 0, 0], [1, 2, 3, 4, 5], [120, 36, 95, 5, 3], [1000000000, 87, 109, 100, 1000000],
+  [5, 43, 107, 3, 1], [77, 50, 82, 12, 2], [999, 70, 35, 25, 9], [4242, 10, 30, 28, 40], [31, 0, 0, 1, 0],
+  [0, 87, 0, 0, 1], [0, 0, 109, 0, 0], [65535, 44, 44, 44, 44], [100000, 12, 20, 33, 500], [250, 60, 70, 20, 7],
+  [3000, 5, 95, 6, 3], [8, 66, 31, 26, 11], [16, 75, 30, 27, 12], [4294967, 87, 109, 99, 2147483647],
+  [2, 2, 2, 2, 2], [123, 28, 80, 15, 4]];
+const LOOT_REGIONS = ['ROUTE ONE', 'DEEPWOOD', 'SEASIDE', 'ROCKY PASS', 'DARK CAVE', 'SPIRE RUINS', 'FISHING',
+  'RIDGE TOWN', 'CEDAR TOWN', 'TRAIL SUMMIT'];
+const LOOT_TYPESETS = [['Grass'], ['Fire', 'Flying'], ['Water'], ['Dark'], ['Steel', 'Rock']];
+const COIN_CASES = [[10, null, false, false], [5, 12, false, false], [5, 12, true, false], [5, 12, true, true],
+  [1, null, false, false], [100, null, true, false], [3, 32, true, false], [3, 32, false, true]];
+const BLACKOUT_CASES = [0, 1, 3, 4, 7, 99, 100, 99999];
+const BUY_CASES = [[100, 3, {}, 'potion', 2], [100, 3, {}, 'ball', 5], [59, 0, {}, 'greatball', 1],
+  [60, 0, {}, 'greatball', 1], [1000, 0, { potion: 995 }, 'potion', 5], [1000, 0, { potion: 994 }, 'potion', 5],
+  [1000, 995, {}, 'ball', 5], [1000, 0, {}, 'potion', 0], [1000, 0, {}, 'potion', 11], [1000, 0, {}, 'potion', true],
+  [1000, 0, {}, 'twig', 1], [1000, 0, {}, 'nope', 1], [10, 2, { leaf: 1 }, 'potion', 1], [800, 0, {}, 'superpotion', 10],
+  [400, 1, { smoke: 3 }, 'smoke', 10], [39, 0, {}, 'smoke', 1]];
+const SELL_CASES = [[10, { twig: 3 }, 'twig', 2], [10, { twig: 2 }, 'twig', 2], [10, { twig: 1 }, 'twig', 2],
+  [10, { potion: 3 }, 'potion', 1], [10, {}, 'ball', 1], [10, { twig: 20 }, 'twig', 0], [10, { twig: 20 }, 'twig', 11],
+  [99990, { pearl: 1 }, 'pearl', 1], [99969, { pearl: 1 }, 'pearl', 1], [0, { relicshard: 10 }, 'relicshard', 10],
+  [5, { glowcrystal: 4, leaf: 1 }, 'glowcrystal', 3], [0, {}, 'nope', 1], [0, { scale: true }, 'scale', 1],
+  [0, { feather: 2 }, 'feather', true]];
+const CLEAN_CASES = [null, 0, 5, 1.5, -3, true, false, '7', [], {}, 100000, 1000000000, { twig: 2, x: 1 },
+  { leaf: true }, { potion: 1 }, { pearl: -1 }, { feather: 5000 }, { smoke: '3' }, { twig: null }, 42];
+function lootData(g) {
+  const seeds = LOOT_SEED_CASES.map(c => g.lootSeed(...c));
+  const rolls = [];
+  for (const r of LOOT_REGIONS) for (const t of LOOT_TYPESETS) for (const c of [false, true])
+    for (const sd of seeds.slice(0, 5)) rolls.push(g.lootRoll(r, t, c, null, false, sd));
+  return {
+    tables: { goods: g.GOODS, area: g.LOOT_AREA, type: g.LOOT_TYPE },
+    consts: Object.fromEntries(LOOT_CONST_KEYS.map(k => [k, g[k]])),
+    seeds, rolls,
+    fixed: seeds.slice(0, 5).map(sd => [g.lootRoll('DEEPWOOD', ['Grass'], true, { id: 't1' }, false, sd),
+                                        g.lootRoll('DARK CAVE', ['Dark'], true, null, true, sd)]),
+    coins: COIN_CASES.map(c => g.coinReward(...c)),
+    blackout: BLACKOUT_CASES.map(g.blackoutCoins),
+    net: [[0, 19], [0, 20], [1, 0], [0, 0]].map(([b, c]) => g.ballSafetyNet(b, c)),
+    buy: BUY_CASES.map(c => g.shopBuy(...c)),
+    sell: SELL_CASES.map(c => g.shopSell(...c)),
+    clean: CLEAN_CASES.map(x => [g.cleanBag(x), g.cleanCoins(x), g.cleanCount(x)]),
+    toast: g.bagToast(42, 7),
+    strings: { sign: g.SIGNS['18,59'], nurse: g.npcById('nurse1').lines, nurse2: g.npcById('nurse2').lines },
+  };
+}
+console.log(JSON.stringify({
+  loot: lootData(g),
+  cave: caveData(g),
+  conditions: condData(g),
+  species: Object.fromEntries(Object.entries(g.SPECIES).map(([k, v]) => [k, {
+    name: v.name, types: v.types,
+    base: [v.base.hp, v.base.atk, v.base.def, v.base.spa, v.base.spd, v.base.spe],
+    catch: v.catchRate, exp: v.baseExp, kind: v.art.kind,
+    learn: v.learn.map(([l, m]) => [l, m]),
+    evo: v.evo ? [v.evo.into, v.evo.level] : null }])),
+  moves: Object.fromEntries(Object.entries(g.MOVES).map(([k, v]) => [k, [
+    v.name, v.type, v.pow, v.acc, v.cat,
+    v.eff ? [v.eff.stat === 'def' ? 'def_' : v.eff.stat, v.eff.stages, v.eff.target] : null,
+    v.prio || 0, !!v.highCrit]])),
+  zones: g.ZONES.map(z => [z.x1, z.y1, z.x2, z.y2, z.min, z.max,
+                           z.pool.map(([a, b]) => [a, b])]),
+  map: g.MAP, chart: g.TYPE_CHART, starters: g.STARTERS,
+  sandbox: (() => {
+    const band = [], ore = [], mineable = [], placeable = [];
+    const npcs = new Set(g.NPCS.map(n => n.x + ',' + n.y));
+    for (let y = g.ROCK_BAND[0] - 1; y <= g.ROCK_BAND[1] + 1; y++) {
+      for (let x = 0; x < g.MAP_W; x++) {
+        const t = g.tileAt(x, y);
+        band.push(g.tileHash(x, y));
+        if (g.canMine(t, x, y, true)) mineable.push([x, y]);
+        if (g.canMine(t, x, y, true) && g.mineDrop(t, x, y).ore) ore.push([x, y]);
+        if ((x + 2 * y) % 5 === 0 && g.placementOk(x, y, {}, new Set(), npcs, [30, 44])[0]) placeable.push([x, y]);
+      }
+    }
+    return {
+      wall: g.WALL, materials: g.MATERIALS, labels: g.MATERIAL_LABEL, menu: g.MENU_ITEMS,
+      interactive: [...g.INTERACTIVE].sort(), solid: [...g.SOLID].sort(), materialLabel: g.MATERIAL_LABEL,
+      blocks: Object.fromEntries(Object.entries(g.BLOCKS).map(([k, b]) =>
+        [k, [b.name, b.drops, b.oreOneIn, b.leaves, b.tier, !!b.authoredOnly, b.tool]])),
+      recipes: g.RECIPES.map(r => [r.id, r.out, r.count, r.needs, r.setsTier || 0, 'cap' in r ? r.cap : null,
+                                   r.setsTool || null]),
+      hashes: band, ore, mineable, placeable, ...seamData(g) };
+  })(),
+  shell: shellData(g),
+  hunt: {
+    table: [g.HUNT.species, g.HUNT.lvMin, g.HUNT.lvMax, g.HUNT.lvOffset, g.HUNT.runOdds,
+            g.HUNT.rewardFirst, g.HUNT.rewardRepeat],
+    levels: Array.from({ length: 40 }, (_, i) => g.huntLevel([i + 1])).concat([g.huntLevel([5, 26, 12])]),
+    counts: [null, '3', -4, true, NaN, [], 0, 2, 2.9].map(v => g.huntCount(v)),
+    sign: g.SIGNS['28,40'], nox: g.npcById('t7').after,
+    scare: [g.SCARE_FLASH_TIME, g.SCARE_FLASH_ALPHA, g.SCARE_TRAUMA, g.SCARE_LUNGE_TIME,
+            g.SCARE_LUNGE_SCALE, g.SCARE_VEIL_DARK, g.SCARE_VEIL] }
+}));
+""".replace("%GLADE_PROBES%", json.dumps(GLADE_PROBES))
+
+
+def python_tables():
+    return {
+        "species": {k: {"name": v["name"], "types": v["types"],
+                        "base": [v["base"][s] for s in mt.STAT_KEYS],
+                        "catch": v["catch_rate"], "exp": v["base_exp"],
+                        "kind": v["art"]["kind"],
+                        "learn": [[l, m] for l, m in v["learn"]],
+                        "evo": list(v["evo"]) if v["evo"] else None}
+                    for k, v in mt.SPECIES.items()},
+        "moves": {k: [v["name"], v["type"], v["pow"], v["acc"], v["cat"],
+                      list(v["eff"]) if "eff" in v else None,
+                      v.get("prio", 0), bool(v.get("high_crit"))]
+                  for k, v in mt.MOVES.items()},
+        "zones": [[z["x1"], z["y1"], z["x2"], z["y2"], z["min"], z["max"],
+                   [[a, b] for a, b in z["pool"]]] for z in mt.ZONES],
+        "map": list(mt.MAP), "chart": mt.TYPE_CHART, "starters": list(mt.STARTERS),
+        "sandbox": python_sandbox(), "shell": python_shell(), "hunt": python_hunt(),
+        "cave": python_cave(), "conditions": python_conditions(), "loot": python_loot(),
+    }
+
+
+def python_conditions():
+    """Battle conditions: tables, the seed, the roll, the scene, the arena kind and
+    the damage nudge over fixed inputs - mirrored by condData in JS_DUMP. Built
+    through JSON so every nested tuple compares as a list."""
+    triples = [(0, 0, 0), (1, 2, 3), (10 ** 7, 87, 109), (5, 43, 107), (123, 28, 80), (999, 70, 35),
+               (4242, 10, 30), (77, 50, 82), (1, 1, 1), (2, 2, 2), (31, 0, 0), (0, 87, 0), (0, 0, 109),
+               (65535, 44, 44), (100000, 12, 20), (250, 60, 70), (3000, 5, 95), (8, 66, 31), (16, 75, 30),
+               (4294967, 87, 109)]
+    arena_cases = [("DARK CAVE", ".", False, True, False), ("DEEPWOOD", ".", True, False, False),
+                   ("SPIRE RUINS", ".", False, False, False), ("ROCKY PASS", ".", False, False, False),
+                   ("DEEPWOOD", ".", False, False, True), ("SEASIDE", ".", False, False, False),
+                   ("DEEPWOOD", ",", False, False, False), ("DEEPWOOD", "~", False, False, False),
+                   ("CEDAR TOWN", "_", False, False, False), ("TRAIL SUMMIT", ".", False, False, False),
+                   ("THE TRAIL", ".", False, False, False)]
+    seeds = [mt.condition_seed(st, x, y) for st, x, y in triples]
+    regions = list(mt.REGION_CONDITIONS) + ["NOWHERE"]
+    rolls = [mt.battle_condition(r, None, False, st) for r in regions for st in range(45)]
+    fixed = []
+    for sd in seeds:
+        fixed += [mt.battle_condition("DEEPWOOD", {"id": "gym"}, False, sd),
+                  mt.battle_condition("DEEPWOOD", None, True, sd), mt.battle_condition("DEEPWOOD", None, False, sd)]
+    kinds = ["meadow", "pass", "ruins", "cave", "shore"]
+    scenes = []
+    for c in mt.CONDITIONS:
+        for k in kinds:
+            for sd in [0, 1, 2, 3] + seeds[:6]:
+                sc = mt.battle_scene(c, k, sd)
+                scenes.append([sc["layout"], sc["time"], sc["weather"], sc["camera"]])
+    first_of_type = {}
+    for m, v in mt.MOVES.items():
+        if v["pow"] > 0 and v["type"] not in first_of_type:
+            first_of_type[v["type"]] = m
+    dmg = []
+    atk = mt.make_mon("pyrelash", 20)
+    for d in ("nibbit", "dripling", "nocturn", "ironclad"):
+        dm = mt.make_mon(d, 20)
+        for m in first_of_type.values():
+            for c in mt.CONDITIONS:
+                for rolls_ in ([0.5, 0.9, 0.5], [0.95, 0.9, 0.5], [0.0, 0.01, 0.99]):
+                    it = iter(rolls_)
+                    r = mt.damage_calc(atk, dm, m, {}, {}, lambda: next(it), 1.0, 0.0, c)
+                    dmg.append([r["missed"], r["dmg"], r["eff"], r["crit"]])
+    return json.loads(json.dumps({
+        "tables": {"conditions": mt.CONDITIONS, "regions": mt.REGION_CONDITIONS, "times": mt.SCENE_TIMES,
+                   "weather": mt.SCENE_WEATHER, "extra": mt.SCENE_EXTRA, "cameras": mt.CAMERA_PRESETS,
+                   "defaultScene": mt.DEFAULT_SCENE, "salts": [mt.CONDITION_SALT, mt.SCENE_SALT]},
+        "seeds": seeds, "rolls": rolls, "fixed": fixed, "scenes": scenes, "dmg": dmg,
+        "arenas": [mt.arena_kind(*a) for a in arena_cases],
+    }))
+
+
+def python_loot():
+    """Loot, coins, the shop and save cleaning - mirrored by lootData in JS_DUMP.
+    Built through JSON so tuples compare as lists and None as null."""
+    const_keys = ["BALL_PRICE", "START_COINS", "COINS_MAX", "BAG_MAX", "COUNT_MAX", "LOOT_WIN_CHANCE",
+                  "LOOT_AREA_SHARE", "LOOT_SALT", "SAFETY_BALLS", "GYM_BONUS", "WILD_COIN_RATE",
+                  "TRAINER_COIN_RATE", "SHOP_QTY_MAX", "BATTLE_BAG", "NURSE_GIFT", "CENTRE_HEAL"]
+    seed_cases = [(0, 0, 0, 0, 0), (1, 2, 3, 4, 5), (120, 36, 95, 5, 3), (10 ** 9, 87, 109, 100, 10 ** 6),
+                  (5, 43, 107, 3, 1), (77, 50, 82, 12, 2), (999, 70, 35, 25, 9), (4242, 10, 30, 28, 40),
+                  (31, 0, 0, 1, 0), (0, 87, 0, 0, 1), (0, 0, 109, 0, 0), (65535, 44, 44, 44, 44),
+                  (100000, 12, 20, 33, 500), (250, 60, 70, 20, 7), (3000, 5, 95, 6, 3), (8, 66, 31, 26, 11),
+                  (16, 75, 30, 27, 12), (4294967, 87, 109, 99, 2147483647), (2, 2, 2, 2, 2), (123, 28, 80, 15, 4)]
+    regions = ["ROUTE ONE", "DEEPWOOD", "SEASIDE", "ROCKY PASS", "DARK CAVE", "SPIRE RUINS", "FISHING",
+               "RIDGE TOWN", "CEDAR TOWN", "TRAIL SUMMIT"]
+    typesets = [["Grass"], ["Fire", "Flying"], ["Water"], ["Dark"], ["Steel", "Rock"]]
+    coin_cases = [(10, None, False, False), (5, 12, False, False), (5, 12, True, False), (5, 12, True, True),
+                  (1, None, False, False), (100, None, True, False), (3, 32, True, False), (3, 32, False, True)]
+    blackout_cases = [0, 1, 3, 4, 7, 99, 100, 99999]
+    buy_cases = [(100, 3, {}, "potion", 2), (100, 3, {}, "ball", 5), (59, 0, {}, "greatball", 1),
+                 (60, 0, {}, "greatball", 1), (1000, 0, {"potion": 995}, "potion", 5),
+                 (1000, 0, {"potion": 994}, "potion", 5), (1000, 995, {}, "ball", 5), (1000, 0, {}, "potion", 0),
+                 (1000, 0, {}, "potion", 11), (1000, 0, {}, "potion", True), (1000, 0, {}, "twig", 1),
+                 (1000, 0, {}, "nope", 1), (10, 2, {"leaf": 1}, "potion", 1), (800, 0, {}, "superpotion", 10),
+                 (400, 1, {"smoke": 3}, "smoke", 10), (39, 0, {}, "smoke", 1)]
+    sell_cases = [(10, {"twig": 3}, "twig", 2), (10, {"twig": 2}, "twig", 2), (10, {"twig": 1}, "twig", 2),
+                  (10, {"potion": 3}, "potion", 1), (10, {}, "ball", 1), (10, {"twig": 20}, "twig", 0),
+                  (10, {"twig": 20}, "twig", 11), (99990, {"pearl": 1}, "pearl", 1),
+                  (99969, {"pearl": 1}, "pearl", 1), (0, {"relicshard": 10}, "relicshard", 10),
+                  (5, {"glowcrystal": 4, "leaf": 1}, "glowcrystal", 3), (0, {}, "nope", 1),
+                  (0, {"scale": True}, "scale", 1), (0, {"feather": 2}, "feather", True)]
+    clean_cases = [None, 0, 5, 1.5, -3, True, False, "7", [], {}, 100000, 1000000000, {"twig": 2, "x": 1},
+                   {"leaf": True}, {"potion": 1}, {"pearl": -1}, {"feather": 5000}, {"smoke": "3"},
+                   {"twig": None}, 42]
+    seeds = [mt.loot_seed(*c) for c in seed_cases]
+    rolls = [mt.loot_roll(r, t, c, None, False, sd)
+             for r in regions for t in typesets for c in (False, True) for sd in seeds[:5]]
+    return json.loads(json.dumps({
+        "tables": {"goods": mt.GOODS, "area": mt.LOOT_AREA, "type": mt.LOOT_TYPE},
+        "consts": {k: getattr(mt, k) for k in const_keys},
+        "seeds": seeds, "rolls": rolls,
+        "fixed": [[mt.loot_roll("DEEPWOOD", ["Grass"], True, {"id": "t1"}, False, sd),
+                   mt.loot_roll("DARK CAVE", ["Dark"], True, None, True, sd)] for sd in seeds[:5]],
+        "coins": [mt.coin_reward(*c) for c in coin_cases],
+        "blackout": [mt.blackout_coins(c) for c in blackout_cases],
+        "net": [mt.ball_safety_net(b, c) for b, c in ((0, 19), (0, 20), (1, 0), (0, 0))],
+        "buy": [list(mt.shop_buy(*c)) for c in buy_cases],
+        "sell": [list(mt.shop_sell(*c)) for c in sell_cases],
+        "clean": [[mt.clean_bag(x), mt.clean_coins(x), mt.clean_count(x)] for x in clean_cases],
+        "toast": mt.bag_toast(42, 7),
+        "strings": {"sign": mt.SIGNS[(18, 59)], "nurse": mt.npc_by_id("nurse1")["lines"],
+                    "nurse2": mt.npc_by_id("nurse2")["lines"]},
+    }))
+
+
+def python_hunt():
+    """The hunt battle's table, what hunt_level/hunt_count compute from it,
+    the two hint lines and the scare tunables - mirrored in JS_DUMP."""
+    h = mt.HUNT
+    return {
+        "table": [h["species"], h["lv_min"], h["lv_max"], h["lv_offset"], h["run_odds"],
+                  h["reward_first"], h["reward_repeat"]],
+        "levels": [mt.hunt_level([lv]) for lv in range(1, 41)] + [mt.hunt_level([5, 26, 12])],
+        "counts": [mt.hunt_count(v) for v in (None, "3", -4, True, float("nan"), [], 0, 2, 2.9)],
+        "sign": list(mt.SIGNS[(28, 40)]), "nox": mt.npc_by_id("t7")["after"],
+        "scare": [mt.SCARE_FLASH_TIME, mt.SCARE_FLASH_ALPHA, mt.SCARE_TRAUMA, mt.SCARE_LUNGE_TIME,
+                  mt.SCARE_LUNGE_SCALE, mt.SCARE_VEIL_DARK, mt.SCARE_VEIL],
+    }
+
+
+SHELL_KEYS = ("SCENE_SKY", "WEATHER_2D", "WORLD_SHAKE_MAX", "TRAUMA_MINE", "TRAUMA_MINE_ORE", "TRAUMA_MINE_HEAVY", "MINE_HITSTOP",
+              "DEBRIS_MAX", "DEBRIS_BURST", "DEBRIS_BURST_ORE", "DEBRIS_BURST_HEAVY",
+              "DEBRIS_BURST_HEAVY_ORE", "DEBRIS_SPEED_HEAVY", "SPARKLE_RADIUS", "SPARKLE_PERIOD",
+              "SPARKLE_TIME", "GEODE_GLINT_ONE_IN", "GEODE_GLINT_PERIOD", "GEODE_GLINT_TIME",
+              "GEODE_GLOW_ALPHA", "GEODE_GLOW_STEPS", "HUD_MAT_RECT", "HUD_LEAD_RECT", "MENU_W",
+              "MENU_Y", "GEODE_DOOR", "CRAFT_TIER_NAME", "HUD_CAVE_RECT",
+              # the CRAFT grid and its animation
+              "CRAFT_RECT", "CRAFT_COLS", "CRAFT_GRID_X", "CRAFT_GRID_Y", "CRAFT_SLOT", "CRAFT_GAP",
+              "CRAFT_GRID_ROWS", "CRAFT_CUE_X", "CRAFT_FLY_T", "CRAFT_POP_T", "CRAFT_POP_SCALE",
+              "CRAFT_SPARKS", "CRAFT_GLOW_T", "CRAFT_SLOT_FILL", "CRAFT_SLOT_DARK", "CRAFT_SLOT_LIGHT",
+              "CRAFT_SEL_FILL", "CRAFT_SEL_LINE", "CRAFT_OK", "CRAFT_BAD", "CRAFT_SPARK_COL",
+              "CRAFT_SPARK_EDGE", "CRAFT_SPARK_R0", "CRAFT_GLOW_COL", "CRAFT_BTN_ON", "CRAFT_BTN_OFF",
+              "TREE_TRUNK", "TREE_NOTCH", "TREE_BAND", "TREE_NOTCHES",
+              # the DARK CAVE look, sound and feel
+              "LAMP_TINT", "LAMP_TINT_ALPHA", "LAMP_DARK", "LAMP_DARK_ALPHA", "LAMP_FEATHER",
+              "LAMP_FLICKER_BELOW", "LAMP_FLICKER_ALPHA", "LAMP_FLICKER_RATE", "HUD_CAVE_BAR_X",
+              "HUD_CAVE_BAR_W", "HUD_CAVE_BAR_H", "HUD_CAVE_ROWS", "HUD_TENSION_FROM", "HUD_LAMP_LOW",
+              "VIGNETTE_FROM", "VIGNETTE_MIN", "VIGNETTE_MAX", "VIGNETTE_PULSE", "HEART_HZ_MIN",
+              "HEART_HZ_MAX", "HEART_DUB", "GRAIN_TILE", "GRAIN_ALPHA", "GRAIN_FPS", "TEAR_EVERY",
+              "TEAR_TIME", "TEAR_SHIFT", "TEAR_MAX", "EYE_COL", "EYE_STUN_COL", "EYE_BLINK_EVERY",
+              "EYE_BLINK_TIME", "EYE_BOB", "STALKER_SHADE", "STALKER_GLIDE", "TRAIL_MAX", "TRAIL_TIME",
+              "LUNGE_TIME", "LUNGE_TRAUMA", "LUNGE_EYE_SCALE", "LUNGE_FLASH_ALPHA", "PULSE_RING_TIME",
+              "PULSE_RING_FADE", "PULSE_RING_ALPHA", "PULSE_HIT_COL", "PULSE_MISS_COL", "PULSE_HIT_TRAUMA",
+              "PULSE_SPARKS", "DRONE_VOL",
+              # the BAG screen, the CENTRE shop and the battle BAG list (layout and strings)
+              "BAG_RECT", "BAG_ROWS", "BAG_ROW_H", "BAG_PICK_RECT", "SHOP_RECT", "SHOP_ROWS", "SHOP_ROW_H",
+              "SHOP_MENU_RECT", "BBAG_ROWS", "BBAG_ROW_H", "BBAG_SPLIT_X", "LIST_ICON_GAP", "COIN_ICON_GAP",
+              "BAG_BALL_DESC", "BAG_MAT_DESC",
+              "BAG_MSG", "SHOP_STOCK", "SHOP_OFFER", "SHOP_MAIN", "SHOP_MSG")
+
+
+def python_feel():
+    """What the cave-feel helpers compute - mirrored by feelData in JS_DUMP."""
+    T = range(101)
+    cave_npcs = {(n["x"], n["y"]) for n in mt.NPCS if mt.in_cave(n["y"])}
+    profile = []
+    for b in range(mt.LANTERN["buckets"] + 1):
+        c = b * mt.LANTERN["max"] // mt.LANTERN["buckets"]
+        lit = int(round(mt.lantern_radius(c) * 32))
+        for d in range(0, mt.lamp_hole_radius(c) + 3, 3):
+            rgb, a = mt.lamp_profile(d, lit)
+            profile.append([b, d, list(rgb), a])
+    hud = []
+    for c in (0, 1, 19, 20, 50, 99, 100, 150, -3):
+        for t in (0, 24, 25, 74, 75, 100, 130):
+            h = mt.cave_hud_bars(c, t)
+            hud.append([h["lamp"], h["lamp_fill"], h["low"], h["tension"], h["tension_fill"], h["fear"], h["label"]])
+    fx = []
+    for t in (0, 49, 50, 74, 75, 100):
+        for calm in (False, True):
+            f = mt.tension_fx(t, calm)
+            fx.append([f["vignette"], f["pulse"], f["grain"], f["tears"], f["heart"]])
+    eyes = [mt.stalker_eyes(dict(mt.new_stalker(x, y), mode=mode, stun=stun), (43, 30), c, t)
+            for x, y, mode, stun, c, t in ((38, 30, "hunt", 0, 0, 0), (33, 30, "hunt", 0, 100, 0),
+                                            (33, 30, "hunt", 0, 100, 100), (38, 30, "patrol", 0, 0, 0),
+                                            (38, 30, "hunt", 3, 0, 0))]
+    return {
+        "vignette": [mt.vignette_alpha(t) for t in T], "heart": [mt.heart_hz(t) for t in T],
+        "hole": [mt.lamp_hole_radius(c) for c in T], "flicker": [mt.lamp_flicker_amp(c, False) for c in T],
+        "profile": profile, "hud": hud, "fx": fx, "eyes": eyes,
+        "flare": [mt.lunge_flare(i / 60) for i in range(20)],
+        "env": [mt.heart_env(ph) for ph in (0, 0.1, 0.18, 0.3, 0.9)],
+        "ring": [list(v) for v in mt.pulse_ring(mt.cave_dist((43, 30), {}, set(), cave_npcs, roam=True))],
+        "ringWall": [list(v) for v in mt.pulse_ring(mt.cave_dist((30, 28), {}, set(), cave_npcs, roam=True))],
+    }
+
+
+def python_lists():
+    """What the BAG/shop list builders compute - mirrored by listData in JS_DUMP."""
+    mats0 = dict(stone=0, ore=0, wall=0)
+    every = {k: 1 + (i * 37) % 999 for i, k in enumerate(mt.GOODS)}
+    bags = [(0, {}, mats0), (5, dict(potion=2, twig=3, smoke=1), dict(stone=4, ore=1, wall=0)),
+            (999, every, dict(stone=9, ore=99, wall=999)), (0, dict(pearl=1), dict(stone=1))]
+    rows = [mt.bag_rows(b, bag, m) for b, bag, m in bags]
+    sell = mt.shop_rows("sell", dict(pearl=2, twig=12, potion=3, relicshard=999))
+    tops = [mt.list_top(n, c, size) for n in (0, 3, 8, 13, 26) for size in (3, 6, 8) for c in range(max(n, 1))]
+    ids = ["ball"] + list(mt.GOODS) + list(mt.MATERIALS) + ["nosuch"]
+    out = dict(rows=rows, entries=[mt.bag_entries(r) for r in rows], buy=mt.shop_rows("buy", {}), sell=sell,
+               caps=[mt.shop_qty_cap("sell", r) for r in sell] + [mt.shop_qty_cap("buy", ("ball", "BALL", 20))],
+               tops=tops, names=[mt.bag_name(i) for i in ids], descs=[mt.bag_desc(i) for i in ids],
+               msgs=[mt.BAG_MSG["healed"] % ("NIBBIT", 20), mt.SHOP_MSG["bought"] % (3, "POTION", 90)])
+    return json.loads(json.dumps(out))
+
+
+def python_shell():
+    """The shell juice constants both builds share by name and value, plus
+    the fixed seam and GEODE crystal spots they compute (no window needed).
+    Values are deep-converted through json, so nested tuples become lists."""
+    out = {k: json.loads(json.dumps(getattr(mt, k))) for k in SHELL_KEYS}
+    out["lists"] = python_lists()
+    out["seamSpots"] = [[x, y] for y in range(mt.MAP_H) for x in range(mt.MAP_W)
+                        if mt.MAP[y][x] == mt.SEAM]
+    out["feel"] = python_feel()
+    out["geodeSpots"] = [[x, y] for y in range(mt.GEODE[1], mt.GEODE[3] + 1)
+                         for x in range(mt.GEODE[0], mt.GEODE[2] + 1)
+                         if mt.MAP[y][x] in "c;," and mt.tile_hash(x, y) % mt.GEODE_GLINT_ONE_IN == 0]
+    return out
+
+
+def python_sandbox():
+    """The sandbox tables plus what the engine computes from them: the tile
+    hash across ROCKY PASS, where ORE sits, what can be mined, and which
+    tiles accept a WALL from a fixed spot - so a hand-ported engine that
+    drifts (a 32-bit overflow, a BFS that forgets ledges) fails here."""
+    band, ore, mineable, placeable = [], [], [], []
+    npcs = {n.get("home", (n["x"], n["y"])) for n in mt.NPCS}
+    for y in range(mt.ROCK_BAND[0] - 1, mt.ROCK_BAND[1] + 2):
+        for x in range(mt.MAP_W):
+            t = mt.tile_at(x, y)
+            band.append(mt.tile_hash(x, y))
+            if mt.can_mine(t, x, y, True):
+                mineable.append([x, y])
+            if mt.can_mine(t, x, y, True) and mt.mine_drop(t, x, y).get("ore"):
+                ore.append([x, y])
+            if (x + 2 * y) % 5 == 0 and mt.placement_ok(x, y, {}, set(), npcs, (30, 44))[0]:
+                placeable.append([x, y])
+    return {
+        "wall": mt.WALL, "materials": list(mt.MATERIALS), "labels": mt.MATERIAL_LABEL,
+        "menu": list(mt.MENU_ITEMS), "interactive": sorted(mt.INTERACTIVE),
+        "solid": sorted(mt.SOLID), "materialLabel": mt.MATERIAL_LABEL,
+        "blocks": {k: [b["name"], b["drops"], b["ore_one_in"], b["leaves"], b["tier"],
+                       bool(b.get("authored_only")), b.get("tool")]
+                   for k, b in mt.BLOCKS.items()},
+        "recipes": [[r["id"], r["out"], r["count"], r["needs"], r.get("sets_tier", 0), r.get("cap"),
+                     list(r["sets_tool"]) if r.get("sets_tool") else None]
+                    for r in mt.RECIPES],
+        "hashes": band, "ore": ore, "mineable": mineable, "placeable": placeable,
+        **python_seam_data(),
+    }
+
+
+def python_seam_data():
+    """The seam, the GEODE and the backstop as the engine computes them,
+    mirroring seamData() in JS_DUMP."""
+    seams, tier1 = [], []
+    for y in range(mt.MAP_H):
+        for x in range(mt.MAP_W):
+            t = mt.tile_at(x, y)
+            if mt.can_mine(t, x, y, 2) and not mt.can_mine(t, x, y, 1):
+                seams.append([x, y])
+            if mt.can_mine(t, x, y, 1):
+                tier1.append([x, y])
+    dug = {p: "." for p in mt.ORE_DEPOSITS}
+    one_left = {p: "." for p in mt.ORE_DEPOSITS[1:]}
+    backstop = []
+    for tier in (0, 1, 2):
+        for ore in (0, 2, 3):
+            for ed in (dug, one_left, {}):
+                r = mt.quarry_backstop({"stone": 1, "ore": ore}, tier, ed)
+                backstop.append([r["stone"], r["ore"]] if r else None)
+    le = mt.load_edits({"70,34": "c", "65,33": "c", "64,33": "c", "70,35": "K", "30,45": "K",
+                        "70,34 ": ".", "33,46": ".", "30,44": "W", "69,31": "c"})
+    # The glade gates: only an authored T breaks, and only to '.'.
+    glade_edits = []
+    for e in ({"19,84": "."}, {"71,84": "."}, {"20,84": "."}, {"19,84": "W"}):
+        r = mt.load_edits(e)
+        glade_edits.append([["%d,%d" % k, v] for k, v in sorted(r.items(), key=lambda kv: "%d,%d" % kv[0])])
+    # Part B: axe_tier over JSON-representable junk, the can_mine matrix, craft_cells for five fixed states.
+    # 1.0 is left out on purpose: JS cannot tell 1.0 from 1.
+    junk = [None, True, False, 0, 1, 2, -3, "1", 1.5, [], {}]
+    can_mine_matrix = []
+    row85 = mt.MAP[85]
+    for t in sorted(mt.BLOCKS):
+        mt.MAP[85] = row85[:20] + t + row85[21:]          # (20, 85): an authored glyph for this block
+        try:
+            for x, y in ((20, 85), (30, 44), (21, 85)):
+                for tier in (0, 1, 2):
+                    for axe in (0, 1):
+                        can_mine_matrix.append(mt.can_mine(t, x, y, tier, axe))
+        finally:
+            mt.MAP[85] = row85
+    craft_states = [
+        ({"pick": 0, "axe": 0}, {}, {"stone": 0, "ore": 0, "wall": 0}),
+        ({"pick": 1, "axe": 0}, {"twig": 2, "flint": 1}, {"stone": 8, "ore": 4, "wall": 1}),
+        ({"pick": 2, "axe": 1}, {"leaf": 2, "dewdrop": 1, "potion": mt.BAG_MAX, "flint": 2, "copperwire": 1},
+         {"stone": 3, "ore": 1, "wall": 0}),
+    ]
+    cg = mt.Game()
+    craft_cells_out = []
+    found_states = [set(), set(), set(), {"balls", "lantern"}, {"twig"}]
+    empty_state = ({"pick": 0, "axe": 0}, {}, {"stone": 0, "ore": 0, "wall": 0})
+    for (fl, bag, mats), fnd in zip(craft_states + [empty_state, empty_state], found_states):
+        cg.flags, cg.bag, cg.materials = dict(fl), dict(bag), dict(mats)
+        cg.balls, cg.lantern, cg.pulses = 3, 60, 1
+        cg.found = set(fnd)
+        craft_cells_out.append(mt.craft_cells(cg))
+    grid_move_out = [mt.grid_move(i, d, n, mt.CRAFT_COLS) for n in range(1, 16) for i in range(n)
+                     for d in ("left", "right", "up", "down")]
+    clean_found_out = [sorted(mt.clean_found(v)) for v in (["twig", "axe"], ["twig", 3, None, "nosuch"], None, "twig", {})]
+    # The shared line-breaking rule over a fixed fake measure (7 px per char).
+    wrap_out = [[mt.wrap_lines(s, 70, lambda t: len(t) * 7, ml) for ml in (None, 1, 2)]
+                for s in ("one two three four five six", "a  b", "supercalifragilistic word",
+                          "Stuns the stalker. Have 3/3.")]
+    ease_out_out = [mt.ease_out(u) for u in (0, 0.25, 0.5, 0.75, 1)]
+    icon_colour_out = [[list(mt.icon_colour(mt.ICON_PALETTE[ch], m)) for m in ("normal", "grey", "shadow")]
+                       for ch in sorted(mt.ICON_PALETTE)]
+    new_tables = json.loads(json.dumps({
+        "easeOut": ease_out_out, "iconColour": icon_colour_out,
+        "icons": mt.ICONS, "iconPalette": mt.ICON_PALETTE, "iconShadow": mt.ICON_SHADOW,
+        "iconIds": [mt.icon_id(k) for k in ["ball", "nosuch"] + sorted(mt.ICONS)],
+        "craftCols": mt.CRAFT_COLS, "craftBlurb": mt.CRAFT_BLURB, "craftMsg": mt.CRAFT_MSG,
+        "gridMove": grid_move_out, "cleanFound": clean_found_out, "craftCells": craft_cells_out,
+        "wrapLines": wrap_out,
+    }))
+    return {
+        **new_tables,
+        "axeMax": mt.AXE_MAX, "tree": mt.TREE, "axeTiers": [mt.axe_tier(v) for v in junk],
+        "canMineMatrix": can_mine_matrix,
+        "seam": mt.SEAM, "grass": list(mt.GRASS), "pickMax": mt.PICK_MAX, "geode": list(mt.GEODE),
+        "backstopOre": mt.BACKSTOP_ORE, "seams": seams, "tier1Count": len(tier1),
+        "deposits": [list(p) for p in mt.ORE_DEPOSITS],
+        "tiers": [mt.pick_tier(v) for v in (True, False, None, 0, 1, 2, 3, -1, "2")],
+        "backstop": backstop,
+        "loadEdits": [["%d,%d" % k, v] for k, v in sorted(le.items(), key=lambda kv: "%d,%d" % kv[0])],
+        "geodeItem": mt.ITEMS.get((75, 30), 0),
+        "items": [["%d,%d" % p, mt.ITEMS[p]] for p in sorted(mt.ITEMS, key=lambda q: "%d,%d" % q)],
+        "gatedRegions": [list(r) for r in mt.GATED_REGIONS], "gladeEdits": glade_edits,
+        "gladeMask": [[mt.glade_masked(x, y, e) for e in ({}, {(19, 84): "."}, {(71, 84): "."},
+                                                           {(19, 84): ".", (71, 84): "."})]
+                      for x, y in GLADE_PROBES],
+        "gladeGates": [[list(r), list(mt.GLADE_GATES[r])] for r in mt.GLADES],
+        "pickedGround": [["%d,%d" % p, mt.picked_ground(*p)] for p in sorted(mt.ITEMS)],
+        "seamProbe": [[mt.can_mine(mt.SEAM, x, y, t) for t in (0, 1, 2)]
+                      for x, y in ((70, 34), (65, 33), (70, 35), (30, 45), (64, 33), (0, 0))],
+        "pickedText": [["%d,%d" % p, mt.picked_text(*p)] for p in sorted(mt.ITEMS)],
+    }
+
+
+def python_cave():
+    """The DARK CAVE kit as the engine computes it, mirroring caveData() in
+    JS_DUMP - tables, every pure rule over a grid of inputs, the whole
+    domain, spawns, PULSE hits and three 300-tick stalker traces."""
+    cn = {(n["x"], n["y"]) for n in mt.NPCS}
+    seams = {(x, y): "c" for y, r in enumerate(mt.MAP) for x, c in enumerate(r) if c == mt.SEAM}
+    dom = [[x, y] for y in range(mt.MAP_H) for x in range(mt.MAP_W) if mt.stalker_walkable(x, y, seams, set(), cn)]
+
+    def trace(seed):
+        rng = mt.mulberry32(seed)
+        s = mt.new_stalker(60, 30)
+        out = []
+        walk = [(48, 30), (50, 30), (52, 30), (54, 30), (56, 31), (79, 35), (60, 31), (58, 31),
+                (55, 31), (52, 31), (20, 30), (24, 30), (28, 30), (32, 31), (38, 30), (40, 31)]
+        for k in range(300):
+            pp = walk[(k // 10) % len(walk)]
+            if k in (150, 230):
+                s = mt.pulse_apply(s, pp, {}, set(), cn)[0]
+            s, ev = mt.stalker_tick(s, pp, max(0, 100 - k), min(100, k // 2), {}, set(), cn, rng)
+            out.append([s["x"], s["y"], s["mode"], s["wp"], s["stun"], s["grace"], s["tick"], ev])
+        return out
+
+    def pulse_hit(x, y):
+        s, hit = mt.pulse_apply(mt.new_stalker(x, y), (10, 31), {}, set(), cn)
+        return [s["x"], s["y"], s["stun"], hit]
+
+    r42 = mt.mulberry32(42)
+    L, T, H, P = mt.LANTERN, mt.TENSION, mt.HUNT_AI, mt.PULSE
+    return {
+        "enc": [mt.encounter_rate(t) for t in (0, 1, 25, 50, 74, 75, 99, 100)],
+        "lantern": [L["max"], L["drain"], L["oil"], L["r_max"], L["r_min"], L["core_px"], L["buckets"]],
+        "tension": [T["max"], T["base"], T["dim"], T["dark"], T["hunted"], T["safe"], T["fear"],
+                    T["enc_bonus"], T["events"]],
+        "keepOut": [list(k) for k in mt.KEEP_OUT],
+        "hunt": [list(H["rows"]), H["safe_r"], [list(m) for m in H["mouths"]], list(H["lair"]),
+                 [list(w) for w in H["patrol"]], list(H["pace_patrol"]), list(H["pace_hunt"]), H["pause"],
+                 H["sense_base"], H["sense_dark"], H["sense_div"], H["lose_track"], H["rest_lose"],
+                 H["rest_run"], H["grace"]],
+        "pulse": [P["max"], P["range"], P["stun"], P["push"]], "dirs": [list(d) for d in mt.STALKER_DIRS],
+        "radius": [mt.lantern_radius(c) for c in range(101)],
+        "bucket": [mt.lantern_bucket(c) for c in range(101)],
+        "keep": [[mt.keep_out(c, t) for t in (0, 74, 75, 100)] for c in (0, 19, 20, 49, 50, 100)],
+        "sense": [[mt.stalker_sense(c, t) for t in (0, 24, 25, 99, 100)] for c in (0, 13, 37, 50, 63, 87, 100)],
+        "tstep": [[mt.tension_step(t, c, h, sf) for t, h, sf in ((3, False, False), (3, True, False),
+                                                                 (99, True, False), (1, False, True))]
+                  for c in (0, 19, 20, 49, 50, 100)],
+        "domain": dom,
+        "safe": [mt.in_safe_zone(x, y) for x, y in ((42, 30), (42, 29), (38, 27), (47, 27), (42, 33), (42, 34))],
+        "spawn": [list(mt.stalker_spawn(p, {}, set(), cn)) for p in ((43, 30), (7, 33), (79, 30), (42, 38), (60, 36))],
+        "pulseHits": [pulse_hit(x, y) for x, y in ((12, 31), (10, 28), (14, 31), (15, 31))],
+        "rng": [r42() for _ in range(5)],
+        "traces": [trace(sd) for sd in (1, 2, 3)],
+    }
+
+
+def diff(a, b, path=""):
+    out = []
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b)):
+            if k not in a:
+                out.append("%s.%s missing from the .py build" % (path, k))
+            elif k not in b:
+                out.append("%s.%s missing from the .html build" % (path, k))
+            else:
+                out += diff(a[k], b[k], "%s.%s" % (path, k))
+    elif isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            out.append("%s length %d vs %d" % (path, len(a), len(b)))
+        else:
+            for i, (x, y) in enumerate(zip(a, b)):
+                out += diff(x, y, "%s[%d]" % (path, i))
+    elif a != b:
+        out.append("%s py=%r html=%r" % (path, a, b))
+    return out
+
+
+if not os.path.exists(HTML_PATH):
+    print("  skipped: no .html build alongside this file")
+else:
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        print("  skipped: node not on PATH, cannot read the .html build")
+    else:
+        fd, script = tempfile.mkstemp(prefix="monster-trail-parity-", suffix=".js")   # per run: suites may overlap
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(JS_DUMP)
+            proc = subprocess.run([node, script, HTML_PATH], capture_output=True, text=True)
+        finally:
+            try:
+                os.remove(script)
+            except OSError:
+                pass
+        if proc.returncode != 0:
+            ok(False, "could not read tables from the .html build: %s"
+               % proc.stderr.strip()[:200])
+        else:
+            html_tables = json.loads(proc.stdout)
+            py_tables = python_tables()
+            clean = True
+            for key in ("species", "moves", "zones", "map", "chart", "starters", "sandbox", "shell", "hunt",
+                        "cave", "conditions", "loot"):
+                d = diff(py_tables[key], html_tables[key], key)
+                clean = clean and not d
+                ok(not d, "%s differs between builds: %s" % (key, "; ".join(d[:4])))
+            if clean:
+                print("  %d species, %d moves, %d zones identical in both builds"
+                      % (len(py_tables["species"]), len(py_tables["moves"]),
+                         len(py_tables["zones"])))
+                sb = py_tables["sandbox"]
+                print("  sandbox: %d recipes, %d blocks, %d tile hashes, %d ore spots, "
+                      "%d mineable, %d buildable tiles identical in both builds"
+                      % (len(sb["recipes"]), len(sb["blocks"]), len(sb["hashes"]),
+                         len(sb["ore"]), len(sb["mineable"]), len(sb["placeable"])))
+                print("  seam: %d tier-2-only seams %s, GEODE %s, %d backstop cases, "
+                      "%d load_edits cases identical in both builds"
+                      % (len(sb["seams"]), sb["seams"], sb["geode"], len(sb["backstop"]),
+                         len(sb["loadEdits"])))
+                print("  glades: gates %s, %d x %d glade-mask cases identical in both builds"
+                      % ([g_[1] for g_ in sb["gladeGates"]], len(sb["gladeMask"]), len(sb["gladeMask"][0])))
+                ok(sum(map(sum, sb["gladeMask"])) > 0 and not all(map(all, sb["gladeMask"])),
+                   "the glade-mask parity matrix holds both masked and unmasked cases")
+                shl = py_tables["shell"]
+                print("  shell: %d juice/HUD constants, %d GEODE crystals, door %s, %d picked-ball "
+                      "lines identical in both builds"
+                      % (len(SHELL_KEYS), len(shl["geodeSpots"]), shl["GEODE_DOOR"],
+                         len(sb["pickedText"])))
+                li = shl["lists"]
+                print("  bag/shop: %d bag_rows cases, %d BUY + %d SELL rows, %d list_top windows, "
+                      "%d names/descriptions identical in both builds"
+                      % (len(li["rows"]), len(li["buy"]), len(li["sell"]), len(li["tops"]), len(li["names"])))
+                fe = shl["feel"]
+                print("  cave feel: %d lantern hole radii, %d mask profile samples, %d HUD bar states, "
+                      "%d tension-fx cases, %d vignette / heartbeat steps, %d + %d PULSE ring tiles "
+                      "identical in both builds"
+                      % (len(fe["hole"]), len(fe["profile"]), len(fe["hud"]), len(fe["fx"]),
+                         len(fe["vignette"]), len(fe["ring"]), len(fe["ringWall"])))
+                hu = py_tables["hunt"]
+                print("  hunt: HUNT table, %d hunt_level cases, %d hunt_count cases, 2 hint lines, "
+                      "%d scare tunables identical in both builds"
+                      % (len(hu["levels"]), len(hu["counts"]), len(hu["scare"])))
+                cv = py_tables["cave"]
+                evs = {}
+                for t in cv["traces"]:
+                    for row in t:
+                        if row[-1]:
+                            evs[row[-1]] = evs.get(row[-1], 0) + 1
+                ok(set(evs) == {"hunt", "retreat", "lost", "lunge"},
+                   "the parity traces exercise every stalker event: %s" % evs)
+                print("  cave: LANTERN/TENSION/KEEP_OUT/HUNT_AI/PULSE tables, %d-tile domain, %d radius "
+                      "steps, %d spawns, %d PULSE probes, 3 x %d-tick stalker traces (%s) "
+                      "identical in both builds"
+                      % (len(cv["domain"]), len(cv["radius"]), len(cv["spawn"]), len(cv["pulseHits"]),
+                         len(cv["traces"][0]), ", ".join("%d %s" % (n, k) for k, n in sorted(evs.items()))))
+                co = py_tables["conditions"]
+                print("  conditions: CONDITIONS/REGION_CONDITIONS/scene tables + 2 salts, %d seeds, %d rolls, "
+                      "%d fixed-rule rolls, %d scenes, %d arena kinds, %d damage_calc cases identical in both builds"
+                      % (len(co["seeds"]), len(co["rolls"]), len(co["fixed"]), len(co["scenes"]),
+                         len(co["arenas"]), len(co["dmg"])))
+                lo = py_tables["loot"]
+                print("  loot: GOODS/LOOT_AREA/LOOT_TYPE + %d constants, %d seeds, %d rolls, %d coin, %d blackout, "
+                      "%d buy, %d sell, %d save-cleaning cases and the CENTRE strings identical in both builds"
+                      % (len(lo["consts"]), len(lo["seeds"]), len(lo["rolls"]), len(lo["coins"]),
+                         len(lo["blackout"]), len(lo["buy"]), len(lo["sell"]), len(lo["clean"])))
+
+# ---------------------------------------------------------------- RESULT
+print("\n%s" % ("%d checks passed." % PASSED if not FAILURES
+                else "%d FAILED, %d passed." % (len(FAILURES), PASSED)))
+sys.exit(0 if not FAILURES else 1)

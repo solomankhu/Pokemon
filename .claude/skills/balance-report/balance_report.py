@@ -127,17 +127,111 @@ def section_duel(level, only=None):
     print("(wins = matchups this species takes strictly faster than the foe; tiers should track BST and evolution stage)")
 
 
+XP_RULES = [("old 1/7", 1, 7), ("new 3/14", 3, 14)]   # base_exp * level * num // den
+ROUTE = ["ROUTE ONE", "DEEPWOOD", "SEASIDE", "RIDGE TOWN", "ROCKY PASS", "DARK CAVE", "SPIRE RUINS"]
+GATED = [mt.GEODE] + list(getattr(mt, "GLADES", ()))   # optional pockets: off the normal route
+
+
+def xp_for(sid, level, num, den):
+    return max(1, mt.SPECIES[sid]["base_exp"] * level * num // den)
+
+
+def level_of(xp):
+    lv = 1
+    while lv < 100 and (lv + 1) ** 3 <= xp:
+        lv += 1
+    return lv
+
+
+def route_zones(region):
+    out = []
+    for z in mt.ZONES:
+        cx, cy = (z["x1"] + z["x2"]) // 2, (z["y1"] + z["y2"]) // 2
+        if mt.region_name(z["y1"]) != region:
+            continue
+        if any(x1 <= cx <= x2 and y1 <= cy <= y2 for x1, y1, x2, y2 in GATED):
+            continue
+        out.append(z)
+    return out
+
+
+def wild_win_xp(region, num, den):
+    """(median zone level, mean XP of one wild win there) for a region's ungated zones;
+    each zone counts equally, each pool is weighted by its spawn weights."""
+    zones = route_zones(region)
+    if not zones:
+        return None, 0
+    lvls = sorted(lv for z in zones for lv in range(z["min"], z["max"] + 1))
+    med = lvls[len(lvls) // 2]
+    per_zone = []
+    for z in zones:
+        tot = sum(w for _, w in z["pool"])
+        per_zone.append(sum(w * xp_for(sid, med, num, den) for sid, w in z["pool"]) / tot)
+    return med, sum(per_zone) / len(per_zone)
+
+
+def section_xp():
+    exps = sorted(s["base_exp"] for s in mt.SPECIES.values())
+    med_exp = exps[len(exps) // 2]
+    game_rule = (mt.XP_NUM, mt.XP_DEN) if hasattr(mt, "XP_NUM") else (1, 7)
+    print("\n== XP PACING  (the game's live rule is %d/%d; Medium Fast curve, level^3)" % game_rule)
+    print("Wild wins per level against a same-level foe with the median base_exp %d:" % med_exp)
+    print("%-10s" % "rule" + "".join("%7s" % ("L%d" % lv) for lv in (5, 10, 15, 20, 25, 30)))
+    for label, num, den in XP_RULES:
+        cells = []
+        for lv in (5, 10, 15, 20, 25, 30):
+            need = (lv + 1) ** 3 - lv ** 3
+            cells.append("%7.1f" % (need / max(1, med_exp * lv * num // den)))
+        print("%-10s" % label + "".join(cells))
+
+    trainers = [n for n in mt.NPCS if n["kind"] == "trainer"]
+    hunt_max = mt.HUNT["lv_max"]
+    gym_lvls = sorted(lv for _, lv in mt.GYM_LEADER["team"])
+    gym_med, gym_top = gym_lvls[len(gym_lvls) // 2], gym_lvls[-1]
+    print("\nNormal-route estimate: a L5 starter beats all %d trainers (%s) plus N wild wins per region"
+          % (len(trainers), ", ".join(n["id"] for n in trainers)))
+    print("at that region's ungated zones' median level (GEODE and glades excluded).")
+    print("STARTER-ONLY UPPER BOUND: every point of XP goes to the battling monster (b.mine); a real")
+    print("party splits wins between members, so real arrival levels are lower.")
+    print("%-10s %4s  %-26s  %-26s" % ("rule", "N", "DARK CAVE arrival (hunt<=%d)" % hunt_max,
+                                       "gym arrival (VOLT L%d/L%d)" % (gym_med, gym_top)))
+    for label, num, den in XP_RULES:
+        for n_wild in (10, 20, 40):
+            xp = 5 ** 3
+            cave = None
+            for region in ROUTE:
+                if region == "DARK CAVE":
+                    cave = level_of(xp)
+                med, per = wild_win_xp(region, num, den)
+                if med is not None:
+                    xp += int(n_wild * per)
+                for t in trainers:
+                    if mt.region_name(t["y"]) == region:
+                        xp += sum(xp_for(sid, lv, num, den) for sid, lv in t["team"])
+            gym = level_of(xp)
+            c_flag = "  OVER" if cave > hunt_max else ""
+            g_flag = "  OVER" if gym > gym_top else ("  >median" if gym > gym_med else "")
+            print("%-10s %4d  L%-25s  L%-25s" % (label, n_wild, "%d%s" % (cave, c_flag), "%d%s" % (gym, g_flag)))
+    for region in ROUTE:
+        med, per = wild_win_xp(region, *game_rule)
+        if med is not None:
+            print("  %-12s median Lv %2d, %5.1f XP per wild win (live rule)" % (region, med, per))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--level", type=int, default=25)
     ap.add_argument("--species", help="detailed duel table for one species id")
-    ap.add_argument("--section", choices=["species", "zones", "types", "duel"])
+    ap.add_argument("--section", choices=["species", "zones", "types", "duel", "xp"])
+    ap.add_argument("--xp", action="store_true", help="XP pacing only (same as --section xp)")
     a = ap.parse_args()
+    if a.xp:
+        a.section = "xp"
     if a.species and a.species not in mt.SPECIES:
         raise SystemExit("unknown species %r; ids: %s" % (a.species, ", ".join(mt.SPECIES)))
     run = {"species": section_species, "zones": section_zones, "types": section_types,
-           "duel": lambda: section_duel(a.level, a.species)}
-    for name in ([a.section] if a.section else ["species", "zones", "types", "duel"]):
+           "duel": lambda: section_duel(a.level, a.species), "xp": section_xp}
+    for name in ([a.section] if a.section else ["species", "zones", "types", "duel", "xp"]):
         run[name]()
 
 

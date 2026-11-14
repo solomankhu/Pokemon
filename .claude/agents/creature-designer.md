@@ -21,7 +21,7 @@ MONSTER TRAIL ships as two builds: `claude's monsters.py` (pygame, the source of
 - **Stats**: `stat_at`: `int(base*2*L/100)+5`, and HP is `int(base*2*L/100)+L+10`. These are the real formula with IV/EV/nature taken out, so base stats alone fix a species' shape.
 - **Damage**: `((2L/5+2) * pow * A/D)/50 + 2`, then crit ×1.5, STAB ×1.5, the type multiplier, and a 0.85-1.0 roll. Stages use `(2+s)/2` or `2/(2-s)`.
 - **Catching**: Gen III shake check: `a = (3·maxHP − 2·HP)·rate·ball / (3·maxHP)`, `b = 65536 / (255/a)^¼`, then four shakes. Catch rate 45 means starter or pseudo-legendary difficulty, 190-255 means early-route filler.
-- **XP**: `level³` (the real games' Medium Fast curve). `xp_from_faint = base_exp·L/7`.
+- **XP**: `level³` (the real games' Medium Fast curve). `xp_from_faint = max(1, base_exp·L·3//14)` (`XP_NUM/XP_DEN`, 1.5x the old /7).
 
 ## Design heuristics
 

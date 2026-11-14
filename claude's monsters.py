@@ -1345,8 +1345,9 @@ def icon_id(item):
 
 BAG_MAX = 999                   # per item (and the shop's cap on total balls)
 COUNT_MAX = 0x7FFFFFFF           # saved counters (battles) stay exact in JS arithmetic
-LOOT_WIN_CHANCE = 0.4            # a wild win drops loot this often; a catch always does
 LOOT_AREA_SHARE = 0.7            # of drops, this share comes from LOOT_AREA
+LOOT_DOUBLE = 0.35               # a drop comes as 2 instead of 1 this often
+LOOT_RARE = 0.10                 # a wild win/catch also drops the region's rare this often
 LOOT_SALT = 0x1007               # keeps the loot seed off condition_seed's stream
 SAFETY_BALLS = 5                 # the CENTRE's gift when you have no balls and no coins
 GYM_BONUS = 300                  # paid once, on the first gym win
@@ -1555,8 +1556,11 @@ def catch_roll(mon, ball_bonus, rng=None, throw_scale=1.0):
     return dict(caught=True, shakes=4)
 
 
+XP_NUM, XP_DEN = 3, 14          # XP for a faint: base_exp * level * 1.5 / 7, integers only
+
+
 def xp_from_faint(foe):
-    return max(1, int(SPECIES[foe.id]["base_exp"] * foe.level / 7))
+    return max(1, SPECIES[foe.id]["base_exp"] * foe.level * XP_NUM // XP_DEN)
 
 
 def gain_xp(mon, amount):
@@ -1965,24 +1969,48 @@ def loot_seed(steps, tx, ty, foe_level, battles):
     return ((steps * 31 + tx * 977 + ty * 131 + foe_level * 7919 + battles * 104729) ^ LOOT_SALT) & 0xFFFFFFFF
 
 
+def loot_rare(region):
+    """The region's rare drop: the LOOT_AREA entry with the strictly smallest
+    weight, only for a pool of 2+ entries; otherwise None."""
+    pool = LOOT_AREA.get(region) or []
+    if len(pool) < 2:
+        return None
+    low = min(w for _, w in pool)
+    rares = [item for item, w in pool if w == low]
+    return rares[0] if len(rares) == 1 else None
+
+
 def loot_roll(region, foe_types, caught, trainer, hunt, seed):
-    """Pure: the loot id a battle drops, or None. Own mulberry32; never random.
-    The draw order is fixed (both builds): the drop check, the area-or-type
-    choice, then a weighted pick on the area branch only."""
+    """Pure: the list of (id, n) a battle drops; [] for trainers and hunts.
+    Own mulberry32; never random. Every wild win or catch drops (``caught``
+    no longer changes the roll). The draw order is fixed (both builds): the
+    area-or-type choice, a weighted pick on the area branch only, the double
+    roll, then the rare roll (a rare equal to the main item merges into it)."""
     if trainer or hunt:
-        return None
+        return []
     rng = mulberry32(seed)
-    if rng() >= LOOT_WIN_CHANCE and not caught:
-        return None
     pool = LOOT_AREA.get(region)
+    item = None
     if rng() < LOOT_AREA_SHARE and pool:
         pick = rng() * sum(w for _, w in pool)
-        for item, w in pool:
+        for it, w in pool:
             pick -= w
             if pick < 0:
-                return item
-        return pool[-1][0]
-    return LOOT_TYPE[foe_types[0]]
+                item = it
+                break
+        if item is None:
+            item = pool[-1][0]
+    else:
+        item = LOOT_TYPE[foe_types[0]]
+    n = 2 if rng() < LOOT_DOUBLE else 1
+    out = [(item, n)]
+    rare = loot_rare(region)
+    if rng() < LOOT_RARE and rare:
+        if rare == item:
+            out[0] = (item, n + 1)
+        else:
+            out.append((rare, 1))
+    return out
 
 
 def coin_reward(foe_level, trainer_max_level, is_gym, gym_paid):
@@ -3183,15 +3211,20 @@ class Game:
             if is_gym:
                 self.flags["gym_bonus"] = True
         region = "FISHING" if b.fishing else region_name(self.player.ty)
-        item = loot_roll(region, b.foe.types, result == "caught", b.trainer, b.hunt, b.loot_seed)
-        if item:
+        drops = loot_roll(region, b.foe.types, result == "caught", b.trainer, b.hunt, b.loot_seed)
+        for i, (item, n) in enumerate(drops):
             name = GOODS[item]["name"]
-            self.q_msg(("%s was holding a %s!" if result == "caught" else "The wild %s dropped a %s!")
-                       % (b.foe.name, name))
-            if self.bag.get(item, 0) >= BAG_MAX:
-                self.q_msg("...but your bag is full.")
+            if i:
+                self.q_msg("...and a rare %s!" % name)
             else:
-                self.bag = bag_add(self.bag, item, 1)
+                what = ("a %s" % name) if n == 1 else ("%d %s" % (n, name))
+                self.q_msg(("%s was holding %s!" if result == "caught" else "The wild %s dropped %s!")
+                           % (b.foe.name, what))
+            added = max(0, min(n, BAG_MAX - self.bag.get(item, 0)))
+            if added:
+                self.bag = bag_add(self.bag, item, added)
+            if added < n:
+                self.q_msg("...but your bag is full.")
 
     def apply_move(self, attacker_is_mine, move_id):
         b = self.battle
@@ -5272,8 +5305,8 @@ class CraftFx:
     advanced by Shell.update_cave_fx while mode is craft, cleared otherwise.
     Never reads or writes engine state; its only randomness is FX_RNG."""
 
-    def __init__(self, sfx):
-        self.sfx, self.t, self.recipe, self.before, self.sparks = sfx, None, None, {}, []
+    def __init__(self):
+        self.t, self.recipe, self.before, self.sparks = None, None, {}, []
 
     def start(self, i, before):
         self.t, self.recipe, self.before = 0.0, i, dict(before)
@@ -6037,6 +6070,19 @@ def wrap_lines(s, max_w, measure, max_lines=None):
     return lines
 
 
+def icon_colour(rgb, mode="normal"):
+    """The colour one icon pixel draws in.  "shadow" is ICON_SHADOW, "grey" a
+    faded zero-saturation luminance (a locked CRAFT cell), else the palette."""
+    r, g, b = rgb[:3]
+    if mode == "shadow":
+        return ICON_SHADOW
+    if mode == "grey":
+        lum = (r * 30 + g * 59 + b * 11) // 100
+        v = (lum + 2 * 200) // 3
+        return (v, v, v)
+    return (r, g, b)
+
+
 def ease_out(u):
     """Quadratic ease-out on 0..1."""
     u = max(0.0, min(1.0, u))
@@ -6077,7 +6123,7 @@ class Shell:
             self.cfx.event(kind, x, y, drops)
         self.game.fx_world = fx_world
         self._icons = {}               # (id, scale, mode) -> cached icon surface
-        self.crfx = CraftFx(self.sfx.play)
+        self.crfx = CraftFx()
         self.game.fx_craft = self.crfx.start
         self.pending_confirm = False   # a confirm pressed during the lunge flare, replayed after it
         self._shade = None             # reused surface the stalker's shadow body is drawn into
@@ -6147,15 +6193,7 @@ class Shell:
                 for px, ch in enumerate(row):
                     if ch == ".":
                         continue
-                    r, g, b = ICON_PALETTE[ch][:3]
-                    if mode == "shadow":
-                        col = ICON_SHADOW
-                    elif mode == "grey":
-                        lum = (r * 30 + g * 59 + b * 11) // 100
-                        v = (lum + 2 * 200) // 3
-                        col = (v, v, v)
-                    else:
-                        col = (r, g, b)
+                    col = icon_colour(ICON_PALETTE[ch], mode)
                     img.fill(col, pygame.Rect(px * scale, py * scale, scale, scale))
             self._icons[key] = img
         return img

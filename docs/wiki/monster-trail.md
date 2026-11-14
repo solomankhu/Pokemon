@@ -1,7 +1,7 @@
 ---
 title: MONSTER TRAIL
 sources: ["claude's monsters.py", "claude's monsters.html", ".claude/skills/add-monster/emit_tables.py", "docs/superpowers/specs", "docs/playtests/runs"]
-synced: 2026-10-24
+synced: 2026-11-14
 ---
 # MONSTER TRAIL (two builds, one design)
 
@@ -25,13 +25,33 @@ All three shipped and passed the [continuation playtest](../playtests/runs/2026-
 When a spec and CLAUDE.md disagree, CLAUDE.md and the code win.
 - [Loot, bag, coins, shop and battle items (Part A)](../superpowers/specs/2026-10-18-loot-shop-items-design.md).
   It reversed the old "no items, money or shops" rule. Status conditions stay out of scope,
-  and Part B (crafting from loot, the AXE, secret areas) is not designed yet.
+  Part B shipped afterwards (see below).
 - [Battle conditions and scenes](../superpowers/specs/2026-10-18-battle-conditions-design.md).
   Weather only boosts damage, or applies a fog accuracy penalty. Its seeds are separate, so
   the engine's random stream and the balance report are unchanged.
 - [Webcam battle controls](../superpowers/specs/2026-10-18-webcam-battle-controls-design.md).
   The spec's Layer 1 `classifyMotion` was replaced by the v2 pipeline in its own addendum.
   `classifyMotion` is kept only for comparison.
+- [More XP, generous drops, and a use for every drop](../superpowers/specs/2026-11-14-drops-xp-crafting-design.md)
+  (2026-11-14; not part of the continuation playtest above). Phase A: 1.5x XP (`XP_NUM/XP_DEN` = 3/14)
+  and every wild win drops 1-2 items plus a ~10% region rare (plan
+  `docs/superpowers/plans/2026-11-14-drops-xp-phase-a.md`; playtest MT-18). Phases B-D are pending.
+
+## Crafting, glades and the CRAFT grid (Part B)
+- The **AXE** is a recipe (2 twig + 1 flint, `sets_tool`) that sets `flags["axe"]`; it cuts the
+  `THICK TREE` (`T`, `tool="axe"`) that seals each of the two DEEPWOOD glades (`GLADES`,
+  `GLADE_GATES`, the gated-reachability rule in CLAUDE.md). Recipes can need loot goods, not only
+  ORE and STONE.
+- MENU -> CRAFT is a **recipe-book grid** (`craft_cells`, `grid_move`, a detail pane). Cells are
+  hidden (silhouette, `???`), locked, ready or owned; BUILD WALLS is the last cell.
+- `Game.found` records every item id ever held; it is saved and cleaned on load (`clean_found`).
+- The engine's no-op `fx_craft` / `juiceCraft` hook drives the shell's `CraftFx` / `CRFX`
+  animation (glow only under reduced motion).
+- **Icons:** `ICON_PALETTE`, `ICON_SHADOW` and `ICONS` are emitted tables. CRAFT cells, BAG and
+  shop rows, and COINS lines draw them. A new item needs an `ICONS` entry. Playtest rows MT-07,
+  MT-11 and MT-18.
+- Specs and plans: `docs/superpowers/plans/2026-10-23-visual-crafting.md` and
+  `docs/superpowers/plans/2026-10-23-axe-glades-loot-crafting.md`.
 
 ## The four layers
 DATA → ENGINE (pure, with an injectable `rng`) → STATE (`Game`, `mode`) → SHELL. Layers 1-3

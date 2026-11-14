@@ -501,6 +501,20 @@ nicknamed = mt.make_mon("emberling", 15, "SPARKY")
 mt.gain_xp(nicknamed, mt.xp_for_level(17))
 ok(nicknamed.name == "SPARKY", "a nickname survives evolution, got %s" % nicknamed.name)
 
+# XP for a faint: 1.5x the old base_exp * level / 7, in integers only (Drops + XP Phase A).
+ok((mt.XP_NUM, mt.XP_DEN) == (3, 14), "XP_NUM/XP_DEN are 3/14 (1.5x of 1/7)")
+xp_bad, xp_ratio_bad = [], []
+for sid, sp in mt.SPECIES.items():
+    for lv in (1, 5, 50, 100):
+        got = mt.xp_from_faint(mt.make_mon(sid, lv))
+        if got != max(1, sp["base_exp"] * lv * 3 // 14) or got < 1:
+            xp_bad.append((sid, lv, got))
+        old = max(1, int(sp["base_exp"] * lv / 7))
+        if lv >= 5 and not 1.4 <= got / old <= 1.6:
+            xp_ratio_bad.append((sid, lv, got, old))
+ok(not xp_bad, "xp_from_faint == max(1, base_exp*L*3//14) for every species at L1/5/50/100: %s" % xp_bad[:3])
+ok(not xp_ratio_bad, "new/old XP ratio is within [1.4, 1.6] for every species at L>=5: %s" % xp_ratio_bad[:3])
+
 hurt = mt.make_mon("nibbit", 5)
 caught_weak = 0
 for _ in range(2000):
@@ -2876,9 +2890,10 @@ ok(all(mt.GOODS.get(v, {}).get("kind") == "loot" for v in mt.LOOT_TYPE.values())
 ok(mt.LOOT_TYPE == dict(Normal="softfur", Fire="emberdust", Water="dewdrop", Grass="leaf", Bug="leaf",
                         Electric="copperwire", Steel="copperwire", Poison="venomsac", Flying="feather",
                         Psychic="shadowsilk", Dark="shadowsilk", Rock="flint"), "LOOT_TYPE matches the spec")
-ok((mt.BALL_PRICE, mt.START_COINS, mt.COINS_MAX, mt.BAG_MAX, mt.LOOT_WIN_CHANCE, mt.LOOT_AREA_SHARE,
+ok((mt.BALL_PRICE, mt.START_COINS, mt.COINS_MAX, mt.BAG_MAX, mt.LOOT_DOUBLE, mt.LOOT_RARE, mt.LOOT_AREA_SHARE,
     mt.LOOT_SALT, mt.SAFETY_BALLS, mt.GYM_BONUS, mt.SHOP_QTY_MAX)
-   == (20, 100, 99999, 999, 0.4, 0.7, 0x1007, 5, 300, 10), "the loot/shop constants match the spec")
+   == (20, 100, 99999, 999, 0.35, 0.10, 0.7, 0x1007, 5, 300, 10), "the loot/shop constants match the spec")
+ok(not hasattr(mt, "LOOT_WIN_CHANCE"), "LOOT_WIN_CHANCE is gone: every wild win drops")
 ok(mt.FORCE_NO_LOOT is False, "FORCE_NO_LOOT is off for the suite")
 ok(len(mt.ITEMS) == 14 and mt.ITEMS[(75, 30)] == 8 and mt.ITEMS[(56, 100)] == 4,
    "the item-ball table ITEMS is untouched by GOODS")
@@ -2892,35 +2907,70 @@ ok(mt.loot_seed(5, 1, 1, 5, 1) != mt.loot_seed(5, 1, 1, 5, 2), "the battle count
 
 # --- loot_roll ---
 rs_loot = random.getstate()
+# loot_rare: the strictly smallest weight in a 2+ entry pool; FISHING's is pearl.
+ok({r: mt.loot_rare(r) for r in list(mt.LOOT_AREA) + ["RIDGE TOWN", "NOWHERE"]}
+   == {"ROUTE ONE": None, "DEEPWOOD": "treesap", "SEASIDE": "seasalt", "ROCKY PASS": "flint",
+       "DARK CAVE": "glowcrystal", "SPIRE RUINS": "relicshard", "FISHING": "pearl",
+       "RIDGE TOWN": None, "NOWHERE": None}, "loot_rare: the weight-1 entry; none for 1-entry or missing pools")
+_real_area = mt.LOOT_AREA
+try:
+    mt.LOOT_AREA = dict(_real_area, TIE=[("twig", 2), ("leaf", 2)], ONE=[("pearl", 1)])
+    ok(mt.loot_rare("TIE") is None and mt.loot_rare("ONE") is None,
+       "loot_rare needs a strictly smallest weight and 2+ entries")
+finally:
+    mt.LOOT_AREA = _real_area
 N_SEEDS = 2000
 wins = [mt.loot_roll("DEEPWOOD", ["Grass"], False, None, False, s) for s in range(N_SEEDS)]
-rate = sum(1 for x in wins if x) / N_SEEDS
-ok(abs(rate - 0.40) <= 0.04, "a wild win drops loot about 40%% of the time (%.3f)" % rate)
+ok(all(isinstance(d, list) and 1 <= len(d) <= 2 and all(n >= 1 for _, n in d) for d in wins),
+   "every wild win drops: a list of 1-2 (id, n) entries, each n >= 1")
 caught = [mt.loot_roll("DEEPWOOD", ["Grass"], True, None, False, s) for s in range(N_SEEDS)]
 ok(all(caught), "a catch always drops")
-area = sum(1 for x in caught if x in ("twig", "treesap")) / N_SEEDS
-ok(abs(area - 0.70) <= 0.04, "drops come from the area list about 70%% of the time (%.3f)" % area)
-ok(all(x in ("twig", "treesap", "leaf") for x in caught), "DEEPWOOD + Grass gives only twig/treesap/leaf")
-area_drops = [x for x in caught if x in ("twig", "treesap")]
+ok(caught == wins, "a catch drops exactly as a win does (same draws, same list)")
+mains = [d[0][0] for d in caught]
+area = sum(1 for x in mains if x in ("twig", "treesap")) / N_SEEDS
+ok(abs(area - 0.70) <= 0.04, "the main drop comes from the area list about 70%% of the time (%.3f)" % area)
+ok(all(x in ("twig", "treesap", "leaf") for d in caught for x, _ in d), "DEEPWOOD + Grass gives only twig/treesap/leaf")
+area_drops = [x for x in mains if x in ("twig", "treesap")]
 twig_share = area_drops.count("twig") / max(1, len(area_drops))
 ok(abs(twig_share - 0.75) <= 0.05, "area weights hold: TWIG 3 : TREE SAP 1 (%.3f)" % twig_share)
+# R7: the double rate from n before any merge; the rare rate counts rare units, merged included.
+N_RATE = 4000
+dbl = rare_units = 0
+bad_shape = []
+for s in range(N_RATE):
+    d = mt.loot_roll("DEEPWOOD", ["Grass"], False, None, False, s)
+    item, n = d[0]
+    r = mt.mulberry32(s)            # replay the fixed draw order to read n before any merge
+    if r() < mt.LOOT_AREA_SHARE:    # DEEPWOOD has a pool, so the area branch draws the pick
+        r()
+    pre_n = 2 if r() < mt.LOOT_DOUBLE else 1
+    dbl += pre_n == 2
+    rare_units += (n - pre_n) + sum(k for _, k in d[1:])
+    if not ((len(d) == 1 and (n == pre_n or (n == pre_n + 1 and item == "treesap")))
+            or (len(d) == 2 and d[1] == ("treesap", 1) and n == pre_n and item != "treesap")):
+        bad_shape.append((s, d))
+ok(not bad_shape, "a rare is merged into a TREE SAP main drop (+1) or a separate (treesap, 1): %s" % bad_shape[:3])
+ok(abs(dbl / N_RATE - mt.LOOT_DOUBLE) <= 0.03, "the double rate is about 35%% over %d seeds (%.3f)" % (N_RATE, dbl / N_RATE))
+ok(abs(rare_units / N_RATE - mt.LOOT_RARE) <= 0.02,
+   "DEEPWOOD's rare (TREE SAP) comes about 10%% of the time, merged included (%.3f)" % (rare_units / N_RATE))
+r1 = [mt.loot_roll("ROUTE ONE", ["Normal"], c, None, False, s) for s in range(N_RATE) for c in (False, True)]
+ok(all(d == [("softfur", d[0][1])] and d[0][1] in (1, 2) for d in r1), "ROUTE ONE has no rare: one entry, n 1 or 2")
 fish = [mt.loot_roll("FISHING", ["Water"], True, None, False, s) for s in range(N_SEEDS)]
-fish_area = [x for x in fish if x in ("scale", "pearl")]
-ok(set(fish) <= {"scale", "pearl", "dewdrop"} and abs(fish_area.count("scale") / len(fish_area) - 0.75) <= 0.05,
-   "the FISHING row weights SCALE 3 : PEARL 1")
-ok(all(mt.loot_roll("DEEPWOOD", ["Grass"], c, dict(id="t1"), False, s) is None
-       for s in range(50) for c in (False, True)), "a trainer battle never drops")
-ok(all(mt.loot_roll("DARK CAVE", ["Dark"], c, None, True, s) is None
-       for s in range(50) for c in (False, True)), "a hunt never drops")
-ok({mt.loot_roll("ROUTE ONE", ["Fire"], True, None, False, s) for s in range(400)} == {"softfur", "emberdust"},
-   "ROUTE ONE with a Fire foe gives only softfur or emberdust")
-ok({mt.loot_roll("RIDGE TOWN", ["Water", "Rock"], True, None, False, s) for s in range(400)} == {"dewdrop"},
-   "RIDGE TOWN (no area row) always gives the first type's item")
+fish_area = [d[0][0] for d in fish if d[0][0] in ("scale", "pearl")]
+ok({x for d in fish for x, _ in d} <= {"scale", "pearl", "dewdrop"}
+   and abs(fish_area.count("scale") / len(fish_area) - 0.75) <= 0.05, "the FISHING row weights SCALE 3 : PEARL 1")
+ok(any(d[1:] == [("pearl", 1)] for d in fish), "FISHING's separate rare is a PEARL")
+ok(all(mt.loot_roll("DEEPWOOD", ["Grass"], c, dict(id="t1"), False, s) == []
+       for s in range(50) for c in (False, True)), "a trainer battle never drops ([])")
+ok(all(mt.loot_roll("DARK CAVE", ["Dark"], c, None, True, s) == []
+       for s in range(50) for c in (False, True)), "a hunt never drops ([])")
+ok({d[0][0] for d in (mt.loot_roll("ROUTE ONE", ["Fire"], True, None, False, s) for s in range(400))}
+   == {"softfur", "emberdust"}, "ROUTE ONE with a Fire foe gives only softfur or emberdust")
+ok({x for s in range(400) for x, _ in mt.loot_roll("RIDGE TOWN", ["Water", "Rock"], True, None, False, s)}
+   == {"dewdrop"}, "RIDGE TOWN (no area row, no rare) always gives the first type's item")
 ok(all(mt.loot_roll("SEASIDE", ["Bug"], c, None, False, s) == mt.loot_roll("SEASIDE", ["Bug"], c, None, False, s)
        for s in range(200) for c in (False, True)), "loot_roll is deterministic")
-# A catch makes the same r draw as a win, so a seed that drops on a win drops the same item on a catch.
-ok(all(w is None or w == c for w, c in zip(wins, caught)), "a catch draws in the same order as a win")
-ok(random.getstate() == rs_loot, "loot_seed/loot_roll never touch the global random stream")
+ok(random.getstate() == rs_loot, "loot_seed/loot_roll/loot_rare never touch the global random stream")
 
 # --- coins ---
 ok(mt.coin_reward(10, None, False, False) == 30, "a wild L10 win pays 30")
@@ -2980,8 +3030,8 @@ ok([mt.clean_coins(x) for x in (None, 250, 1.0, 1.5, True, False, -5, "50", [], 
    "clean_coins: absent/None -> 100, junk -> 0, clamped")
 ok([mt.clean_count(x) for x in (None, 7, 3.0, 2.5, True, -1, "4")] == [0, 7, 3, 0, 0, 0, 0],
    "clean_count: missing -> 0, junk -> 0")
-print("  loot: %d goods, %d area rows; win drop %.3f, area share %.3f, TWIG share %.3f"
-      % (len(mt.GOODS), len(mt.LOOT_AREA), rate, area, twig_share))
+print("  loot: %d goods, %d area rows; double %.3f, rare %.3f, area share %.3f, TWIG share %.3f"
+      % (len(mt.GOODS), len(mt.LOOT_AREA), dbl / N_RATE, rare_units / N_RATE, area, twig_share))
 
 
 # --- state, saves, heal, payouts and battle items (Chunk 2) ---
@@ -3044,29 +3094,49 @@ ok(mt.npc_by_id("nurse1")["lines"][0] == "The CENTRE door heals your whole team,
 # start_battle: the counter, the fishing flag and the fixed loot seed.
 DX, DY = DEEP_GRASS
 loot_foe_lv = 5
-ST_DROP = next(st for st in range(2000) if mt.loot_roll(
-    "DEEPWOOD", ["Grass"], False, None, False, mt.loot_seed(st, DX, DY, loot_foe_lv, 1)))
-ST_NONE = next(st for st in range(2000) if not mt.loot_roll(
-    "DEEPWOOD", ["Grass"], False, None, False, mt.loot_seed(st, DX, DY, loot_foe_lv, 1)))
-DROP_ITEM = mt.loot_roll("DEEPWOOD", ["Grass"], False, None, False, mt.loot_seed(ST_DROP, DX, DY, loot_foe_lv, 1))
+LOOT_SEARCH_CAP = 20000
+
+
+def deep_drops(st):
+    return mt.loot_roll("DEEPWOOD", ["Grass"], False, None, False, mt.loot_seed(st, DX, DY, loot_foe_lv, 1))
+
+
+def find_steps(pred, what):
+    """The first steps value whose DEEPWOOD first-battle drop list passes pred; capped, fails loudly."""
+    for st in range(LOOT_SEARCH_CAP):
+        if pred(deep_drops(st)):
+            return st
+    ok(False, "no %s seed in %d steps values" % (what, LOOT_SEARCH_CAP))
+    raise SystemExit("loot seed search hit its cap: %s" % what)
+
+
+# ST_ONE: one entry, n == 1, no rare. ST_MULTI: n == 2 plus a separate rare. ST_MERGE: a TREE SAP
+# main drop doubled with the rare merged in (n == 3).
+ST_ONE = find_steps(lambda d: len(d) == 1 and d[0][1] == 1, "1-drop")
+ST_MULTI = find_steps(lambda d: len(d) == 2 and d[0][1] == 2, "2-drop + rare")
+ST_MERGE = find_steps(lambda d: d == [("treesap", 3)], "merged rare")
+ONE_ITEM = deep_drops(ST_ONE)[0][0]
+MULTI_ITEM, RARE_ITEM = deep_drops(ST_MULTI)[0][0], deep_drops(ST_MULTI)[1][0]
+ok(RARE_ITEM == "treesap" and MULTI_ITEM != "treesap", "the 2-drop + rare seed's rare is DEEPWOOD's TREE SAP")
+ONE_NAME, MULTI_NAME, RARE_NAME = (mt.GOODS[i]["name"] for i in (ONE_ITEM, MULTI_ITEM, RARE_ITEM))
 gw = loot_game(DX, DY)
-gw.steps = ST_DROP
+gw.steps = ST_ONE
 foe = mt.make_mon("sprigling", loot_foe_lv)
 rs = random.getstate()
 gw.start_battle(foe)
 ok(random.getstate() == rs, "start_battle's loot seed never touches the global random stream")
 b = gw.battle
 ok(gw.battles == 1 and b.fishing is False and b.reward_paid is False
-   and b.loot_seed == mt.loot_seed(ST_DROP, DX, DY, loot_foe_lv, 1),
+   and b.loot_seed == mt.loot_seed(ST_ONE, DX, DY, loot_foe_lv, 1),
    "start_battle counts the battle and fixes its loot seed with the new count")
 loot_run(gw)
 gw.end_battle("win")
 q = queued(gw)
-want_drop = "The wild %s dropped a %s!" % (foe.name, mt.GOODS[DROP_ITEM]["name"])
-ok(q == ["You got 15 coins!", want_drop], "a wild L5 win queues the coins, then the drop: %s" % q)
+want_drop = "The wild %s dropped a %s!" % (foe.name, ONE_NAME)
+ok(q == ["You got 15 coins!", want_drop], "a wild L5 1-drop win queues the coins, then 'a NAME': %s" % q)
 ok(gw.battle is b and gw.fade_dir == 0 and b.reward_paid and b.phase != "over",
    "the reward is queued before the fade starts")
-ok(gw.coins == 115 and gw.bag == {DROP_ITEM: 1}, "the coins and the loot are paid")
+ok(gw.coins == 115 and gw.bag == {ONE_ITEM: 1}, "the coins and the loot are paid")
 shown = loot_run(gw)
 ok(shown == q and gw.battle is None and gw.mode == "overworld", "every reward line is shown, none dropped")
 gw.fade_dir = 0
@@ -3074,31 +3144,55 @@ gw.start_battle(mt.make_mon("nibbit", 3), hunt=False, fishing=True)
 ok(gw.battles == 2 and gw.battle.fishing is True, "a fishing battle is counted and flagged")
 
 gn = loot_game(DX, DY)
-gn.steps = ST_NONE
-gn.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+gn.steps = ST_MULTI
+foe_n = mt.make_mon("sprigling", loot_foe_lv)
+gn.start_battle(foe_n)
 loot_run(gn)
 gn.end_battle("win")
-ok(queued(gn) == ["You got 15 coins!"] and gn.bag == {}, "a win with no drop pays coins only")
+ok(queued(gn) == ["You got 15 coins!", "The wild %s dropped 2 %s!" % (foe_n.name, MULTI_NAME),
+                  "...and a rare %s!" % RARE_NAME]
+   and gn.bag == {MULTI_ITEM: 2, RARE_ITEM: 1}, "a 2-drop + rare win: '2 NAME', then its own rare line: %s"
+   % queued(gn))
+gm = loot_game(DX, DY)
+gm.steps = ST_MERGE
+gm.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+loot_run(gm)
+gm.end_battle("win")
+ok(queued(gm) == ["You got 15 coins!", "The wild %s dropped 3 %s!" % (foe_n.name, RARE_NAME)]
+   and gm.bag == {"treesap": 3}, "a rare merged into the main drop is one '3 NAME' line, no rare callout: %s"
+   % queued(gm))
 
-# A real fight: EXP first, then the coins, then the drop, then the end.
+# A real fight: EXP first, then the coins, then the loot lines in order, then the end.
 gf = loot_game(DX, DY, mons=[mt.make_mon("pyrelash", 30)])
-gf.steps = ST_DROP
+gf.steps = ST_MULTI
 gf.start_battle(mt.make_mon("sprigling", loot_foe_lv))
 log_f = loot_run(gf, best_attack)
 i_exp = next((i for i, s in enumerate(log_f) if "EXP" in s), -1)
 i_coin = next((i for i, s in enumerate(log_f) if s == "You got 15 coins!"), -1)
-i_drop = next((i for i, s in enumerate(log_f) if s.endswith("dropped a %s!" % mt.GOODS[DROP_ITEM]["name"])), -1)
-ok(0 <= i_exp < i_coin < i_drop == len(log_f) - 1, "a fought win narrates EXP, coins, then the drop")
+ok(0 <= i_exp < i_coin == len(log_f) - 3
+   and log_f[-2:] == ["The wild %s dropped 2 %s!" % (foe_n.name, MULTI_NAME), "...and a rare %s!" % RARE_NAME]
+   and gf.bag == {MULTI_ITEM: 2, RARE_ITEM: 1},
+   "a fought win narrates EXP, coins, then the loot lines last, in order: %s" % log_f[-3:])
 
-# Bag full.
+# Bag full: a full stack keeps its count; one short of full with n == 2 adds 1 and says so.
 gfull = loot_game(DX, DY)
-gfull.steps = ST_DROP
-gfull.bag = {DROP_ITEM: mt.BAG_MAX}
+gfull.steps = ST_ONE
+gfull.bag = {ONE_ITEM: mt.BAG_MAX}
 gfull.start_battle(mt.make_mon("sprigling", loot_foe_lv))
 loot_run(gfull)
 gfull.end_battle("win")
 ok(queued(gfull)[1:] == [want_drop, "...but your bag is full."]
-   and gfull.bag == {DROP_ITEM: mt.BAG_MAX}, "a full bag narrates the drop and keeps the count")
+   and gfull.bag == {ONE_ITEM: mt.BAG_MAX}, "a full bag narrates the drop and keeps the count")
+gpart = loot_game(DX, DY)
+gpart.steps = ST_MULTI
+gpart.bag = {MULTI_ITEM: mt.BAG_MAX - 1}
+gpart.start_battle(mt.make_mon("sprigling", loot_foe_lv))
+loot_run(gpart)
+gpart.end_battle("win")
+ok(queued(gpart) == ["You got 15 coins!", "The wild %s dropped 2 %s!" % (foe_n.name, MULTI_NAME),
+                     "...but your bag is full.", "...and a rare %s!" % RARE_NAME]
+   and gpart.bag == {MULTI_ITEM: mt.BAG_MAX, RARE_ITEM: 1},
+   "BAG_MAX-1 with a 2-drop adds 1, narrates the bag is full, then still pays the rare: %s" % queued(gpart))
 
 # Trainers and the gym.
 tr2 = mt.npc_by_id("t2")
@@ -3121,15 +3215,24 @@ for n, want in ((1, 940), (2, 640)):
     loot_run(gy)
 
 # Catching: the loot is held, coins are not paid; also when the team is full.
+def bag_of(drops):
+    out = {}
+    for item, n in drops:
+        out[item] = out.get(item, 0) + n
+    return out
+
+
 gc = loot_game(DX, DY)
-gc.steps = ST_NONE
+gc.steps = ST_MULTI
 foe = mt.make_mon("sprigling", loot_foe_lv)
 gc.start_battle(foe)
 held = mt.loot_roll("DEEPWOOD", foe.types, True, None, False, gc.battle.loot_seed)
 loot_run(gc)
 gc.end_battle("caught")
-ok(queued(gc) == ["%s was holding a %s!" % (foe.name, mt.GOODS[held]["name"])] and gc.coins == 100
-   and gc.bag == {held: 1}, "a catch finds the held loot and pays no coins")
+ok(held == deep_drops(ST_MULTI) and queued(gc) == ["%s was holding 2 %s!" % (foe.name, MULTI_NAME),
+                                                   "...and a rare %s!" % RARE_NAME]
+   and gc.coins == 100 and gc.bag == bag_of(held),
+   "a catch finds the full held list (2 + a rare), says 'was holding 2 NAME' and pays no coins: %s" % queued(gc))
 real_catch = mt.catch_roll
 try:
     mt.catch_roll = lambda mon, bonus, rng=None, throw_scale=1: dict(caught=True, shakes=4)
@@ -3142,8 +3245,8 @@ try:
     log6 = loot_run(gc6)
     i_rel = next((i for i, s in enumerate(log6) if "released" in s), -1)
     i_held = next((i for i, s in enumerate(log6) if "was holding" in s), -1)
-    ok(0 <= i_rel < i_held and gc6.bag == {held6: 1} and gc6.coins == 100 and len(gc6.party) == 6,
-       "a released catch still keeps its loot, after the release line")
+    ok(0 <= i_rel < i_held and held6 and gc6.bag == bag_of(held6) and gc6.coins == 100 and len(gc6.party) == 6,
+       "a released catch still keeps its full loot list, after the release line")
 finally:
     mt.catch_roll = real_catch
 
@@ -3207,7 +3310,7 @@ ok(gr.battle is None and gr.coins == 100 and gr.bag == {}, "running away pays no
 try:
     mt.FORCE_NO_LOOT = True
     gq = loot_game(DX, DY)
-    gq.steps = ST_DROP
+    gq.steps = ST_MULTI
     gq.start_battle(mt.make_mon("sprigling", loot_foe_lv))
     loot_run(gq)
     gq.end_battle("win")
@@ -3227,7 +3330,7 @@ def seeded_wild(no_loot):
         mt.FORCE_NO_LOOT = no_loot
         random.seed(1234)
         gs = loot_game(DX, DY, mons=[mt.make_mon("tidecoil", 22)])
-        gs.steps = ST_DROP
+        gs.steps = ST_MULTI
         gs.start_battle(mt.make_mon("sprigling", loot_foe_lv))
         log_s = loot_run(gs, best_attack)
         return log_s, random.getstate(), gs.coins, dict(gs.bag)
@@ -3463,8 +3566,8 @@ finally:
 ok(log_s == ["You vanished in a puff of smoke!"] and b.result == "run" and gs.bag == {"smoke": 1},
    "SMOKE ends a wild battle as a run and is used up")
 ok(n_random[0] == 0 and gs.coins == 100, "SMOKE never draws the RUN odds and pays nothing")
-print("  loot battle: drop seed %d -> %s; gym pays 940 then 640; seeded wild battle %d lines" %
-      (ST_DROP, DROP_ITEM, len(log_a)))
+print("  loot battle: seeds 1-drop %d -> %s, 2-drop + rare %d -> %s + %s, merge %d; gym pays 940 then 640; "
+      "seeded wild battle %d lines" % (ST_ONE, ONE_ITEM, ST_MULTI, MULTI_ITEM, RARE_ITEM, ST_MERGE, len(log_a)))
 
 
 # ---------------------------------------------------------------- RENDER
@@ -6780,7 +6883,10 @@ function seamData(g) {
     .map(v => Array.from(g.cleanFound(v)).sort());
   // The shared line-breaking rule over a fixed fake measure (7 px per char).
   const wrapOut = ['one two three four five six', 'a  b', 'supercalifragilistic word', 'Stuns the stalker. Have 3/3.'].map(s => [null, 1, 2].map(ml => g.wrapLines(s, 70, t => t.length * 7, ml)));
+  const easeOutOut = [0, 0.25, 0.5, 0.75, 1].map(u => g.easeOut(u));
+  const iconColourOut = Object.keys(g.ICON_PALETTE).sort().map(ch => ['normal', 'grey', 'shadow'].map(m => Array.from(g.iconColour(ch, m))));
   return {
+    easeOut: easeOutOut, iconColour: iconColourOut,
     icons: g.ICONS, iconPalette: g.ICON_PALETTE, iconShadow: g.ICON_SHADOW,
     iconIds: ['ball', 'nosuch'].concat(Object.keys(g.ICONS).sort()).map(k => g.iconId(k)),
     craftCols: g.CRAFT_COLS, craftBlurb: g.CRAFT_BLURB, craftMsg: g.CRAFT_MSG,
@@ -6978,8 +7084,8 @@ function condData(g) {
 }
 // Loot, coins, the shop and save cleaning: tables, constants, every pure rule over
 // fixed cases, and the CENTRE strings - mirrored by python_loot().
-const LOOT_CONST_KEYS = ['BALL_PRICE', 'START_COINS', 'COINS_MAX', 'BAG_MAX', 'COUNT_MAX', 'LOOT_WIN_CHANCE',
-  'LOOT_AREA_SHARE', 'LOOT_SALT', 'SAFETY_BALLS', 'GYM_BONUS', 'WILD_COIN_RATE', 'TRAINER_COIN_RATE', 'SHOP_QTY_MAX',
+const LOOT_CONST_KEYS = ['BALL_PRICE', 'START_COINS', 'COINS_MAX', 'BAG_MAX', 'COUNT_MAX', 'LOOT_DOUBLE',
+  'LOOT_RARE', 'LOOT_AREA_SHARE', 'LOOT_SALT', 'SAFETY_BALLS', 'GYM_BONUS', 'WILD_COIN_RATE', 'TRAINER_COIN_RATE', 'SHOP_QTY_MAX',
   'BATTLE_BAG', 'NURSE_GIFT', 'CENTRE_HEAL'];
 const LOOT_SEED_CASES = [[0, 0, 0, 0, 0], [1, 2, 3, 4, 5], [120, 36, 95, 5, 3], [1000000000, 87, 109, 100, 1000000],
   [5, 43, 107, 3, 1], [77, 50, 82, 12, 2], [999, 70, 35, 25, 9], [4242, 10, 30, 28, 40], [31, 0, 0, 1, 0],
@@ -6989,6 +7095,7 @@ const LOOT_SEED_CASES = [[0, 0, 0, 0, 0], [1, 2, 3, 4, 5], [120, 36, 95, 5, 3], 
 const LOOT_REGIONS = ['ROUTE ONE', 'DEEPWOOD', 'SEASIDE', 'ROCKY PASS', 'DARK CAVE', 'SPIRE RUINS', 'FISHING',
   'RIDGE TOWN', 'CEDAR TOWN', 'TRAIL SUMMIT'];
 const LOOT_TYPESETS = [['Grass'], ['Fire', 'Flying'], ['Water'], ['Dark'], ['Steel', 'Rock']];
+const LOOT_SWEEP = [['DEEPWOOD', ['Grass']], ['ROCKY PASS', ['Rock']], ['FISHING', ['Water']]];
 const COIN_CASES = [[10, null, false, false], [5, 12, false, false], [5, 12, true, false], [5, 12, true, true],
   [1, null, false, false], [100, null, true, false], [3, 32, true, false], [3, 32, false, true]];
 const BLACKOUT_CASES = [0, 1, 3, 4, 7, 99, 100, 99999];
@@ -7009,10 +7116,14 @@ function lootData(g) {
   const rolls = [];
   for (const r of LOOT_REGIONS) for (const t of LOOT_TYPESETS) for (const c of [false, true])
     for (const sd of seeds.slice(0, 5)) rolls.push(g.lootRoll(r, t, c, null, false, sd));
+  const sweep = [];
+  for (const [r, t] of LOOT_SWEEP) for (const c of [false, true])
+    for (let sd = 0; sd < 200; sd++) sweep.push(g.lootRoll(r, t, c, null, false, sd));
   return {
     tables: { goods: g.GOODS, area: g.LOOT_AREA, type: g.LOOT_TYPE },
     consts: Object.fromEntries(LOOT_CONST_KEYS.map(k => [k, g[k]])),
-    seeds, rolls,
+    rares: LOOT_REGIONS.map(r => g.lootRare(r)),
+    seeds, rolls, sweep,
     fixed: seeds.slice(0, 5).map(sd => [g.lootRoll('DEEPWOOD', ['Grass'], true, { id: 't1' }, false, sd),
                                         g.lootRoll('DARK CAVE', ['Dark'], true, null, true, sd)]),
     coins: COIN_CASES.map(c => g.coinReward(...c)),
@@ -7026,6 +7137,9 @@ function lootData(g) {
   };
 }
 console.log(JSON.stringify({
+  xp: { consts: [g.XP_NUM, g.XP_DEN],
+        table: Object.fromEntries(Object.keys(g.SPECIES).map(sid =>
+          [sid, [1, 7, 30, 100].map(lv => g.xpFromFaint(g.makeMon(sid, lv)))])) },
   loot: lootData(g),
   cave: caveData(g),
   conditions: condData(g),
@@ -7094,6 +7208,9 @@ def python_tables():
         "map": list(mt.MAP), "chart": mt.TYPE_CHART, "starters": list(mt.STARTERS),
         "sandbox": python_sandbox(), "shell": python_shell(), "hunt": python_hunt(),
         "cave": python_cave(), "conditions": python_conditions(), "loot": python_loot(),
+        "xp": {"consts": [mt.XP_NUM, mt.XP_DEN],
+               "table": {sid: [mt.xp_from_faint(mt.make_mon(sid, lv)) for lv in (1, 7, 30, 100)]
+                         for sid in mt.SPECIES}},
     }
 
 
@@ -7148,11 +7265,34 @@ def python_conditions():
     }))
 
 
+LOOT_SWEEP = [("DEEPWOOD", ["Grass"]), ("ROCKY PASS", ["Rock"]), ("FISHING", ["Water"])]   # = JS LOOT_SWEEP
+
+
+def loot_sweep_paths():
+    """Which loot_roll paths the PARITY sweep hits: doubles, separate rares, merged rares.
+    A merge is told apart by re-rolling with LOOT_RARE = 0 (same draws, no rare)."""
+    hit = dict(double=0, separate=0, merge=0)
+    real = mt.LOOT_RARE
+    for r, t in LOOT_SWEEP:
+        for c in (False, True):
+            for sd in range(200):
+                d = mt.loot_roll(r, t, c, None, False, sd)
+                mt.LOOT_RARE = 0
+                try:
+                    plain = mt.loot_roll(r, t, c, None, False, sd)
+                finally:
+                    mt.LOOT_RARE = real
+                hit["double"] += plain[0][1] == 2
+                hit["separate"] += len(d) == 2
+                hit["merge"] += d[0][1] > plain[0][1]
+    return hit
+
+
 def python_loot():
     """Loot, coins, the shop and save cleaning - mirrored by lootData in JS_DUMP.
     Built through JSON so tuples compare as lists and None as null."""
-    const_keys = ["BALL_PRICE", "START_COINS", "COINS_MAX", "BAG_MAX", "COUNT_MAX", "LOOT_WIN_CHANCE",
-                  "LOOT_AREA_SHARE", "LOOT_SALT", "SAFETY_BALLS", "GYM_BONUS", "WILD_COIN_RATE",
+    const_keys = ["BALL_PRICE", "START_COINS", "COINS_MAX", "BAG_MAX", "COUNT_MAX", "LOOT_DOUBLE",
+                  "LOOT_RARE", "LOOT_AREA_SHARE", "LOOT_SALT", "SAFETY_BALLS", "GYM_BONUS", "WILD_COIN_RATE",
                   "TRAINER_COIN_RATE", "SHOP_QTY_MAX", "BATTLE_BAG", "NURSE_GIFT", "CENTRE_HEAL"]
     seed_cases = [(0, 0, 0, 0, 0), (1, 2, 3, 4, 5), (120, 36, 95, 5, 3), (10 ** 9, 87, 109, 100, 10 ** 6),
                   (5, 43, 107, 3, 1), (77, 50, 82, 12, 2), (999, 70, 35, 25, 9), (4242, 10, 30, 28, 40),
@@ -7183,10 +7323,13 @@ def python_loot():
     seeds = [mt.loot_seed(*c) for c in seed_cases]
     rolls = [mt.loot_roll(r, t, c, None, False, sd)
              for r in regions for t in typesets for c in (False, True) for sd in seeds[:5]]
+    sweep = [mt.loot_roll(r, t, c, None, False, sd)
+             for r, t in LOOT_SWEEP for c in (False, True) for sd in range(200)]
     return json.loads(json.dumps({
         "tables": {"goods": mt.GOODS, "area": mt.LOOT_AREA, "type": mt.LOOT_TYPE},
         "consts": {k: getattr(mt, k) for k in const_keys},
-        "seeds": seeds, "rolls": rolls,
+        "rares": [mt.loot_rare(r) for r in regions],
+        "seeds": seeds, "rolls": rolls, "sweep": sweep,
         "fixed": [[mt.loot_roll("DEEPWOOD", ["Grass"], True, {"id": "t1"}, False, sd),
                    mt.loot_roll("DARK CAVE", ["Dark"], True, None, True, sd)] for sd in seeds[:5]],
         "coins": [mt.coin_reward(*c) for c in coin_cases],
@@ -7409,7 +7552,11 @@ def python_seam_data():
     wrap_out = [[mt.wrap_lines(s, 70, lambda t: len(t) * 7, ml) for ml in (None, 1, 2)]
                 for s in ("one two three four five six", "a  b", "supercalifragilistic word",
                           "Stuns the stalker. Have 3/3.")]
+    ease_out_out = [mt.ease_out(u) for u in (0, 0.25, 0.5, 0.75, 1)]
+    icon_colour_out = [[list(mt.icon_colour(mt.ICON_PALETTE[ch], m)) for m in ("normal", "grey", "shadow")]
+                       for ch in sorted(mt.ICON_PALETTE)]
     new_tables = json.loads(json.dumps({
+        "easeOut": ease_out_out, "iconColour": icon_colour_out,
         "icons": mt.ICONS, "iconPalette": mt.ICON_PALETTE, "iconShadow": mt.ICON_SHADOW,
         "iconIds": [mt.icon_id(k) for k in ["ball", "nosuch"] + sorted(mt.ICONS)],
         "craftCols": mt.CRAFT_COLS, "craftBlurb": mt.CRAFT_BLURB, "craftMsg": mt.CRAFT_MSG,
@@ -7544,10 +7691,13 @@ else:
             py_tables = python_tables()
             clean = True
             for key in ("species", "moves", "zones", "map", "chart", "starters", "sandbox", "shell", "hunt",
-                        "cave", "conditions", "loot"):
+                        "cave", "conditions", "loot", "xp"):
                 d = diff(py_tables[key], html_tables[key], key)
                 clean = clean and not d
                 ok(not d, "%s differs between builds: %s" % (key, "; ".join(d[:4])))
+            sweep_hit = loot_sweep_paths()
+            ok(all(sweep_hit.values()), "the 1200-roll loot parity sweep hits a double, a separate rare and a "
+               "merged rare: %s" % sweep_hit)
             if clean:
                 print("  %d species, %d moves, %d zones identical in both builds"
                       % (len(py_tables["species"]), len(py_tables["moves"]),
@@ -7602,10 +7752,14 @@ else:
                       "%d fixed-rule rolls, %d scenes, %d arena kinds, %d damage_calc cases identical in both builds"
                       % (len(co["seeds"]), len(co["rolls"]), len(co["fixed"]), len(co["scenes"]),
                          len(co["arenas"]), len(co["dmg"])))
+                print("  xp: XP_NUM/XP_DEN %s and xp_from_faint over %d species x 4 levels identical in both builds"
+                      % (py_tables["xp"]["consts"], len(py_tables["xp"]["table"])))
                 lo = py_tables["loot"]
-                print("  loot: GOODS/LOOT_AREA/LOOT_TYPE + %d constants, %d seeds, %d rolls, %d coin, %d blackout, "
+                print("  loot: GOODS/LOOT_AREA/LOOT_TYPE + %d constants, %d rares, %d seeds, %d rolls + a %d-roll "
+                      "sweep %s, %d coin, %d blackout, "
                       "%d buy, %d sell, %d save-cleaning cases and the CENTRE strings identical in both builds"
-                      % (len(lo["consts"]), len(lo["seeds"]), len(lo["rolls"]), len(lo["coins"]),
+                      % (len(lo["consts"]), len(lo["rares"]), len(lo["seeds"]), len(lo["rolls"]),
+                         len(lo["sweep"]), sweep_hit, len(lo["coins"]),
                          len(lo["blackout"]), len(lo["buy"]), len(lo["sell"]), len(lo["clean"])))
 
 # ---------------------------------------------------------------- RESULT

@@ -1,7 +1,7 @@
 ---
 title: Wiki log
 sources: []
-synced: 2026-10-23
+synced: 2026-11-14
 ---
 # Wiki log
 
@@ -44,3 +44,7 @@ are in the [wiki-sync skill](../../.claude/skills/wiki-sync/SKILL.md).
 - story.md: re-anchored the 14-line table and inventory ranges (all lines still present; no WREN text yet).
 - index.md: testing row now names the six suites. harness.md: re-read, no change (emit_tables only gained icon emitters).
 - CLAUDE.md: py count ~5700, js count ~4000, emitted list adds ICON_PALETTE/ICON_SHADOW/ICONS.
+
+## [2026-11-14] ingest | Visual crafting + Part B docs
+- monster-trail.md: replaced "Part B not designed yet" with a Crafting section (AXE, glades, CRAFT grid, `Game.found`, `fx_craft`, icons).
+- CLAUDE.md: emitted list, CRAFT/found/fx_craft/icons bullet, counts 5849/4071. add-monster SKILL.md: icon tables. playtests: MT-18 icon expectations.

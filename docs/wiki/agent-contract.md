@@ -1,7 +1,7 @@
 ---
 title: Agent contract
 sources: [".claude/agents/", ".claude/skills/game-pm/SKILL.md"]
-synced: 2026-10-17
+synced: 2026-11-14
 ---
 # Agent contract (shared by every worker agent)
 
@@ -27,12 +27,16 @@ silently. Drift goes to [wiki-sync](../../.claude/skills/wiki-sync/SKILL.md).
   before you rely on it, because memory can be stale.
 
 ## While working
-- Edit only the files in the brief's "Files you own". This folder is not a git repo, so
-  there is no undo and another agent may be editing other files right now.
+- Edit only the files in the brief's "Files you own". The folder is a git repo now, but
+  workers never commit, and another agent or session may be editing other files right now,
+  so treat the brief's backups as your undo.
 - Use Grep first, then Read with offset/limit. The game files are 2000-5600 lines.
 - Run the brief's verification command. Paste its PASS/FAIL lines. Never pipe a test run
   through `tail`/`head`/`grep`, because that hides its exit code. `verify.js` already
   prints a summary.
+- Before handing back, diff the removed lines of every test file you edited against the
+  backup. A dropped assertion with no successor is a blocker (lesson
+  [edit-anchor-drops-assertion](../lessons/edit-anchor-drops-assertion.md)).
 - A worker never judges its own work. The PM sends it to **game-reviewer**.
 
 ## Stop and escalate (don't guess)

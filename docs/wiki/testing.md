@@ -10,8 +10,8 @@ changed. **Any FAIL makes the run a FAIL.**
 
 | Check | Command it runs | Proves | Count (2026-10-18) |
 |---|---|---|---|
-| `py` | `.venv/Scripts/python.exe "claude's monsters.test.py"` | MAP, ENGINE, 200 battles, WORLD and save, SANDBOX, CAVE, RENDER (headless pygame), **PARITY** vs the HTML build | 5319 |
-| `js` | `node "claude's monsters.test.js"` | the HTML port's MAP, ENGINE, BATTLE, WORLD, SANDBOX, SHELL JUICE (no pixels) | 3703 |
+| `py` | `.venv/Scripts/python.exe "claude's monsters.test.py"` | MAP, ENGINE, 200 battles, WORLD and save, SANDBOX, CAVE, RENDER (headless pygame), **PARITY** vs the HTML build | 5865 |
+| `js` | `node "claude's monsters.test.js"` | the HTML port's MAP, ENGINE, BATTLE, WORLD, SANDBOX, SHELL JUICE (no pixels) | 4094 |
 | `gemini` | `node "gemini's code.test.js"` | stage placement and reachability, per-tick rates, collision fuzz, nav, pulse, the difficulty readout, input math, handoff parsing, dispose leaks | 554 |
 | `campaign` | `node campaign.test.js` | the campaign reducer, the message validation, the save round-trip | 8 groups |
 | `combat` | `node combat/verify.cjs` | arenas, commands, condition-tag, effects, engine-regression, host, integration, models, pickajoo, presenter, recipes, scene, webcam, webcam-clips, webcam-host, webcam-integration, webcam-scenarios | 17 suites |

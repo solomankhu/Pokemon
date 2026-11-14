@@ -393,6 +393,22 @@ const nicknamed = g.makeMon('emberling', 15, 'SPARKY');
 g.gainXp(nicknamed, g.xpForLevel(17));
 ok(nicknamed.name === 'SPARKY', 'a nickname survives evolution, got ' + nicknamed.name);
 
+// XP for a faint: 1.5x the old baseExp * level / 7, in integers only (Drops + XP Phase A).
+ok(g.XP_NUM === 3 && g.XP_DEN === 14, 'XP_NUM/XP_DEN are 3/14 (1.5x of 1/7)');
+{
+  const xpBad = [], xpRatioBad = [];
+  for (const [sid, sp] of Object.entries(g.SPECIES)) {
+    for (const lv of [1, 5, 50, 100]) {
+      const got = g.xpFromFaint(g.makeMon(sid, lv));
+      if (got !== Math.max(1, Math.floor(sp.baseExp * lv * 3 / 14)) || got < 1) xpBad.push([sid, lv, got]);
+      const old = Math.max(1, Math.floor(sp.baseExp * lv / 7));
+      if (lv >= 5 && !(got / old >= 1.4 && got / old <= 1.6)) xpRatioBad.push([sid, lv, got, old]);
+    }
+  }
+  ok(!xpBad.length, 'xpFromFaint == max(1, floor(baseExp*L*3/14)) for every species at L1/5/50/100: ' + JSON.stringify(xpBad.slice(0, 3)));
+  ok(!xpRatioBad.length, 'new/old XP ratio is within [1.4, 1.6] for every species at L>=5: ' + JSON.stringify(xpRatioBad.slice(0, 3)));
+}
+
 const hurt = g.makeMon('nibbit', 5);
 let caughtWeak = 0;
 for (let i = 0; i < 2000; i++) { hurt.hp = 1; if (g.catchRoll(hurt, 1.5, Math.random).caught) caughtWeak++; }
@@ -1991,9 +2007,10 @@ section('LOOT - goods, drops, coins, shop, save cleaning');
        'LOOT_TYPE covers all 12 types with loot');
     ok(Object.entries(g.LOOT_AREA).every(([r, pool]) => (r === 'FISHING' || g.REGIONS.some(x => x[2] === r))
        && pool.every(([i, w]) => g.GOODS[i].kind === 'loot' && w > 0)), 'LOOT_AREA rows are regions/FISHING with loot');
-    ok(JSON.stringify([g.BALL_PRICE, g.START_COINS, g.COINS_MAX, g.BAG_MAX, g.COUNT_MAX, g.LOOT_WIN_CHANCE, g.LOOT_AREA_SHARE,
+    ok(JSON.stringify([g.BALL_PRICE, g.START_COINS, g.COINS_MAX, g.BAG_MAX, g.COUNT_MAX, g.LOOT_DOUBLE, g.LOOT_RARE, g.LOOT_AREA_SHARE,
                        g.LOOT_SALT, g.SAFETY_BALLS, g.GYM_BONUS, g.WILD_COIN_RATE, g.TRAINER_COIN_RATE, g.SHOP_QTY_MAX])
-       === JSON.stringify([20, 100, 99999, 999, 0x7FFFFFFF, 0.4, 0.7, 0x1007, 5, 300, 3, 20, 10]), 'the loot constants');
+       === JSON.stringify([20, 100, 99999, 999, 0x7FFFFFFF, 0.35, 0.10, 0.7, 0x1007, 5, 300, 3, 20, 10]), 'the loot constants');
+    ok(!('LOOT_WIN_CHANCE' in g), 'LOOT_WIN_CHANCE is gone: every wild win drops');
     ok(g.forceNoLoot === false, 'forceNoLoot is off for the suite');
     ok(g.MENU_ITEMS[2] === 'BAG' && g.menuLabel('BAG') === 'BAG', 'the overworld menu row is BAG');
 
@@ -2001,24 +2018,56 @@ section('LOOT - goods, drops, coins, shop, save cleaning');
     ok(JSON.stringify([g.lootSeed(0, 0, 0, 0, 0), g.lootSeed(1, 2, 3, 4, 5), g.lootSeed(120, 36, 95, 5, 3),
                        g.lootSeed(1e9, 87, 109, 100, 1e6)]) === JSON.stringify([4103, 561796, 409208, 2585909101]),
        'lootSeed gives the fixed values and wraps to 32 bits');
-    let drops = 0, area = 0, twig = 0, allCaught = true;
+    ok(JSON.stringify(Object.keys(g.LOOT_AREA).concat(['RIDGE TOWN', 'NOWHERE']).map(r => g.lootRare(r)))
+       === JSON.stringify([null, 'treesap', 'seasalt', 'flint', 'glowcrystal', 'relicshard', 'pearl', null, null]),
+       'lootRare: the weight-1 entry; none for 1-entry or missing pools');
+    let area = 0, twig = 0, everyDrop = true, catchSame = true;
     for (let s = 0; s < 2000; s++) {
-      if (g.lootRoll('DEEPWOOD', ['Grass'], false, null, false, s)) drops++;
+      const w = g.lootRoll('DEEPWOOD', ['Grass'], false, null, false, s);
       const c = g.lootRoll('DEEPWOOD', ['Grass'], true, null, false, s);
-      if (!c) allCaught = false;
-      if (c === 'twig' || c === 'treesap') { area++; if (c === 'twig') twig++; }
+      if (!Array.isArray(w) || w.length < 1 || w.length > 2 || !w.every(([, n]) => n >= 1)) everyDrop = false;
+      if (JSON.stringify(w) !== JSON.stringify(c)) catchSame = false;
+      const m = c.length ? c[0][0] : null;
+      if (m === 'twig' || m === 'treesap') { area++; if (m === 'twig') twig++; }
     }
-    ok(Math.abs(drops / 2000 - 0.4) <= 0.04 && allCaught, 'win drop ~40%, a catch always drops (' + drops / 2000 + ')');
+    ok(everyDrop, 'every wild win drops: a list of 1-2 [id, n] entries, each n >= 1');
+    ok(catchSame, 'a catch drops exactly as a win does (same draws, same list)');
     ok(Math.abs(area / 2000 - 0.7) <= 0.04 && Math.abs(twig / area - 0.75) <= 0.05, 'area share ~70%, TWIG 3:1');
-    ok([0, 1, 2, 3].every(s => g.lootRoll('DEEPWOOD', ['Grass'], true, { id: 't1' }, false, s) === null
-       && g.lootRoll('DARK CAVE', ['Dark'], true, null, true, s) === null), 'trainers and hunts never drop');
-    ok(new Set(Array.from({ length: 300 }, (_, s) => g.lootRoll('RIDGE TOWN', ['Water'], true, null, false, s))).size === 1,
-       'RIDGE TOWN gives only the type item');
+    // R7: the double rate from n before any merge; the rare rate counts rare units, merged included.
+    {
+      let dbl = 0, rareUnits = 0;
+      const badShape = [];
+      for (let s = 0; s < 4000; s++) {
+        const d = g.lootRoll('DEEPWOOD', ['Grass'], false, null, false, s);
+        const [item, n] = d[0];
+        const r = g.mulberry32(s);          // replay the fixed draw order to read n before any merge
+        if (r() < g.LOOT_AREA_SHARE) r();
+        const preN = r() < g.LOOT_DOUBLE ? 2 : 1;
+        if (preN === 2) dbl++;
+        rareUnits += (n - preN) + d.slice(1).reduce((t, [, k]) => t + k, 0);
+        if (!((d.length === 1 && (n === preN || (n === preN + 1 && item === 'treesap')))
+              || (d.length === 2 && d[1][0] === 'treesap' && d[1][1] === 1 && n === preN && item !== 'treesap'))) badShape.push([s, d]);
+      }
+      ok(!badShape.length, 'a rare is merged into a TREE SAP main drop (+1) or a separate [treesap, 1]: ' + JSON.stringify(badShape.slice(0, 3)));
+      ok(Math.abs(dbl / 4000 - 0.35) <= 0.03, 'the double rate is about 35% over 4000 seeds (' + dbl / 4000 + ')');
+      ok(Math.abs(rareUnits / 4000 - 0.10) <= 0.02, "DEEPWOOD's rare (TREE SAP) comes about 10% of the time, merged included (" + rareUnits / 4000 + ')');
+    }
+    ok(Array.from({ length: 4000 }, (_, s) => g.lootRoll('ROUTE ONE', ['Normal'], s % 2 === 1, null, false, s))
+       .every(d => d.length === 1 && d[0][0] === 'softfur' && (d[0][1] === 1 || d[0][1] === 2)), 'ROUTE ONE has no rare: one entry, n 1 or 2');
+    ok(Array.from({ length: 2000 }, (_, s) => g.lootRoll('FISHING', ['Water'], true, null, false, s))
+       .some(d => d.length === 2 && JSON.stringify(d[1]) === '["pearl",1]'), "FISHING's separate rare is a PEARL");
+    ok([0, 1, 2, 3].every(s => [false, true].every(c => g.lootRoll('DEEPWOOD', ['Grass'], c, { id: 't1' }, false, s).length === 0
+       && g.lootRoll('DARK CAVE', ['Dark'], c, null, true, s).length === 0)), 'trainers and hunts never drop ([])');
+    ok(new Set(Array.from({ length: 300 }, (_, s) => g.lootRoll('RIDGE TOWN', ['Water'], true, null, false, s))
+       .flatMap(d => d.map(([it]) => it))).size === 1, 'RIDGE TOWN gives only the type item, no rare');
+    ok(Array.from({ length: 200 }, (_, s) => JSON.stringify(g.lootRoll('SEASIDE', ['Bug'], s % 2 === 0, null, false, s))
+       === JSON.stringify(g.lootRoll('SEASIDE', ['Bug'], s % 2 === 0, null, false, s))).every(Boolean), 'lootRoll is deterministic');
     const draws = [0];
     Math.random = () => { draws[0]++; return realRandom(); };
-    g.lootRoll('SEASIDE', ['Bug'], true, null, false, 9); g.lootSeed(1, 2, 3, 4, 5);
+    g.lootRoll('SEASIDE', ['Bug'], true, null, false, 9); g.lootSeed(1, 2, 3, 4, 5); g.lootRare('FISHING');
+    for (let s = 0; s < 200; s++) g.lootRoll('DEEPWOOD', ['Grass'], false, null, false, s);
     Math.random = realRandom;
-    ok(draws[0] === 0, 'lootRoll/lootSeed never call Math.random');
+    ok(draws[0] === 0, 'lootRoll/lootSeed/lootRare never call Math.random');
     ok(g.coinReward(10, null, false, false) === 30 && g.coinReward(5, 12, false, false) === 240
        && g.coinReward(5, 12, true, false) === 540 && g.coinReward(5, 12, true, true) === 240, 'coinReward');
     ok(JSON.stringify([0, 1, 3, 4, 7, 99999].map(g.blackoutCoins)) === JSON.stringify([0, 1, 3, 3, 6, 75000]), 'blackoutCoins');
@@ -2069,39 +2118,70 @@ section('LOOT - goods, drops, coins, shop, save cleaning');
     }
     const queued = () => G.battle.queue.filter(s => s.t === 'msg').map(s => s.s);
     const best = b => ({ t: 'attack', move: b.mine.moves.slice().sort((p, q) => g.MOVES[q].pow - g.MOVES[p].pow)[0] });
-    let ST_DROP = 0, ST_NONE = 0;
-    while (!g.lootRoll('DEEPWOOD', ['Grass'], false, null, false, g.lootSeed(ST_DROP, DX, DY, LV, 1))) ST_DROP++;
-    while (g.lootRoll('DEEPWOOD', ['Grass'], false, null, false, g.lootSeed(ST_NONE, DX, DY, LV, 1))) ST_NONE++;
-    const DROP = g.lootRoll('DEEPWOOD', ['Grass'], false, null, false, g.lootSeed(ST_DROP, DX, DY, LV, 1));
+    // ST_ONE: one entry, n 1, no rare. ST_MULTI: n 2 plus a separate rare. ST_MERGE: [treesap, 3].
+    // Every search is capped and fails loudly (R2); [] is truthy, so shapes are read by .length.
+    const LOOT_SEARCH_CAP = 20000;
+    const deepDrops = st => g.lootRoll('DEEPWOOD', ['Grass'], false, null, false, g.lootSeed(st, DX, DY, LV, 1));
+    function findSteps(pred, what) {
+      for (let st = 0; st < LOOT_SEARCH_CAP; st++) if (pred(deepDrops(st))) return st;
+      ok(false, 'no ' + what + ' seed in ' + LOOT_SEARCH_CAP + ' steps values');
+      throw new Error('loot seed search hit its cap: ' + what);
+    }
+    const ST_ONE = findSteps(d => d.length === 1 && d[0][1] === 1, '1-drop');
+    const ST_MULTI = findSteps(d => d.length === 2 && d[0][1] === 2, '2-drop + rare');
+    const ST_MERGE = findSteps(d => JSON.stringify(d) === '[["treesap",3]]', 'merged rare');
+    const ONE = deepDrops(ST_ONE)[0][0], MULTI = deepDrops(ST_MULTI)[0][0], RARE = deepDrops(ST_MULTI)[1][0];
+    ok(RARE === 'treesap' && MULTI !== 'treesap', "the 2-drop + rare seed's rare is DEEPWOOD's TREE SAP");
+    const bagOf = d => { const o = {}; for (const [it, n] of d) o[it] = (o[it] || 0) + n; return o; };
 
-    lootSetup(DX, DY); G.steps = ST_DROP;
+    lootSetup(DX, DY); G.steps = ST_ONE;
     let foe = g.makeMon('sprigling', LV);
     g.startBattle(foe, {});
     let b = G.battle;
-    ok(G.battles === 1 && b.fishing === false && b.rewardPaid === false && b.lootSeed === g.lootSeed(ST_DROP, DX, DY, LV, 1),
+    ok(G.battles === 1 && b.fishing === false && b.rewardPaid === false && b.lootSeed === g.lootSeed(ST_ONE, DX, DY, LV, 1),
        'startBattle counts the battle and fixes the loot seed');
     lootRun();
     g.endBattle(b, 'win');
-    const wantDrop = 'The wild ' + foe.name + ' dropped a ' + g.GOODS[DROP].name + '!';
+    const wantDrop = 'The wild ' + foe.name + ' dropped a ' + g.GOODS[ONE].name + '!';
     let q = queued();
     ok(JSON.stringify(q) === JSON.stringify(['You got 15 coins!', wantDrop]) && G.fadeDir === 0 && b.rewardPaid && b.phase !== 'over',
-       'a wild win queues coins then the drop, before the fade: ' + JSON.stringify(q));
-    ok(G.coins === 115 && G.bag[DROP] === 1, 'coins and loot are paid');
+       "a wild 1-drop win queues coins then 'a NAME', before the fade: " + JSON.stringify(q));
+    ok(G.coins === 115 && canon(G.bag) === canon({ [ONE]: 1 }), 'coins and loot are paid');
     ok(JSON.stringify(lootRun()) === JSON.stringify(q) && G.battle === null, 'every reward line is shown');
     lootSetup(DX, DY); g.startBattle(g.makeMon('nibbit', 3), { fishing: true });
     ok(G.battles === 1 && G.battle.fishing === true, 'a fishing battle is flagged');
 
-    lootSetup(DX, DY, [g.makeMon('pyrelash', 30)]); G.steps = ST_DROP;
+    const wantMulti = ['The wild ' + foe.name + ' dropped 2 ' + g.GOODS[MULTI].name + '!', '...and a rare ' + g.GOODS[RARE].name + '!'];
+    lootSetup(DX, DY); G.steps = ST_MULTI;
+    g.startBattle(g.makeMon('sprigling', LV), {}); lootRun(); g.endBattle(G.battle, 'win');
+    ok(JSON.stringify(queued()) === JSON.stringify(['You got 15 coins!'].concat(wantMulti))
+       && canon(G.bag) === canon({ [MULTI]: 2, [RARE]: 1 }), "a 2-drop + rare win: '2 NAME', then its own rare line: " + JSON.stringify(queued()));
+    lootRun();
+    lootSetup(DX, DY); G.steps = ST_MERGE;
+    g.startBattle(g.makeMon('sprigling', LV), {}); lootRun(); g.endBattle(G.battle, 'win');
+    ok(JSON.stringify(queued()) === JSON.stringify(['You got 15 coins!', 'The wild ' + foe.name + ' dropped 3 ' + g.GOODS.treesap.name + '!'])
+       && canon(G.bag) === canon({ treesap: 3 }), "a rare merged into the main drop is one '3 NAME' line, no rare callout: " + JSON.stringify(queued()));
+    lootRun();
+
+    lootSetup(DX, DY, [g.makeMon('pyrelash', 30)]); G.steps = ST_MULTI;
     g.startBattle(g.makeMon('sprigling', LV), {});
     const logF = lootRun(best);
     const iExp = logF.findIndex(s => s.includes('EXP')), iCoin = logF.indexOf('You got 15 coins!');
-    ok(iExp >= 0 && iExp < iCoin && iCoin === logF.length - 2 && logF[logF.length - 1].endsWith('dropped a ' + g.GOODS[DROP].name + '!'),
-       'a fought win narrates EXP, coins, then the drop');
+    ok(iExp >= 0 && iExp < iCoin && iCoin === logF.length - 3 && JSON.stringify(logF.slice(-2)) === JSON.stringify(wantMulti)
+       && canon(G.bag) === canon({ [MULTI]: 2, [RARE]: 1 }),
+       'a fought win narrates EXP, coins, then the loot lines last, in order: ' + JSON.stringify(logF.slice(-3)));
 
-    lootSetup(DX, DY); G.steps = ST_DROP; G.bag = { [DROP]: g.BAG_MAX };
+    lootSetup(DX, DY); G.steps = ST_ONE; G.bag = { [ONE]: g.BAG_MAX };
     g.startBattle(g.makeMon('sprigling', LV), {}); lootRun(); g.endBattle(G.battle, 'win');
-    ok(JSON.stringify(queued().slice(1)) === JSON.stringify([wantDrop, '...but your bag is full.']) && G.bag[DROP] === g.BAG_MAX,
+    ok(JSON.stringify(queued().slice(1)) === JSON.stringify([wantDrop, '...but your bag is full.']) && G.bag[ONE] === g.BAG_MAX,
        'a full bag narrates the drop and keeps the count');
+    lootRun();
+    lootSetup(DX, DY); G.steps = ST_MULTI; G.bag = { [MULTI]: g.BAG_MAX - 1 };
+    g.startBattle(g.makeMon('sprigling', LV), {}); lootRun(); g.endBattle(G.battle, 'win');
+    ok(JSON.stringify(queued()) === JSON.stringify(['You got 15 coins!', wantMulti[0], '...but your bag is full.', wantMulti[1]])
+       && canon(G.bag) === canon({ [MULTI]: g.BAG_MAX, [RARE]: 1 }),
+       'BAG_MAX-1 with a 2-drop adds 1, narrates the bag is full, then still pays the rare: ' + JSON.stringify(queued()));
+    lootRun();
 
     const tr2 = g.npcById('t2');
     lootSetup(); g.startBattle(g.makeMon(tr2.team[0][0], tr2.team[0][1]), { trainer: tr2 }); lootRun();
@@ -2120,19 +2200,21 @@ section('LOOT - goods, drops, coins, shop, save cleaning');
     }
     G.flags.gym = keep.flags.gym;
 
-    lootSetup(DX, DY); G.steps = ST_NONE; foe = g.makeMon('sprigling', LV);
+    lootSetup(DX, DY); G.steps = ST_MULTI; foe = g.makeMon('sprigling', LV);
     g.startBattle(foe, {});
     const held = g.lootRoll('DEEPWOOD', g.SPECIES[foe.id].types, true, null, false, G.battle.lootSeed);
     lootRun(); g.endBattle(G.battle, 'caught');
-    ok(JSON.stringify(queued()) === JSON.stringify([foe.name + ' was holding a ' + g.GOODS[held].name + '!']) && G.coins === 100
-       && G.bag[held] === 1, 'a catch finds the held loot, no coins');
+    ok(JSON.stringify(held) === JSON.stringify(deepDrops(ST_MULTI))
+       && JSON.stringify(queued()) === JSON.stringify([foe.name + ' was holding 2 ' + g.GOODS[MULTI].name + '!', wantMulti[1]])
+       && G.coins === 100 && canon(G.bag) === canon(bagOf(held)),
+       "a catch finds the full held list (2 + a rare), says 'was holding 2 NAME', no coins: " + JSON.stringify(queued()));
     lootRun();
     // The real throw path: keep() joins or releases, then endBattle('caught') pays the held loot.
     for (const full of [false, true]) {
       const prevRoll = g.setCatchRoll(() => ({ caught: true, shakes: 3 }));
       try {
         lootSetup(DX, DY, full ? Array.from({ length: 6 }, () => g.makeMon('nibbit', 10)) : [g.makeMon('pyrelash', 20)]);
-        G.steps = ST_NONE;
+        G.steps = ST_MULTI;
         const f = g.makeMon('sprigling', LV);
         g.startBattle(f, {});
         const h = g.lootRoll('DEEPWOOD', g.SPECIES[f.id].types, true, null, false, G.battle.lootSeed);
@@ -2155,12 +2237,12 @@ section('LOOT - goods, drops, coins, shop, save cleaning');
         }
         const want = full ? f.name + ' was released.' : f.name + ' joined your team.';
         const iKeep = msgs.findIndex(m => m.endsWith(want));
-        const iHeld = msgs.indexOf(f.name + ' was holding a ' + g.GOODS[h].name + '!');
-        ok(iKeep >= 0 && iHeld > iKeep && iHeld === msgs.length - 1,
-           (full ? 'a released' : 'a joined') + ' catch narrates the keep line, then the held loot: ' + JSON.stringify(msgs.slice(-3)));
+        const iHeld = msgs.indexOf(f.name + ' was holding 2 ' + g.GOODS[MULTI].name + '!');
+        ok(iKeep >= 0 && iHeld > iKeep && iHeld === msgs.length - 2 && msgs[msgs.length - 1] === wantMulti[1],
+           (full ? 'a released' : 'a joined') + ' catch narrates the keep line, then the held loot and its rare: ' + JSON.stringify(msgs.slice(-3)));
         ok(heldWhileBattle && G.battle === null, 'the holding line is shown while the battle is up, and the battle ends after it');
-        ok(G.bag[h] === 1 && G.coins === 100 && G.party.length === (full ? 6 : 2),
-           (full ? 'a released' : 'a joined') + ' catch keeps its loot and pays no coins');
+        ok(h.length === 2 && canon(G.bag) === canon(bagOf(h)) && G.coins === 100 && G.party.length === (full ? 6 : 2),
+           (full ? 'a released' : 'a joined') + ' catch keeps its full loot list and pays no coins');
       } finally { g.setCatchRoll(prevRoll); }
     }
 
@@ -2189,7 +2271,7 @@ section('LOOT - goods, drops, coins, shop, save cleaning');
     lootRun();
     g.setForceNoLoot(true);
     try {
-      lootSetup(DX, DY); G.steps = ST_DROP; g.startBattle(g.makeMon('sprigling', LV), {}); lootRun(); g.endBattle(G.battle, 'win');
+      lootSetup(DX, DY); G.steps = ST_MULTI; g.startBattle(g.makeMon('sprigling', LV), {}); lootRun(); g.endBattle(G.battle, 'win');
       ok(queued().length === 0 && G.coins === 100, 'forceNoLoot: a win pays nothing');
       lootRun();
       lootSetup(); g.startBattle(g.makeMon('nibbit', 3), {}); lootRun(); g.endBattle(G.battle, 'lose');
@@ -2203,14 +2285,14 @@ section('LOOT - goods, drops, coins, shop, save cleaning');
       g.setForceNoLoot(noLoot);
       Math.random = () => { calls++; seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return (seed >>> 8) / 16777216; };
       try {
-        lootSetup(DX, DY, [g.makeMon('tidecoil', 22)]); G.steps = ST_DROP;
+        lootSetup(DX, DY, [g.makeMon('tidecoil', 22)]); G.steps = ST_MULTI;
         g.startBattle(g.makeMon('sprigling', LV), {});
         lootRun(best);
         return [calls, seed, G.coins, Object.keys(G.bag).length];
       } finally { Math.random = realRandom; g.setForceNoLoot(false); }
     }
     const ra = seeded(false), rb = seeded(true);
-    ok(ra[2] > 100 && ra[3] === 1 && rb[2] === 100 && rb[3] === 0, 'the seeded battle paid out only with loot on');
+    ok(ra[2] > 100 && ra[3] === 2 && rb[2] === 100 && rb[3] === 0, 'the seeded battle paid out only with loot on');
     ok(ra[0] === rb[0] && ra[1] === rb[1], 'rewards never touch Math.random (' + ra[0] + ' vs ' + rb[0] + ' calls)');
 
     // saves
@@ -2329,7 +2411,7 @@ section('LOOT - goods, drops, coins, shop, save cleaning');
     try { g.takeTurn(b, { t: 'item', item: 'smoke' }); ls = lootRun(); } finally { Math.random = realRandom; }
     ok(JSON.stringify(ls) === '["You vanished in a puff of smoke!"]' && b.result === 'run' && G.bag.smoke === 1 && n === 1,
        'SMOKE ends a wild battle as a run; only the foe-move pick is drawn (' + n + ')');
-    console.log('  loot: drop seed ' + ST_DROP + ' -> ' + DROP + '; seeded battle ' + ra[0] + ' Math.random calls either way');
+    console.log('  loot: seeds 1-drop ' + ST_ONE + ' -> ' + ONE + ', 2-drop + rare ' + ST_MULTI + ' -> ' + MULTI + ' + ' + RARE + ', merge ' + ST_MERGE + '; seeded battle ' + ra[0] + ' Math.random calls either way');
   } finally {
     Math.random = realRandom;
     g.setForceNoLoot(false);
@@ -2564,6 +2646,25 @@ section('SHELL CRAFT - grid, detail pane, craft animation, wrapLines (headless)'
     ok(v.detail.button === 'Z: BUILD' && !v.detail.enabled && v.detail.needs[0].ok === false, 'BUILD with no WALL: greyed Z: BUILD');
     v.detail.needs.forEach(n => ok(inRect(n.slot, 0) && n.slot[1] + n.slot[3] <= y + h - 34, 'need slot inside the pane'));
 
+    // -- header chips: pick tier and axe state (flags restored by the finally below) --
+    for (const [pk, label, on] of [[0, 'no PICK', false], [1, 'PICK', true], [2, 'IRON PICK', true]]) {
+      fresh(3); G.flags.pick = pk;
+      const chip = g.craftView().chips[0];
+      ok(chip.label === label && chip.on === on && chip.icon === (pk >= 2 ? 'iron_pick' : 'pick'),
+         'CRAFT header pick chip at tier ' + pk + ' reads ' + label + (on ? ' (on)' : ' (off)'));
+    }
+    for (const [ax, label, on] of [[0, 'no AXE', false], [1, 'AXE', true]]) {
+      fresh(3); G.flags.axe = ax;
+      const chip = g.craftView().chips[1];
+      ok(chip.label === label && chip.on === on && chip.icon === 'axe',
+         'CRAFT header axe chip at tier ' + ax + ' reads ' + label + (on ? ' (on)' : ' (off)'));
+    }
+    // juiceCraft starts the animation through the default craft hook
+    fresh(3);
+    g.juiceCraft(0, { stone: 1 });
+    ok(g.CRFX.active() && g.CRFX.recipe === 0, 'juiceCraft starts CRFX for the given recipe');
+    g.CRFX.clear();
+
     // -- Z on cells, through press() like a real key --
     fresh(axeC);
     const hold = JSON.stringify([G.bag, G.materials, G.balls, G.flags]);
@@ -2760,6 +2861,12 @@ section('SHELL BAG/SHOP - BAG screen, party picker, CENTRE shop, battle BAG list
     }
     return texts;
   };
+  {
+    let lr = null;
+    draw(() => { lr = g.listIcon(Object.keys(g.ICONS)[0], 10, 20, 30); });
+    ok(same(lr, [10, 27, 16, 16]) && imgs.length === 1 && imgs[0].x === 10 && imgs[0].y === 27,
+       'listIcon centres a 16 px icon in the band and returns its rect');
+  }
   const rowRects = (x0, y0, w0, rh, n) => Array.from({ length: n }, (_, j) => [x0, y0 + j * rh, w0, rh - 2]);
   const within = (m, [x, y, w, h]) => m.x >= x && m.y >= y && m.x + m.w <= x + w && m.y + m.h <= y + h;
   // Every row icon is 16x16 inside a row rect; the name starts at its right edge + 4 px

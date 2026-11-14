@@ -1,3 +1,4 @@
-- [Line endings](line-endings.md): monsters.py is CRLF, test.py/html are LF; Git Bash grep lies about CR. Check in binary with Python.
+- [Line endings](line-endings.md): monsters.py, CLAUDE.md, wiki/playtest docs CRLF; test.py/js/html LF; Git Bash grep lies about CR. Check in binary.
+- [XP pacing flag](xp-pacing-flag.md) — 1.5x XP: starter-only gym arrival L37 at N=20 (> VOLT L32); user decision pending
 - [Loot seed vs transcripts](loot-seed-transcripts.md) — cross-Game transcript tests must pin tile/steps/battles or FORCE_NO_LOOT
 - [Gated glade level cap](gated-glade-level-cap.md) — optional pockets: max = next trainer ace, min = evo level (OLD GROVE 16-18)

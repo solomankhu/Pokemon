@@ -23,7 +23,7 @@ description: Add or change a MONSTER TRAIL species, move, evolution, starter, en
    .venv/Scripts/python.exe .claude/skills/add-monster/emit_tables.py          # dry run: shows the diff
    .venv/Scripts/python.exe .claude/skills/add-monster/emit_tables.py --write  # splices it in
    ```
-   This rewrites `MOVES`, `SPECIES`, `STARTERS`, `MAP`, `ZONES`, `MATERIALS`, `BLOCKS` and `RECIPES` in the .html. It does **not** cover `TYPE_CHART`, `WATER_ZONES`, `NPCS`, `SIGNS`, `ITEMS` or `GYM_LEADER`. Port those by hand (Python `def_` becomes JS `def`, `catch_rate` becomes `catchRate`, RGB tuples become `'#rrggbb'`), or extend `BLOCKS` in the script.
+   This rewrites `MOVES`, `SPECIES`, `STARTERS`, `MAP`, `ZONES`, `MATERIALS`, `BLOCKS`, `RECIPES`, the loot tables and the item icon tables `ICON_PALETTE`, `ICON_SHADOW` and `ICONS` in the .html. A new item (material, loot good or recipe output) needs an `ICONS` entry (16 rows of 16 pixels, reached through `icon_id`) or the CRAFT grid, BAG and shop have no icon for it. It does **not** cover `TYPE_CHART`, `WATER_ZONES`, `NPCS`, `SIGNS`, `ITEMS` or `GYM_LEADER`. Port those by hand (Python `def_` becomes JS `def`, `catch_rate` becomes `catchRate`, RGB tuples become `'#rrggbb'`), or extend `BLOCKS` in the script.
 
 4. **Verify both builds:**
    ```bash

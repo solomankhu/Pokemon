@@ -1383,8 +1383,9 @@ const START_COINS = 100;
 const COINS_MAX = 99999;
 const BAG_MAX = 999;              // per item (and the shop's cap on total balls)
 const COUNT_MAX = 0x7FFFFFFF;     // saved counters (battles) stay exact in JS arithmetic
-const LOOT_WIN_CHANCE = 0.4;      // a wild win drops loot this often; a catch always does
 const LOOT_AREA_SHARE = 0.7;      // of drops, this share comes from LOOT_AREA
+const LOOT_DOUBLE = 0.35;         // a drop comes as 2 instead of 1 this often
+const LOOT_RARE = 0.10;           // a wild win/catch also drops the region's rare this often
 const LOOT_SALT = 0x1007;         // keeps the loot seed off conditionSeed's stream
 const SAFETY_BALLS = 5;           // the CENTRE's gift when you have no balls and no coins
 const GYM_BONUS = 300;            // paid once, on the first gym win
@@ -1727,8 +1728,9 @@ function catchRoll(mon, ballBonus, rng, throwScale = 1) {
   return { caught: true, shakes: 4 };
 }
 
+const XP_NUM = 3, XP_DEN = 14;    // XP for a faint: baseExp * level * 1.5 / 7, integers only
 function xpFromFaint(foe) {
-  return Math.max(1, Math.floor(SPECIES[foe.id].baseExp * foe.level / 7));
+  return Math.max(1, Math.floor(SPECIES[foe.id].baseExp * foe.level * XP_NUM / XP_DEN));
 }
 
 /* Applies XP and returns a list of narratable events. */
@@ -2071,19 +2073,39 @@ function setCatchRoll(fn) { const prev = catchRollImpl; catchRollImpl = typeof f
 function lootSeed(steps, tx, ty, foeLevel, battles) {
   return ((steps * 31 + tx * 977 + ty * 131 + foeLevel * 7919 + battles * 104729) ^ LOOT_SALT) >>> 0;
 }
-// Pure: the loot id a battle drops, or null. Fixed draw order (PARITY): the drop
-// check, the area-or-type choice, then a weighted pick on the area branch only.
+// The region's rare drop: the LOOT_AREA entry with the strictly smallest weight,
+// only for a pool of 2+ entries; otherwise null.
+function lootRare(region) {
+  const pool = LOOT_AREA[region] || [];
+  if (pool.length < 2) return null;
+  const low = Math.min(...pool.map(([, w]) => w));
+  const rares = pool.filter(([, w]) => w === low).map(([it]) => it);
+  return rares.length === 1 ? rares[0] : null;
+}
+// Pure: the list of [id, n] a battle drops; [] for trainers and hunts. Every wild
+// win or catch drops (caught no longer changes the roll). Fixed draw order (PARITY):
+// the area-or-type choice, a weighted pick on the area branch only, the double
+// roll, then the rare roll (a rare equal to the main item merges into it).
 function lootRoll(region, foeTypes, caught, trainer, hunt, seed) {
-  if (trainer || hunt) return null;
+  if (trainer || hunt) return [];
   const rng = mulberry32(seed);
-  if (rng() >= LOOT_WIN_CHANCE && !caught) return null;
   const pool = LOOT_AREA[region];
+  let item = null;
   if (rng() < LOOT_AREA_SHARE && pool && pool.length) {
     let pick = rng() * pool.reduce((s, [, w]) => s + w, 0);
-    for (const [item, w] of pool) { pick -= w; if (pick < 0) return item; }
-    return pool[pool.length - 1][0];
+    for (const [it, w] of pool) { pick -= w; if (pick < 0) { item = it; break; } }
+    if (item === null) item = pool[pool.length - 1][0];
+  } else {
+    item = LOOT_TYPE[foeTypes[0]];
   }
-  return LOOT_TYPE[foeTypes[0]];
+  const n = rng() < LOOT_DOUBLE ? 2 : 1;
+  const out = [[item, n]];
+  const rare = lootRare(region);
+  if (rng() < LOOT_RARE && rare) {
+    if (rare === item) out[0] = [item, n + 1];
+    else out.push([rare, 1]);
+  }
+  return out;
 }
 function coinReward(foeLevel, trainerMaxLevel, isGym, gymPaid) {
   if (!trainerMaxLevel) return WILD_COIN_RATE * foeLevel;
@@ -2599,14 +2621,19 @@ function payRewards(b, result) {
     if (isGym) G.flags.gymBonus = true;
   }
   const region = b.fishing ? 'FISHING' : regionName(G.player.ty);
-  const item = lootRoll(region, SPECIES[b.foe.id].types, result === 'caught', b.trainer, b.hunt, b.lootSeed);
-  if (item) {
+  const drops = lootRoll(region, SPECIES[b.foe.id].types, result === 'caught', b.trainer, b.hunt, b.lootSeed);
+  drops.forEach(([item, n], i) => {
     const name = GOODS[item].name;
-    qMsg(b, result === 'caught' ? b.foe.name + ' was holding a ' + name + '!'
-                                : 'The wild ' + b.foe.name + ' dropped a ' + name + '!');
-    if ((G.bag[item] || 0) >= BAG_MAX) qMsg(b, '...but your bag is full.');
-    else G.bag = bagAdd(G.bag, item, 1);
-  }
+    if (i) qMsg(b, '...and a rare ' + name + '!');
+    else {
+      const what = n === 1 ? 'a ' + name : n + ' ' + name;
+      qMsg(b, result === 'caught' ? b.foe.name + ' was holding ' + what + '!'
+                                  : 'The wild ' + b.foe.name + ' dropped ' + what + '!');
+    }
+    const added = Math.max(0, Math.min(n, BAG_MAX - (G.bag[item] || 0)));
+    if (added) G.bag = bagAdd(G.bag, item, added);
+    if (added < n) qMsg(b, '...but your bag is full.');
+  });
 }
 
 // The battle BAG list: usable items you own, in a fixed order.
@@ -3201,7 +3228,6 @@ function menuLabel(item) {
 
 function caveHudText() { return 'LAMP ' + G.lantern + '%  TENSION ' + G.tension + '  PULSE ' + G.pulses; }
 
-// [name, detail, craftable] per CRAFT row: each recipe, BUILD, BACK.
 // Everything a recipe can spend or fill, as one object: materials, the
 // BALL/lamp/PULSE counters and the BAG (ids never collide; tested).
 function craftHave() {
@@ -6199,6 +6225,7 @@ function iconColour(ch, mode) {
   if (mode === 'grey') { const l = Math.floor((r * 30 + g * 59 + b * 11) / 100), v = Math.floor((l + 2 * 200) / 3); return [v, v, v]; }
   return [r, g, b];
 }
+// Pure and PARITY-compared with icon_colour: iconColour keyed by palette char.
 function iconCanvas(id, scale, mode) {
   scale = scale || 1; mode = mode || 'normal';
   const key = id + '|' + scale + '|' + mode;
@@ -7821,7 +7848,7 @@ if (typeof globalThis !== 'undefined') {
     SPECIES, MOVES, TYPE_CHART, MAP, MAP_W, MAP_H, SOLID, ZONES, STARTERS, NPCS, GYM_LEADER,
     WATER_ZONES, SIGNS, ITEMS, REGIONS, CAVE_BAND, START_TILE, GYM_REQUIREMENT,
     statAt, xpForLevel, movesForLevel, makeMon, recalcStats, stageMul, typeEffectiveness,
-    damageCalc, catchRoll, xpFromFaint, gainXp, pickWeighted, zoneAt, tileAt, clamp,
+    damageCalc, catchRoll, xpFromFaint, XP_NUM, XP_DEN, gainXp, pickWeighted, zoneAt, tileAt, clamp,
     regionName, inCave,
     // state + battle seams, so a full fight can be simulated without a canvas
     SCENE_SKY, WEATHER_2D, weather2DStep,
@@ -7852,7 +7879,7 @@ if (typeof globalThis !== 'undefined') {
     // the DARK CAVE hunt battle: table, pure level fn, state seams and scare juice
     HUNT, huntLevel, huntCount, startHunt, huntOver, queueScare, endBattle, scareCalm, setScareCalm,
     juiceScare, setCraftHook: f => { craftHook = f; },
-    ICONS, ICON_PALETTE, ICON_SHADOW, iconId, noteFound, cleanFound, craftCells, gridMove,
+    ICONS, ICON_PALETTE, ICON_SHADOW, iconColour, iconId, noteFound, cleanFound, craftCells, gridMove,
     CRAFT_COLS, CRAFT_BLURB, CRAFT_MSG, foePose, SCARE_FLASH_TIME, SCARE_FLASH_ALPHA, SCARE_TRAUMA, SCARE_LUNGE_TIME,
     SCARE_LUNGE_SCALE, SCARE_VEIL_DARK, SCARE_VEIL,
     confirmKey, cancelKey, moveCursor, npcById,
@@ -7884,8 +7911,8 @@ if (typeof globalThis !== 'undefined') {
     battleScene, SCENE_TIMES, SCENE_WEATHER, SCENE_EXTRA, CAMERA_PRESETS, DEFAULT_SCENE,
     setForceCondition, setForceScene,
     // loot, the BAG, coins and the shop (tables emitted from the .py; constants hand-ported)
-    GOODS, LOOT_AREA, LOOT_TYPE, BALL_PRICE, START_COINS, COINS_MAX, BAG_MAX, COUNT_MAX, LOOT_WIN_CHANCE,
-    LOOT_AREA_SHARE, LOOT_SALT, SAFETY_BALLS, GYM_BONUS, WILD_COIN_RATE, TRAINER_COIN_RATE, SHOP_QTY_MAX,
+    GOODS, LOOT_AREA, LOOT_TYPE, BALL_PRICE, START_COINS, COINS_MAX, BAG_MAX, COUNT_MAX, LOOT_DOUBLE, LOOT_RARE,
+    lootRare, LOOT_AREA_SHARE, LOOT_SALT, SAFETY_BALLS, GYM_BONUS, WILD_COIN_RATE, TRAINER_COIN_RATE, SHOP_QTY_MAX,
     BATTLE_BAG, NURSE_GIFT, CENTRE_HEAL, lootSeed, lootRoll, coinReward, blackoutCoins, addCoins, bagAdd, shopBuy, shopSell,
     ballSafetyNet, bagToast, cleanBag, cleanCoins, cleanCount, payRewards, payBlackout, battleBagItems,
     setForceNoLoot, setCatchRoll,
