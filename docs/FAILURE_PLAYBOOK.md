@@ -35,6 +35,7 @@
 | 11 | `port-skips-integration-test` | a cross-build port copied the unit tests but not the real-input → queue → outcome test (the JS catch keep() re-entry was untested) | 1 | (none yet) |
 | 12 | `shared-fixed-temp-path` | PARITY's fixed temp script `%TEMP%\monster-trail-parity.js` was deleted by a concurrent suite run, so a false py FAIL appeared and went green on re-run | 1 | PARITY uses `tempfile.mkstemp` per run (confirmed 2026-11-14) |
 | 13 | `webcam-real-vs-command-time` | a webcam back-date offset added to commandInput `at` was in real seconds, not command time (x0.55), so it was 1.8x too early | 1 | (none yet) - integration test pins `at` = hold x LAG_SCALE |
+| 14 | `edit-anchor-drops-assertion` | an existing test assertion used as an Edit anchor was left out of the replacement, so it vanished while the check count still rose | 1 | (none yet) - reviewer checklist_proposal held for the user to lock |
 
 Rows 1-4 seed the table from bugs CLAUDE.md already records. They have no lesson file
 yet; reflect-and-learn writes one the first time a row recurs.

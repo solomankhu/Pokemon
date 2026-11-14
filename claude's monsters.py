@@ -2479,38 +2479,6 @@ def grid_move(i, d, n, cols):
     return i
 
 
-def craft_rows(g):
-    """(name, detail, craftable) per CRAFT row: each recipe, BUILD, BACK."""
-    tier = pick_tier(g.flags.get("pick"))
-    axe = axe_tier(g.flags.get("axe"))
-    m = g.materials
-    have = craft_have(g)
-    rows = []
-    for r in RECIPES:
-        need = ", ".join("%d %s" % (n, craft_label(k)) for k, n in r["needs"].items())
-        can = craft(have, r, tier, axe) is not None and bag_room(g, r)
-        if r.get("sets_tier"):
-            owned = tier >= r["sets_tier"]
-            rows.append((craft_label(r["out"]),
-                         "owned - it cracks seams" if owned else "from " + need + " - cracks seams",
-                         not owned and can))
-        elif r.get("sets_tool"):
-            owned = axe >= r["sets_tool"][1]
-            rows.append((craft_label(r["out"]),
-                         "owned - it cuts thin trees" if owned else "from " + need + " - cuts thin trees",
-                         not owned and can))
-        elif r["out"] == "lantern":
-            rows.append((craft_label("lantern"), "from %s - lamp %d%%" % (need, g.lantern), can))
-        elif "cap" in r:
-            rows.append(("%d %s" % (r["count"], craft_label(r["out"])),
-                         "from %s - have %d/%d" % (need, have[r["out"]], r["cap"]), can))
-        else:
-            rows.append(("%d %s" % (r["count"], craft_label(r["out"])), "from " + need, can))
-    rows.append(("BUILD WALLS", "place WALLs in ROCKY PASS", m["wall"] > 0))
-    rows.append(("BACK", "", True))
-    return rows
-
-
 # The overworld BAG screen and the CENTRE shop.  Pure list builders (the
 # shell only draws them) and their strings, compared across builds by PARITY.
 BAG_BALL_DESC = "A plain BALL for catching wild monsters. The CENTRE shop sells more."
@@ -3872,7 +3840,7 @@ class Game:
         self.pulses = after.pop("pulse")
         self.materials = {k: after.pop(k) for k in list(self.materials)}
         self.bag = {k: v for k, v in after.items() if v > 0}
-        self.sfx("level")
+        self.sfx("craft")
         if r["out"] == "lantern":
             self.craft_msg = "Lantern refilled to %d%%." % self.lantern
         elif r.get("sets_tier"):
@@ -4339,17 +4307,21 @@ class Game:
             self.confirm_shop()
             return
         if self.mode == "craft":
-            c = self.craft_cursor
-            if c < len(RECIPES):
-                self.craft_recipe(c)
-            elif c == len(RECIPES):
+            cells = craft_cells(self)
+            c = cells[clamp(self.craft_cursor, 0, len(cells) - 1)]
+            if c["state"] == "hidden":
+                self.sfx("cancel")
+                self.craft_msg = CRAFT_MSG["hidden"]
+            elif c["kind"] == "recipe":
+                self.craft_recipe(c["recipe"])
+            elif c["state"] == "ready":
                 self.sfx("select")
                 self.building = True
                 self.mode = "overworld"
                 self.show_toast("BUILDING: face bare ground and confirm.", 3.0)
             else:
                 self.sfx("cancel")
-                self.mode = "overworld"
+                self.craft_msg = CRAFT_MSG["nowall"]
             return
         if self.mode == "overworld":
             self.interact()
@@ -4630,9 +4602,13 @@ class Game:
                 self.menu_cursor = (self.menu_cursor + dy) % len(MENU_ITEMS)
                 self.sfx("cursor")
         elif self.mode == "craft":
-            if dy:
-                self.craft_cursor = (self.craft_cursor + dy) % (len(RECIPES) + 2)
-                self.sfx("cursor")
+            d = ("left" if dx < 0 else "right") if dx else ("up" if dy < 0 else "down") if dy else None
+            if d:
+                j = grid_move(self.craft_cursor, d, len(craft_cells(self)), CRAFT_COLS)
+                if j != self.craft_cursor:
+                    self.craft_cursor = j
+                    self.craft_msg = ""
+                    self.sfx("cursor")
         elif self.mode == "party":
             if dy and self.party:
                 self.party_cursor = (self.party_cursor + dy) % len(self.party)
@@ -4900,10 +4876,27 @@ TREE_NOTCHES = (12, 19, 26)     # tile-y of each notch (a wedge across the band)
 DUST_COL = (196, 186, 166)
 FLOAT_COL = {"stone": (220, 206, 170), "ore": ORE_GLINT}
 CRAFT_RECT = (70, 74, W - 140, 340)  # below the HUD (ends y=66), above the toast (y=420)
-CRAFT_ROW_H = 30                     # row pitch of the CRAFT list
-CRAFT_ROWS = 7                       # visible CRAFT rows; longer lists scroll (cues like the BAG)
-                                     # and the 7th row still ends above the message line
 CRAFT_TIER_NAME = ("NONE", "PICK", "IRON PICK")
+CRAFT_GRID_X, CRAFT_GRID_Y = 18, 56   # grid origin, panel-relative
+CRAFT_SLOT, CRAFT_GAP = 48, 6         # cell size and spacing
+CRAFT_GRID_ROWS = 4                   # visible grid rows; more scroll
+CRAFT_CUE_X = CRAFT_GRID_X + CRAFT_COLS * (CRAFT_SLOT + CRAFT_GAP) + 4   # scroll cues: clear of the
+                                      # last column's outline (+4) and of the divider (x+298)
+CRAFT_FLY_T, CRAFT_POP_T, CRAFT_POP_SCALE = 0.30, 0.25, 1.35   # s, s, peak scale of the pop
+CRAFT_SPARKS, CRAFT_GLOW_T = 8, 0.2   # sparkles per craft; reduced-motion glow (s)
+CRAFT_SLOT_FILL = (201, 195, 176)     # bevelled slot: fill, dark top-left, light bottom-right
+CRAFT_SLOT_DARK = (125, 118, 99)
+CRAFT_SLOT_LIGHT = (255, 251, 233)
+CRAFT_SEL_FILL = (233, 223, 184)      # the selected cell's light fill ...
+CRAFT_SEL_LINE = (255, 204, 51)       # ... and its 3 px outline
+CRAFT_OK = (46, 125, 50)              # have >= need, the owned check
+CRAFT_BAD = (192, 57, 43)             # have < need
+CRAFT_SPARK_COL = (255, 216, 74)
+CRAFT_SPARK_EDGE = (176, 112, 24)     # a spark's 1 px drop shadow
+CRAFT_SPARK_R0 = 8                   # px from the result centre a spark starts (ends R0 + 28..36)
+CRAFT_GLOW_COL = (255, 243, 176)      # the reduced-motion glow behind the result slot
+CRAFT_BTN_ON = (76, 175, 80)
+CRAFT_BTN_OFF = (176, 176, 176)
 # -- the tier-2 break, the seam tell and the GEODE (same names and values in the HTML build)
 TRAUMA_MINE_HEAVY = 0.9     # a CRACKED SEAM (0.9^2 * 4 = ~3 px; still clamped at 1.0 -> WORLD_SHAKE_MAX)
 MINE_HITSTOP = 0.06         # s the world fx hold on a seam break (0 with REDUCED_MOTION); input never stops
@@ -4938,6 +4931,8 @@ SHOP_MENU_RECT = (W - 16 - MENU_W, MENU_Y, MENU_W, 128)   # SHOP / LEAVE and BUY
 BBAG_ROWS = 3                        # the battle BAG list, inside the bottom panel
 BBAG_ROW_H = 22
 BBAG_SPLIT_X = 312                   # list on the left, the selected item's description on the right
+LIST_ICON_GAP = 22                   # a BAG / shop / battle BAG row: 16 px icon at the old name x, name this far right
+COIN_ICON_GAP = 20                   # each COINS line: the coins icon, then the text this far right
 COIN_COL = (176, 120, 40)
 CUE_COL = (74, 144, 216)             # section titles and the scroll cues
 
@@ -5271,6 +5266,43 @@ def pulse_ring(reach):
                   key=lambda v: (v[2], v[1], v[0]))
 
 
+class CraftFx:
+    """The craft animation (spec 2.2): ingredients fly into the result slot,
+    the result pops and sparkles.  Shell-only: started by Game.fx_craft,
+    advanced by Shell.update_cave_fx while mode is craft, cleared otherwise.
+    Never reads or writes engine state; its only randomness is FX_RNG."""
+
+    def __init__(self, sfx):
+        self.sfx, self.t, self.recipe, self.before, self.sparks = sfx, None, None, {}, []
+
+    def start(self, i, before):
+        self.t, self.recipe, self.before = 0.0, i, dict(before)
+        self.sparks = [] if REDUCED_MOTION else [
+            (FX_RNG.uniform(0, 6.2832), FX_RNG.uniform(28, 36)) for _ in range(CRAFT_SPARKS)]
+        # no sound here: Game.craft_recipe plays "craft" itself
+
+    def total(self):
+        return CRAFT_GLOW_T if REDUCED_MOTION else CRAFT_FLY_T + CRAFT_POP_T
+
+    def active(self):
+        return self.t is not None
+
+    def flying(self):
+        return self.t is not None and not REDUCED_MOTION and self.t < CRAFT_FLY_T
+
+    def update(self, dt):
+        if self.t is not None:
+            self.t += dt
+            if self.t >= self.total():
+                self.clear()
+
+    def skip(self):
+        self.clear()
+
+    def clear(self):
+        self.t, self.recipe, self.before, self.sparks = None, None, {}, []
+
+
 class CaveFx:
     """The DARK CAVE's screen and stalker feel: lantern flicker, heartbeat,
     film grain, tear lines, the stalker's glide/blink/trail, the lunge flare
@@ -5518,6 +5550,8 @@ class Sfx:
         "hit_weak":   [(0, 150, 0.10, "tri", 0.18, 110)],
         "faint":      [(0, 400, 0.45, "tri", 0.22, 60)],
         "level":      [(0, 523, 0.10, "square", 0.20, None), (0.10, 784, 0.18, "square", 0.20, None)],
+        # A craft: a quick rising ding, G6 then D7 (0.18 s; shorter and brighter than "level").
+        "craft":      [(0, 1568, 0.07, "square", 0.14, None), (0.07, 2349, 0.11, "tri", 0.22, None)],
         "evolve":     [(0, 392, 0.12, "square", 0.20, None), (0.12, 523, 0.12, "square", 0.20, None),
                        (0.24, 784, 0.30, "square", 0.22, None)],
         "throw":      [(0, 520, 0.14, "sine", 0.20, 900)],
@@ -5982,6 +6016,33 @@ def draw_creature(surf, species_id, cx, cy, size, flip=False, back_view=False, t
         eye(s * 0.10, bob - s * 0.02, s * 0.055)
 
 
+def wrap_lines(s, max_w, measure, max_lines=None):
+    """Greedy word wrap; past max_lines the last kept line ends in "...".
+    Pure (measure is a text -> width function), so PARITY can compare it."""
+    lines, line = [], ""
+    for word in str(s).split(" "):
+        test = (line + " " + word).strip()
+        if measure(test) > max_w and line:
+            lines.append(line)
+            line = word
+        else:
+            line = test
+    if line:
+        lines.append(line)
+    if max_lines and len(lines) > max_lines:
+        last = lines[max_lines - 1] + "..."
+        while measure(last) > max_w and len(last) > 3:
+            last = last[:-4] + "..."
+        lines = lines[:max_lines - 1] + [last]
+    return lines
+
+
+def ease_out(u):
+    """Quadratic ease-out on 0..1."""
+    u = max(0.0, min(1.0, u))
+    return 1 - (1 - u) ** 2
+
+
 class Shell:
     """Rendering, input translation and the main loop."""
 
@@ -6015,6 +6076,9 @@ class Shell:
             self.wfx.event(kind, x, y, tile, drops)
             self.cfx.event(kind, x, y, drops)
         self.game.fx_world = fx_world
+        self._icons = {}               # (id, scale, mode) -> cached icon surface
+        self.crfx = CraftFx(self.sfx.play)
+        self.game.fx_craft = self.crfx.start
         self.pending_confirm = False   # a confirm pressed during the lunge flare, replayed after it
         self._shade = None             # reused surface the stalker's shadow body is drawn into
         self._glows = {}               # radius -> cached eye glow sprite
@@ -6066,18 +6130,47 @@ class Shell:
         pygame.draw.rect(self.surf, (0, 0, 0), pygame.Rect(x + 4, y + 4, w - 8, h - 8),
                          1, border_radius=5)
 
-    def wrap(self, s, x, y, max_w, lh, font, color=INK):
-        words = str(s).split(" ")
-        line, ly = "", y
-        for word in words:
-            test = (line + " " + word).strip()
-            if font.size(test)[0] > max_w and line:
-                self.text(line, x, ly, font, color)
-                line, ly = word, ly + lh
-            else:
-                line = test
-        if line:
-            self.text(line, x, ly, font, color)
+    def wrap(self, s, x, y, max_w, lh, font, color=INK, max_lines=None, align="left"):
+        """Draw s word-wrapped to max_w (wrap_lines); align "center" centres on x."""
+        for k, line in enumerate(wrap_lines(s, max_w, lambda t: font.size(t)[0], max_lines)):
+            self.text(line, x, y + k * lh, font, color, align)
+
+    def icon_surf(self, iid, scale=1, mode="normal"):
+        """A cached 16*scale px icon: one fill per opaque pixel, no smoothing.
+        mode "normal" is the palette, "shadow" is ICON_SHADOW, "grey" is a faded
+        zero-saturation luminance (a locked CRAFT cell)."""
+        key = (iid, scale, mode)
+        img = self._icons.get(key)
+        if img is None:
+            img = pygame.Surface((16 * scale, 16 * scale), pygame.SRCALPHA)
+            for py, row in enumerate(ICONS[iid]):
+                for px, ch in enumerate(row):
+                    if ch == ".":
+                        continue
+                    r, g, b = ICON_PALETTE[ch][:3]
+                    if mode == "shadow":
+                        col = ICON_SHADOW
+                    elif mode == "grey":
+                        lum = (r * 30 + g * 59 + b * 11) // 100
+                        v = (lum + 2 * 200) // 3
+                        col = (v, v, v)
+                    else:
+                        col = (r, g, b)
+                    img.fill(col, pygame.Rect(px * scale, py * scale, scale, scale))
+            self._icons[key] = img
+        return img
+
+    def list_icon(self, iid, x, y, h):
+        """A 1x icon at x, vertically centred in the band y..y+h (a list row or
+        a text line).  Returns its rect."""
+        r = pygame.Rect(x, y + (h - 16) // 2, 16, 16)
+        self.surf.blit(self.icon_surf(iid, 1), r)
+        return r
+
+    def coins_line(self, x, y):
+        """COINS %d with the coins icon to its left (BAG, shop offer, shop list)."""
+        self.list_icon("coins", x, y, self.f13.get_height())
+        return self.text("COINS %d" % self.game.coins, x + COIN_ICON_GAP, y, self.f13, COIN_COL)
 
     def cursor_arrow(self, x, y):
         pygame.draw.polygon(self.surf, INK, [(x, y), (x + 10, y + 5), (x, y + 10)])
@@ -6635,45 +6728,142 @@ class Shell:
         self.text('F3  REDUCED MOTION: ' + ('ON' if g.settings['reducedMotion'] else 'OFF'), 28, 368, self.f11)
         self.text('F4  EFFECTS: ' + g.settings['quality'], 28, 386, self.f11)
 
+    def craft_slot(self, r, fill=CRAFT_SLOT_FILL):
+        """A bevelled inventory slot: dark top-left edge, light bottom-right."""
+        pygame.draw.rect(self.surf, fill, r)
+        pygame.draw.rect(self.surf, CRAFT_SLOT_DARK, (r.x, r.y, r.w, 2))
+        pygame.draw.rect(self.surf, CRAFT_SLOT_DARK, (r.x, r.y, 2, r.h))
+        pygame.draw.rect(self.surf, CRAFT_SLOT_LIGHT, (r.x, r.bottom - 2, r.w, 2))
+        pygame.draw.rect(self.surf, CRAFT_SLOT_LIGHT, (r.right - 2, r.y, 2, r.h))
+
+    def craft_cell_rect(self, k, top):
+        """Screen rect of grid cell k with grid row `top` scrolled to the top."""
+        x, y = CRAFT_RECT[0], CRAFT_RECT[1]
+        col, row = k % CRAFT_COLS, k // CRAFT_COLS - top
+        p = CRAFT_SLOT + CRAFT_GAP
+        return pygame.Rect(x + CRAFT_GRID_X + col * p, y + CRAFT_GRID_Y + row * p,
+                           CRAFT_SLOT, CRAFT_SLOT)
+
+    def craft_top(self, n):
+        return list_top(-(-n // CRAFT_COLS), self.game.craft_cursor // CRAFT_COLS, CRAFT_GRID_ROWS)
+
     def draw_craft(self):
-        """CRAFT: materials on top, one row per recipe, then BUILD and BACK.
+        """CRAFT (spec 2.1): a recipe-book grid on the left, the selected
+        cell's detail pane on the right, and the craft animation (CraftFx).
         It starts below the HUD (region banner, materials, lead HP end at y=66)
         and ends above the toast strip (y=420), so it covers none of them."""
         g = self.game
         x, y, w, h = CRAFT_RECT
+        dim = (111, 139, 168)
         self.panel(x, y, w, h)
         self.text("CRAFT", x + 20, y + 14, self.f22)
+        # tool chips: icon + name, greyed when not owned
         tier = pick_tier(g.flags.get("pick"))
-        pr = self.text("PICK: %s" % CRAFT_TIER_NAME[tier], x + 120, y + 22, self.f13,
-                       (176, 120, 40) if tier >= 2 else (111, 139, 168))
         axe = axe_tier(g.flags.get("axe"))
-        self.text("AXE: %s" % ("YES" if axe else "NO"), pr.right + 16, y + 22, self.f13,
-                  (176, 120, 40) if axe else (111, 139, 168))
-        self.text("X back", x + w - 18, y + 22, self.f11, (111, 139, 168), "right")
-        m = g.materials
-        self.text("STONE %d   ORE %d   WALL %d   BALLS %d"
-                  % (m["stone"], m["ore"], m["wall"], g.balls), x + 20, y + 52, self.f13)
-        pygame.draw.line(self.surf, EDGE, (x + 16, y + 76), (x + w - 16, y + 76), 2)
-        rows = craft_rows(g)
-        top = list_top(len(rows), g.craft_cursor, CRAFT_ROWS)
-        end = min(len(rows), top + CRAFT_ROWS)
-        for i in range(top, end):
-            name, sub, can = rows[i]
-            ry = y + 92 + (i - top) * CRAFT_ROW_H
-            sel = i == g.craft_cursor
+        cx = x + 120
+        for iid, on, label in (("iron_pick" if tier >= 2 else "pick", tier >= 1,
+                                CRAFT_TIER_NAME[tier] if tier else "no PICK"),
+                               ("axe", axe >= 1, "AXE" if axe else "no AXE")):
+            self.surf.blit(self.icon_surf(iid, 1, "normal" if on else "grey"), (cx, y + 18))
+            r = self.text(label, cx + 20, y + 20, self.f11, INK if on else dim)
+            cx = r.right + 14
+        self.text("X back", x + w - 18, y + 20, self.f11, dim, "right")
+        pygame.draw.line(self.surf, EDGE, (x + 16, y + 42), (x + w - 16, y + 42), 2)
+
+        # -- the grid ----------------------------------------------------------
+        cells = craft_cells(g)
+        n = len(cells)
+        cur = clamp(g.craft_cursor, 0, n - 1)
+        top = self.craft_top(n)
+        for k in range(top * CRAFT_COLS, min(n, (top + CRAFT_GRID_ROWS) * CRAFT_COLS)):
+            c = cells[k]
+            r = self.craft_cell_rect(k, top)
+            sel = k == cur
             if sel:
-                pygame.draw.rect(self.surf, (226, 236, 248),
-                                 pygame.Rect(x + 16, ry - 6, w - 32, CRAFT_ROW_H - 2), border_radius=6)
-                self.cursor_arrow(x + 24, ry + 4)
-            col = INK if can else (150, 156, 164)
-            self.text(name, x + 44, ry, self.f15, col)
-            if sub:     # one line per row; ends left of the scroll cue's column
-                self.text(sub, x + w - 40, ry + 3, self.f11,
-                          (111, 139, 168) if can else (170, 174, 180), "right")
+                pygame.draw.rect(self.surf, CRAFT_SEL_LINE, r.inflate(8, 8), 3)
+            self.craft_slot(r, CRAFT_SEL_FILL if sel else CRAFT_SLOT_FILL)
+            st = c["state"]
+            mode = "shadow" if st == "hidden" else "grey" if st == "locked" else "normal"
+            iy = r.y + 8 - (4 if c["kind"] == "build" else 0)
+            self.surf.blit(self.icon_surf(c["icon"], 2, mode), (r.x + 8, iy))
+            if st == "hidden":
+                for off, col in ((1, (0, 0, 0)), (0, (255, 255, 255))):
+                    q = self.f15.render("?", False, col)
+                    self.surf.blit(q, q.get_rect(center=(r.centerx + off, r.centery + off)))
+            if st == "owned":
+                pygame.draw.lines(self.surf, CRAFT_OK, False,
+                                  [(r.right - 14, r.y + 8), (r.right - 10, r.y + 12),
+                                   (r.right - 4, r.y + 4)], 2)
+            if c["kind"] == "build":
+                self.text("BUILD", r.centerx, r.bottom - 13, self.f11, INK, "center")
+        rows = -(-n // CRAFT_COLS)
+        cue_x = x + CRAFT_CUE_X
         if top > 0:
-            self.scroll_cue(x + w - 24, y + 92 + 8, True)
-        if end < len(rows):
-            self.scroll_cue(x + w - 24, y + 92 + (CRAFT_ROWS - 1) * CRAFT_ROW_H + 8, False)
+            self.scroll_cue(cue_x, y + CRAFT_GRID_Y + 8, True)
+        if top + CRAFT_GRID_ROWS < rows:
+            self.scroll_cue(cue_x, y + CRAFT_GRID_Y + (CRAFT_GRID_ROWS - 1) * (CRAFT_SLOT + CRAFT_GAP)
+                            + CRAFT_SLOT - 8, False)
+
+        # -- the detail pane -----------------------------------------------------
+        c = cells[cur]
+        hidden = c["state"] == "hidden"
+        for dy in range(52, 292, 8):                       # dashed divider
+            pygame.draw.line(self.surf, CRAFT_SLOT_FILL, (x + 298, y + dy), (x + 298, y + dy + 4), 2)
+        fx = self.crfx
+        mine = fx.active() and c["kind"] == "recipe" and c["recipe"] == fx.recipe
+        calm = REDUCED_MOTION
+        flying = mine and not calm and fx.t < CRAFT_FLY_T
+        popping = mine and not calm and fx.t >= CRAFT_FLY_T
+        res = pygame.Rect(x + 360, y + 52, 60, 60)
+        if mine and (calm or popping):
+            pygame.draw.rect(self.surf, CRAFT_GLOW_COL, res.inflate(10, 10), border_radius=4)
+        self.craft_slot(res, CRAFT_SEL_FILL)
+        big = self.icon_surf(c["icon"], 3, "shadow" if hidden else "normal")
+        if popping:
+            p = min(1.0, (fx.t - CRAFT_FLY_T) / CRAFT_POP_T)
+            s = 1 + (CRAFT_POP_SCALE - 1) * math.sin(math.pi * p)
+            side = int(round(16 * 3 * s))
+            img = pygame.transform.scale(self.icon_surf(c["icon"], 1), (side, side))
+            self.surf.blit(img, img.get_rect(center=res.center))
+            d = ease_out(p)
+            for a, rad in fx.sparks:
+                rr = CRAFT_SPARK_R0 + rad * d
+                sx, sy = int(res.centerx + math.cos(a) * rr) - 1, int(res.centery + math.sin(a) * rr) - 1
+                self.surf.fill(CRAFT_SPARK_EDGE, (sx + 1, sy + 1, 3, 3))   # reads on the pale glow
+                self.surf.fill(CRAFT_SPARK_COL, (sx, sy, 3, 3))
+        elif not flying:              # the result slot stays empty until the pop reveals it
+            self.surf.blit(big, big.get_rect(center=res.center))
+        self.text(c["name"], x + 390, y + 118, self.f15, INK, "center")
+        self.wrap(c["blurb"], x + 390, y + 136, 168, 13, self.f11, dim, 2, "center")
+        ghosts = []
+        for k, (iid, have, need) in enumerate(c["needs"][:3]):
+            ny = y + 170 + k * 28
+            slot = pygame.Rect(x + 302, ny, 24, 24)
+            self.craft_slot(slot)
+            self.surf.blit(self.icon_surf(icon_id(iid), 1, "shadow" if hidden else "normal"),
+                           (slot.x + 4, slot.y + 4))
+            if hidden:
+                self.text("?", x + 478, ny + 5, self.f13, dim, "right")
+                continue
+            if flying:
+                have = fx.before.get(iid, have)
+                u = ease_out(fx.t / CRAFT_FLY_T)
+                gx = slot.centerx + (res.centerx - slot.centerx) * u
+                gy = slot.centery + (res.centery - slot.centery) * u
+                ghosts.append((self.icon_surf(icon_id(iid), 1), (int(gx), int(gy))))
+            self.text(craft_label(iid), x + 332, ny + 5, self.f13)
+            self.text("%d/%d" % (have, need), x + 478, ny + 5, self.f13,
+                      CRAFT_OK if have >= need else CRAFT_BAD, "right")
+        for img, at in ghosts:                             # over the rows they leave
+            self.surf.blit(img, img.get_rect(center=at))
+        ready = c["state"] == "ready"
+        label = ("OWNED" if c["state"] == "owned" else
+                 "Z: BUILD" if c["kind"] == "build" else "Z: CRAFT")
+        btn = pygame.Rect(0, y + 258, 124, 22)
+        btn.centerx = x + 390
+        pygame.draw.rect(self.surf, CRAFT_BTN_ON if ready else CRAFT_BTN_OFF, btn, border_radius=4)
+        pygame.draw.rect(self.surf, CRAFT_OK if ready else (128, 128, 128), btn, 2, border_radius=4)
+        self.text(label, btn.centerx, btn.y + 4, self.f13, (255, 255, 255), "center")
         if g.craft_msg:
             self.text(g.craft_msg, x + w // 2, y + h - 34, self.f13, (60, 110, 60), "center")
 
@@ -6691,7 +6881,7 @@ class Shell:
         x, y, w, h = BAG_RECT
         self.panel(x, y, w, h)
         self.text("BAG", x + 20, y + 14, self.f22)
-        self.text("COINS %d" % g.coins, x + 120, y + 22, self.f13, COIN_COL)
+        self.coins_line(x + 120, y + 22)
         rows = bag_rows(g.balls, g.bag, g.materials)
         ent = bag_entries(rows)
         cur = ent[max(0, min(g.bag_cursor, len(ent) - 1))]
@@ -6716,7 +6906,8 @@ class Shell:
                                  pygame.Rect(x + 16, ry, w - 32, BAG_ROW_H - 2), border_radius=6)
                 self.cursor_arrow(x + 24, ry + 7)
             col = (90, 100, 112) if k == "mat" else INK
-            self.text(bag_name(it), x + 44, ry + 4, self.f15, col)
+            self.list_icon(icon_id(it), x + 44, ry, BAG_ROW_H - 2)
+            self.text(bag_name(it), x + 44 + LIST_ICON_GAP, ry + 4, self.f15, col)
             self.text("x%d" % n, x + w - 40, ry + 4, self.f15, col, "right")
         if top > 0:
             self.scroll_cue(x + w - 24, y + 56 + BAG_ROW_H // 2, True)
@@ -6762,7 +6953,7 @@ class Shell:
             items = SHOP_OFFER if s["page"] == "offer" else SHOP_MAIN
             x, y, w, _h = SHOP_MENU_RECT
             self.panel(x, y, w, 42 + 26 * len(items) + 8)
-            self.text("COINS %d" % g.coins, x + 20, y + 14, self.f13, COIN_COL)
+            self.coins_line(x + 20, y + 14)
             for i, it in enumerate(items):
                 ry = y + 42 + i * 26
                 if i == s["cursor"]:
@@ -6773,7 +6964,7 @@ class Shell:
         buy = s["page"] == "buy"
         self.panel(x, y, w, h)
         self.text("BUY" if buy else "SELL", x + 20, y + 14, self.f22)
-        self.text("COINS %d" % g.coins, x + 120, y + 22, self.f13, COIN_COL)
+        self.coins_line(x + 120, y + 22)
         self.text("X back", x + w - 18, y + 22, self.f11, (111, 139, 168), "right")
         pygame.draw.line(self.surf, EDGE, (x + 16, y + 48), (x + w - 16, y + 48), 2)
         rows = shop_rows(s["page"], g.bag)
@@ -6790,7 +6981,8 @@ class Shell:
                     pygame.draw.rect(self.surf, (226, 236, 248),
                                      pygame.Rect(x + 16, ry, w - 32, SHOP_ROW_H - 2), border_radius=6)
                     self.cursor_arrow(x + 24, ry + 9)
-                self.text(row[1], x + 44, ry + 6, self.f15)
+                self.list_icon(icon_id(row[0]), x + 44, ry, SHOP_ROW_H - 2)
+                self.text(row[1], x + 44 + LIST_ICON_GAP, ry + 6, self.f15)
                 self.text("%d each" % row[2], x + 262, ry + 8, self.f13, (74, 90, 106), "right")
                 have = (g.balls if row[0] == "ball" else g.bag.get(row[0], 0)) if buy else row[3]
                 self.text(("have %d" if buy else "x%d") % have, x + 318, ry + 9, self.f11,
@@ -7431,7 +7623,8 @@ class Shell:
                                          border_radius=5)
                         self.cursor_arrow(34, oy + 2)
                     count = g.balls if k == "ball" else g.bag.get(k, 0)
-                    self.text(bag_name(k), 50, oy, self.f13)
+                    self.list_icon(icon_id(k), 50, oy - 3, BBAG_ROW_H - 2)
+                    self.text(bag_name(k), 50 + LIST_ICON_GAP, oy, self.f13)
                     self.text("x%d" % count, BBAG_SPLIT_X - 30, oy, self.f13, (74, 90, 106), "right")
                 if top > 0:
                     self.scroll_cue(BBAG_SPLIT_X - 18, H - 94 + 6, True)
@@ -7614,6 +7807,10 @@ class Shell:
         pressed while the lunge flare held the screen."""
         g = self.game
         self.cfx.update(dt)
+        if g.mode == "craft":
+            self.crfx.update(dt)
+        else:
+            self.crfx.clear()
         self.sfx.weather_loop(g.battle.condition if g.mode == 'battle' and g.battle else None)
         cave = in_cave(g.player.ty) and g.mode in ("overworld", "menu", "craft", "bag", "shop", "dialogue")
         self.sfx.drone(DRONE_VOL * (0.25 + 0.75 * clamp(g.tension, 0, TENSION["max"]) / TENSION["max"])
@@ -7622,7 +7819,51 @@ class Shell:
             self.pending_confirm = False
             g.confirm()
 
+    def key(self, k, repeat=False):
+        """One KEYDOWN (a pygame key code).  Returns False when it quits the
+        game (X on the title).  In CRAFT any key first skips the craft
+        animation to its end and is then handled normally: never dropped."""
+        global REDUCED_MOTION
+        g = self.game
+        if not g.focused:
+            return True
+        if g.mode == "craft":
+            self.crfx.skip()
+        if g.mode == 'menu' and k in (pygame.K_F2, pygame.K_F3, pygame.K_F4):
+            if k == pygame.K_F2:
+                modes = ('ON', 'ASSIST', 'AUTO')
+                g.settings['actionMode'] = modes[(modes.index(g.settings['actionMode']) + 1) % 3]
+            elif k == pygame.K_F3:
+                g.settings['reducedMotion'] = not g.settings['reducedMotion']
+                REDUCED_MOTION = g.settings['reducedMotion']
+            else:
+                levels = ('STANDARD', 'HIGH', 'LOW')
+                g.settings['quality'] = levels[(levels.index(g.settings['quality']) + 1) % 3]
+            g.sfx('select')
+            return True
+        if k in (pygame.K_UP, pygame.K_w):
+            g.move_cursor(0, -1)
+        elif k in (pygame.K_DOWN, pygame.K_s):
+            g.move_cursor(0, 1)
+        elif k in (pygame.K_LEFT, pygame.K_a):
+            g.move_cursor(-1, 0)
+        elif k in (pygame.K_RIGHT, pygame.K_d):
+            g.move_cursor(1, 0)
+        elif k in (pygame.K_z, pygame.K_RETURN, pygame.K_SPACE):
+            if g.command_input(pressed=not repeat, held=True):
+                pass
+            elif self.cfx.lunge_age is not None:
+                self.pending_confirm = True   # buffered, not dropped
+            else:
+                g.confirm()
+        elif k in (pygame.K_x, pygame.K_ESCAPE, pygame.K_BACKSPACE):
+            if g.mode == "title" and not g.new_game_confirm:
+                return False
+            g.cancel()
+        return True
+
     def run(self):
+        global REDUCED_MOTION
         g = self.game
         TAP_KEYS = {pygame.K_UP: "up", pygame.K_w: "up", pygame.K_DOWN: "down",
                     pygame.K_s: "down", pygame.K_LEFT: "left", pygame.K_a: "left",
@@ -7643,44 +7884,10 @@ class Shell:
                     if event.key in (pygame.K_z, pygame.K_RETURN, pygame.K_SPACE):
                         g.command_input(released=True)
                 elif event.type == pygame.KEYDOWN:
-                    k = event.key
-                    if not g.focused:
-                        continue
-                    if g.mode == 'menu' and k in (pygame.K_F2, pygame.K_F3, pygame.K_F4):
-                        global REDUCED_MOTION
-                        if k == pygame.K_F2:
-                            modes = ('ON', 'ASSIST', 'AUTO')
-                            g.settings['actionMode'] = modes[(modes.index(g.settings['actionMode']) + 1) % 3]
-                        elif k == pygame.K_F3:
-                            g.settings['reducedMotion'] = not g.settings['reducedMotion']
-                            REDUCED_MOTION = g.settings['reducedMotion']
-                        else:
-                            levels = ('STANDARD', 'HIGH', 'LOW')
-                            g.settings['quality'] = levels[(levels.index(g.settings['quality']) + 1) % 3]
-                        g.sfx('select')
-                        continue
-                    if g.mode == "overworld" and k in TAP_KEYS:
-                        taps.add(TAP_KEYS[k])
-                    if k in (pygame.K_UP, pygame.K_w):
-                        g.move_cursor(0, -1)
-                    elif k in (pygame.K_DOWN, pygame.K_s):
-                        g.move_cursor(0, 1)
-                    elif k in (pygame.K_LEFT, pygame.K_a):
-                        g.move_cursor(-1, 0)
-                    elif k in (pygame.K_RIGHT, pygame.K_d):
-                        g.move_cursor(1, 0)
-                    elif k in (pygame.K_z, pygame.K_RETURN, pygame.K_SPACE):
-                        if g.command_input(pressed=not getattr(event, 'repeat', False), held=True):
-                            pass
-                        elif self.cfx.lunge_age is not None:
-                            self.pending_confirm = True   # buffered, not dropped
-                        else:
-                            g.confirm()
-                    elif k in (pygame.K_x, pygame.K_ESCAPE, pygame.K_BACKSPACE):
-                        if g.mode == "title" and not g.new_game_confirm:
-                            running = False
-                        else:
-                            g.cancel()
+                    if g.focused and g.mode == "overworld" and event.key in TAP_KEYS:
+                        taps.add(TAP_KEYS[event.key])
+                    if not self.key(event.key, getattr(event, 'repeat', False)):
+                        running = False
 
             pressed = pygame.key.get_pressed()
             held = dict(

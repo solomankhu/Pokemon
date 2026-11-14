@@ -1702,17 +1702,24 @@ ok(not g.craft_recipe(axe_i) and g.craft_msg == "You already have the AXE." and 
 ok(g.craft_recipe(pot_i) and g.bag == {"flint": 2, "potion": 1} and g.craft_msg == "Crafted 1 POTION.",
    "a POTION crafts into the BAG: %r %r" % (g.bag, g.craft_msg))
 g.bag = {"leaf": 2, "dewdrop": 1, "potion": mt.BAG_MAX}
-ok(not mt.craft_rows(g)[pot_i][2], "a full POTION stack shows the row as not craftable")
+mt.note_found(g)
+ok(mt.craft_cells(g)[pot_i]["state"] == "locked", "a full POTION stack shows the cell as locked")
 ok(not g.craft_recipe(pot_i) and g.craft_msg == "Your BAG is full of POTION."
    and g.bag == {"leaf": 2, "dewdrop": 1, "potion": mt.BAG_MAX}, "a full BAG refuses and spends nothing")
 g.bag = {}
 ok(not g.craft_recipe(pot_i) and g.craft_msg == "Need 2 LEAF, 1 DEW DROP.", "short: %r" % g.craft_msg)
-rows = mt.craft_rows(g)
-ok(len(rows) == len(mt.RECIPES) + 2, "one CRAFT row per recipe plus BUILD and BACK")
-ok(rows[axe_i] == ("AXE", "owned - it cuts thin trees", False), "owned AXE row: %r" % (rows[axe_i],))
-g.flags["axe"] = 0; g.bag = {"twig": 2, "flint": 1}
-ok(mt.craft_rows(g)[axe_i] == ("AXE", "from 2 TWIG, 1 FLINT - cuts thin trees", True), "craftable AXE row")
-ok(mt.craft_rows(g)[pot_i] == ("1 POTION", "from 2 LEAF, 1 DEW DROP", False), "loot row uses GOODS names")
+cells = mt.craft_cells(g)
+ok(len(cells) == len(mt.RECIPES) + 1 and cells[-1]["kind"] == "build",
+   "one CRAFT cell per recipe plus BUILD (no BACK row)")
+ok(cells[axe_i]["state"] == "owned" and cells[axe_i]["name"] == "AXE", "owned AXE cell: %r" % cells[axe_i])
+g.flags["axe"] = 0; g.bag = {"twig": 2, "flint": 1}; mt.note_found(g)
+c_axe = mt.craft_cells(g)[axe_i]
+ok(c_axe["state"] == "ready" and c_axe["needs"] == [("twig", 2, 2), ("flint", 1, 1)],
+   "craftable AXE cell: %r" % c_axe)
+c_pot = mt.craft_cells(g)[pot_i]
+ok(c_pot["state"] == "locked" and c_pot["name"] == "POTION"
+   and [mt.craft_label(k) for k, _h, _n in c_pot["needs"]] == ["LEAF", "DEW DROP"],
+   "loot cell uses GOODS names: %r" % c_pot)
 # materials and counters still route home after a loot-era craft
 g.bag, g.materials, g.balls = {"leaf": 5}, dict(stone=0, ore=4, wall=0), 2
 ball_i = [r["id"] for r in mt.RECIPES].index("ball")
@@ -3582,22 +3589,27 @@ def cave_render(sh, sg, lum, keep, stand, DRAWN):
     stand(43, 30, "craft")
     sg.materials.update(stone=99, ore=99, wall=99)
     sg.balls, sg.lantern, sg.pulses = 99, 3, 0
-    rows = mt.craft_rows(sg)
+    cells = mt.craft_cells(sg)
     x, y, w, h = mt.CRAFT_RECT
-    vis_bottom = y + 92 + (mt.CRAFT_ROWS - 1) * mt.CRAFT_ROW_H - 6 + mt.CRAFT_ROW_H - 2
-    ok(vis_bottom <= y + h - 34, "the %d visible CRAFT rows end above the message line (%d <= %d)"
-       % (mt.CRAFT_ROWS, vis_bottom, y + h - 34))
-    ok(len(mt.craft_rows(sg)) == len(mt.RECIPES) + 2, "one CRAFT row per recipe plus BUILD and BACK")
+    pitch = mt.CRAFT_SLOT + mt.CRAFT_GAP
+    vis_bottom = y + mt.CRAFT_GRID_Y + (mt.CRAFT_GRID_ROWS - 1) * pitch + mt.CRAFT_SLOT + 4   # + outline
+    ok(vis_bottom <= y + h - 34, "the %d visible CRAFT grid rows end above the message line (%d <= %d)"
+       % (mt.CRAFT_GRID_ROWS, vis_bottom, y + h - 34))
+    grid_right = x + mt.CRAFT_GRID_X + (mt.CRAFT_COLS - 1) * pitch + mt.CRAFT_SLOT + 4
+    ok(grid_right + 8 <= x + 298, "the CRAFT grid (and its cue) ends left of the detail divider (%d)" % grid_right)
+    ok(len(cells) == len(mt.RECIPES) + 1, "one CRAFT cell per recipe plus BUILD")
     win_bad = []
     for n in range(1, 16):
         for cur in range(n):
-            top = mt.list_top(n, cur, mt.CRAFT_ROWS)
-            if not (top <= cur < top + mt.CRAFT_ROWS and 0 <= top <= max(0, n - mt.CRAFT_ROWS)):
+            top = mt.list_top(n, cur, mt.CRAFT_GRID_ROWS)
+            if not (top <= cur < top + mt.CRAFT_GRID_ROWS and 0 <= top <= max(0, n - mt.CRAFT_GRID_ROWS)):
                 win_bad.append((cur, n, top))
-    ok(not win_bad, "the CRAFT window keeps the cursor visible for every list of 1..15 rows %s" % win_bad[:5])
-    # the detail is right-aligned at w - 40, clear of the scroll cue column (w - 24 +- 5)
-    fits = all(44 + sh.f15.size(n)[0] + 12 + sh.f11.size(sub)[0] + 40 <= w for n, sub, _ in rows)
-    ok(fits, "every CRAFT row's name and detail share one line without overlapping")
+    ok(not win_bad, "the CRAFT grid window keeps the cursor row visible for 1..15 rows %s" % win_bad[:5])
+    # detail pane: name at x+332, count right-aligned at x+478, never overlapping
+    names = {mt.craft_label(k) for c in cells for k, _h, _n in c["needs"]}
+    fits = all(332 + sh.f13.size(nm)[0] + 6 + sh.f13.size("99/99")[0] <= 478 for nm in names)
+    ok(fits, "every need name and its have/n count share one detail row without overlapping")
+    ok(all(sh.f15.size(c["name"])[0] <= 184 for c in cells), "every CRAFT cell name fits the detail pane")
     sh.render()
     keep("cave-craft")
     sg.mode = "overworld"
@@ -4184,6 +4196,10 @@ def render_section():
         except Exception as e:                     # noqa: BLE001
             sfx_errors.append("%s: %r" % (name, e))
     ok(not sfx_errors, "every Sfx.SPEC sound plays without raising: %s" % sfx_errors[:3])
+    craft_spec = mt.Sfx.SPEC.get("craft", [])
+    ok(len(craft_spec) == 2 and craft_spec[1][1] > craft_spec[0][1]
+       and abs(max(d + dur for d, _, dur, _, _, _ in craft_spec) - 0.18) < 0.03,
+       "the 'craft' ding is two rising notes, about 0.18 s (its buffer length is checked below)")
     if sh.sfx.ok:
         built = {k[0] for k in sh.sfx.cache}
         ok(built == set(mt.Sfx.SPEC), "every sound was synthesised into the cache (missing %s)"
@@ -4488,22 +4504,31 @@ def render_section():
         and the polished battle BAG list: input flows, and every string they
         draw stays inside its panel."""
         texts = []
+        icons = []                      # (icon id, rect, index of the next text drawn)
         real_text = sh.text
+        real_icon = sh.list_icon
 
         def rec_text(s, x, y, font, color=mt.INK, align="left"):
             r = real_text(s, x, y, font, color, align)
             texts.append((str(s), r.copy()))
             return r
+
+        def rec_icon(iid, x, y, h):
+            r = real_icon(iid, x, y, h)
+            icons.append((iid, r.copy(), len(texts)))
+            return r
         sh.text = rec_text
+        sh.list_icon = rec_icon
         try:
-            _bag_shop_render(texts)
+            _bag_shop_render(texts, icons)
         finally:
             sh.text = real_text
+            del sh.list_icon            # back to the class method
             sg.mode, sg.battle, sg.shop, sg.bag_pick, sg.dialogue = "overworld", None, None, None, None
             sg.bag, sg.coins, sg.balls = {}, mt.START_COINS, 20
 
 
-    def _bag_shop_render(texts):
+    def _bag_shop_render(texts, icons):
         inner = lambda r: pygame.Rect(*r).inflate(-8, -8)       # inside the panel's border
 
         def drawn(name, rect, tag, need=1):
@@ -4513,6 +4538,7 @@ def render_section():
             only = (sh.draw_bag_pick if rect == mt.BAG_PICK_RECT else
                     sh.draw_bag if sg.mode == "bag" else sh.draw_shop)
             del texts[:]
+            del icons[:]
             only()
             mine = list(texts)
             bad = [(s, tuple(r)) for s, r in mine if not inner(rect).contains(r)]
@@ -4522,6 +4548,57 @@ def render_section():
 
         def cue_px(x, y):
             return tuple(sh.surf.get_at((x, y)))[:3] == mt.CUE_COL
+
+        def icon_px_bad(iid, r):
+            """Opaque pixels of the 1x icon that the surface does not show at r."""
+            img = sh.icon_surf(iid, 1)
+            return sum(1 for py in range(16) for px in range(16) if img.get_at((px, py))[3]
+                       and tuple(sh.surf.get_at((r.x + px, r.y + py)))[:3] != tuple(img.get_at((px, py)))[:3])
+
+        def row_rects(x0, y0, w0, rh, n):
+            return [pygame.Rect(x0, y0 + j * rh, w0, rh - 2) for j in range(n)]
+
+        def icons_ok(tag, rects, n_want, coins_in=None):
+            """Chunk 5: every list icon sits inside a row rect and shows its table
+            pixels; the name starts at or past its right edge + 4 px, about level
+            with it, and the next string on the row starts 4 px past the name.
+            With coins_in, exactly one COINS icon lies inside that rect, its text
+            at or past its right edge + 4 px."""
+            got = [(iid, r, ti) for iid, r, ti in icons if iid != "coins"]
+            bad = []
+            for iid, r, ti in got:
+                name, nr = texts[ti]
+                after = texts[ti + 1][1] if ti + 1 < len(texts) else None
+                if (not any(rr.contains(r) for rr in rects) or nr.x < r.right + 4
+                        or abs(nr.centery - r.centery) > 3 or icon_px_bad(iid, r)
+                        or (after is not None and after.y < nr.bottom and after.x < nr.right + 4)):
+                    bad.append((iid, tuple(r), name, tuple(nr)))
+            ok(len(got) == n_want and not bad,
+               "%s: %d row icons (want %d), inside their rows, name 4+ px right (bad: %s)"
+               % (tag, len(got), n_want, bad[:3]))
+            if coins_in is not None:
+                cs = [(r, ti) for iid, r, ti in icons if iid == "coins"]
+                good = [r for r, ti in cs if inner(coins_in).contains(r) and not icon_px_bad("coins", r)
+                        and texts[ti][0].startswith("COINS ") and texts[ti][1].x >= r.right + 4
+                        and abs(texts[ti][1].centery - r.centery) <= 3]
+                ok(len(cs) == 1 and len(good) == 1,
+                   "%s: the COINS icon sits inside %s, the text 4+ px right of it" % (tag, tuple(coins_in)))
+            return set(iid for iid, _r, _ti in got)
+
+        def bag_window():
+            """(number of icon rows, their kinds) in the BAG's visible window."""
+            rows_ = mt.bag_rows(sg.balls, sg.bag, sg.materials)
+            ent_ = mt.bag_entries(rows_)
+            top_ = mt.list_top(len(rows_), ent_[max(0, min(sg.bag_cursor, len(ent_) - 1))], mt.BAG_ROWS)
+            win = [r_[0] for r_ in rows_[top_:top_ + mt.BAG_ROWS] if r_[0] in ("item", "mat", "loot")]
+            return len(win), set(win)
+
+        bag_row_rects = row_rects(mt.BAG_RECT[0] + 16, mt.BAG_RECT[1] + 56, mt.BAG_RECT[2] - 32,
+                                  mt.BAG_ROW_H, mt.BAG_ROWS)
+        shop_row_rects = row_rects(mt.SHOP_RECT[0] + 16, mt.SHOP_RECT[1] + 56, mt.SHOP_RECT[2] - 32,
+                                   mt.SHOP_ROW_H, mt.SHOP_ROWS)
+        bbag_row_rects = row_rects(28, mt.H - 94 - 3, mt.BBAG_SPLIT_X - 40, mt.BBAG_ROW_H, mt.BBAG_ROWS)
+        kinds_seen = set()
 
         mons = [mt.make_mon(s, lv) for s, lv in (("emberling", 12), ("nibbit", 8), ("dripling", 9),
                                                  ("pyrelash", 40), ("sprigling", 5), ("ironclad", 24))]
@@ -4556,6 +4633,9 @@ def render_section():
         sg.confirm()
         ok(sg.mode == "bag" and sg.bag_cursor == 0 and sg.toast_t <= 0, "MENU -> BAG opens the BAG screen")
         strs, _ = drawn("bag-empty", mt.BAG_RECT, "BAG (empty)", 8)
+        n_win, k_win = bag_window()
+        icons_ok("BAG (empty) icons", bag_row_rects, n_win, mt.BAG_RECT)
+        kinds_seen |= k_win
         ok("COINS 100" in strs and strs.count("(none)") == 2 and {"ITEMS", "MATERIALS", "LOOT"} <= set(strs),
            "an empty BAG shows COINS, three sections and (none) twice: %s" % strs[:6])
         ok(not cue_px(bx + bw - 24, by + 56 + mt.BAG_ROW_H // 2)
@@ -4574,6 +4654,10 @@ def render_section():
         rows = mt.bag_rows(sg.balls, sg.bag, sg.materials)
         n_ent = len(mt.bag_entries(rows))
         strs, _ = drawn("bag-full", mt.BAG_RECT, "BAG (full)", 10)
+        n_win, k_win = bag_window()
+        ids = icons_ok("BAG (full) icons", bag_row_rects, n_win, mt.BAG_RECT)
+        ok("balls" in ids, "the BAG's BALL row draws the balls icon (icon_id maps ball -> balls)")
+        kinds_seen |= k_win
         ok("COINS %d" % mt.COINS_MAX in strs and "x%d" % mt.BAG_MAX in strs, "the full BAG shows 99999 coins and x999")
         ok(cue_px(bx + bw - 24, by + 56 + (mt.BAG_ROWS - 1) * mt.BAG_ROW_H + mt.BAG_ROW_H // 2),
            "a long BAG shows the down scroll cue")
@@ -4581,6 +4665,11 @@ def render_section():
             sg.move_cursor(0, 1)
         ok(sg.bag_cursor == n_ent - 1, "the BAG cursor clamps at the last row (%d)" % sg.bag_cursor)
         strs, _ = drawn("bag-scrolled", mt.BAG_RECT, "BAG (scrolled)", 8)
+        n_win, k_win = bag_window()
+        icons_ok("BAG (scrolled) icons", bag_row_rects, n_win, mt.BAG_RECT)
+        kinds_seen |= k_win
+        ok(kinds_seen == {"item", "mat", "loot"}, "BAG icons were checked on item, mat and loot rows: %s"
+           % sorted(kinds_seen))
         last = mt.bag_name(rows[mt.bag_entries(rows)[-1]][1])
         ok(last in strs and "BALL" not in strs, "scrolled to the end: %s shows, BALL has scrolled off" % last)
         ok(cue_px(bx + bw - 24, by + 56 + mt.BAG_ROW_H // 2), "a scrolled BAG shows the up scroll cue")
@@ -4651,6 +4740,8 @@ def render_section():
             sg.confirm()
         strs, _ = drawn("shop-offer", mt.SHOP_MENU_RECT, "SHOP / LEAVE", 3)
         ok(strs[1:] == mt.SHOP_OFFER, "the offer menu lists SHOP and LEAVE")
+        mrect = (mx, my, mw, 42 + 26 * len(mt.SHOP_OFFER) + 8)
+        icons_ok("SHOP / LEAVE icons", [], 0, mrect)
         sg.move_cursor(0, 1)
         sg.confirm()
         ok(sg.mode == "overworld" and sg.shop is None, "LEAVE closes the shop")
@@ -4658,11 +4749,13 @@ def render_section():
         sg.confirm()
         strs, _ = drawn("shop-main", mt.SHOP_MENU_RECT, "BUY / SELL / BACK", 4)
         ok(strs[1:] == mt.SHOP_MAIN, "SHOP opens BUY / SELL / BACK")
+        icons_ok("BUY / SELL / BACK icons", [], 0, (mx, my, mw, 42 + 26 * len(mt.SHOP_MAIN) + 8))
 
         sg.coins, sg.balls, sg.bag = 1000, 5, {}
         sg.confirm()                                # BUY
         ok(sg.shop["page"] == "buy", "BUY opens the buy list")
         strs, _ = drawn("shop-buy", mt.SHOP_RECT, "BUY", 15)
+        icons_ok("BUY icons", shop_row_rects, min(mt.SHOP_ROWS, len(mt.SHOP_STOCK)), mt.SHOP_RECT)
         ok(all(mt.bag_name(k) in strs for k in mt.SHOP_STOCK) and "%d each" % mt.BALL_PRICE in strs,
            "BUY lists BALL, GREAT BALL, POTION, SUPER POTION and SMOKE with prices")
         for _ in range(mt.SHOP_QTY_MAX + 3):
@@ -4698,6 +4791,7 @@ def render_section():
         sg.confirm()                                # SELL
         ok(sg.shop["page"] == "sell", "SELL opens the sell list")
         strs, _ = drawn("shop-sell", mt.SHOP_RECT, "SELL", 10)
+        icons_ok("SELL icons", shop_row_rects, len(mt.shop_rows("sell", sg.bag)), mt.SHOP_RECT)
         ok("TWIG" in strs and "PEARL" in strs and "POTION" not in strs, "SELL lists owned loot only")
         for _ in range(mt.SHOP_QTY_MAX + 3):
             sg.move_cursor(1, 0)
@@ -4717,6 +4811,7 @@ def render_section():
         ok(sg.bag == dict(potion=3) and sg.shop["msg"].endswith(mt.SHOP_MSG["empty"]),
            "selling the last loot says there is nothing left to sell")
         strs, _ = drawn("shop-sell-empty", mt.SHOP_RECT, "SELL (empty)", 3)
+        icons_ok("SELL (empty) icons", shop_row_rects, 0, mt.SHOP_RECT)
         ok(mt.SHOP_MSG["empty"] in strs, "an empty SELL list says so")
         sg.coins, sg.bag = mt.COINS_MAX - 5, dict(relicshard=1)
         sg.confirm()
@@ -4749,7 +4844,10 @@ def render_section():
         for i, name in ((0, "battle-bag"), (len(sg.battle_bag_items()) - 1, "battle-bag-scrolled")):
             b.cursor = i
             del texts[:]
+            del icons[:]
             show(name)
+            icons_ok("battle BAG (cursor %d) icons" % i, bbag_row_rects,
+                     min(mt.BBAG_ROWS, len(sg.battle_bag_items())))
             low = [(s, r) for s, r in texts if r.top >= mt.H - 118]
             bad = [(s, tuple(r)) for s, r in low if not inner(panel).contains(r)
                    or r.colliderect(pygame.Rect(mt.W - 284, 248, 260, 66))]
@@ -4758,6 +4856,18 @@ def render_section():
                "battle BAG (cursor %d): %d strings inside the bottom panel, clear of the HP box (outside: %s)"
                % (i, len(low), bad[:3]))
         ok(cue_px(mt.BBAG_SPLIT_X - 18, mt.H - 94 + 6), "the scrolled battle BAG shows the up cue")
+        longest = max(["ball"] + list(mt.BATTLE_BAG), key=lambda k_: sh.f13.size(mt.bag_name(k_))[0])
+        name_end = 50 + mt.LIST_ICON_GAP + sh.f13.size(mt.bag_name(longest))[0]
+        cnt_left = mt.BBAG_SPLIT_X - 30 - sh.f13.size("x%d" % mt.BAG_MAX)[0]
+        ok(name_end + 4 <= cnt_left,
+           "battle BAG: the longest name (%s) ends at x=%d, 4+ px left of x%d (x=%d) and BBAG_SPLIT_X=%d"
+           % (mt.bag_name(longest), name_end, mt.BAG_MAX, cnt_left, mt.BBAG_SPLIT_X))
+        all_rows = mt.shop_rows("buy", {}) + mt.shop_rows("sell", {k_: 1 for k_ in mt.GOODS})
+        tight = [(r_[1], mt.SHOP_RECT[0] + 44 + mt.LIST_ICON_GAP + sh.f15.size(r_[1])[0],
+                  mt.SHOP_RECT[0] + 262 - sh.f13.size("%d each" % r_[2])[0]) for r_ in all_rows]
+        ok(all(e + 4 <= p for _n, e, p in tight),
+           "shop: every BUY/SELL name (%d) ends 4+ px left of its price (tightest: %s)"
+           % (len(tight), min(tight, key=lambda t_: t_[2] - t_[1])))
         b.cursor = 0
         show("battle-bag")
         ok(cue_px(mt.BBAG_SPLIT_X - 18, mt.H - 94 + (mt.BBAG_ROWS - 1) * mt.BBAG_ROW_H + 6)
@@ -4822,11 +4932,11 @@ def render_section():
     sg.confirm()
     ok(sg.mode == "craft", "menu CRAFT opens the craft screen")
     craft_frames = []
-    for i in range(len(mt.RECIPES) + 2):
+    for i in range(len(mt.craft_cells(sg))):
         sg.craft_cursor = i
         craft_frames.append(show("craft-%d" % i))
-        ok(busy(sh.surf), "craft screen row %d has content" % i)
-    ok(len(set(craft_frames)) == len(craft_frames), "every CRAFT row highlights differently")
+        ok(busy(sh.surf), "craft screen cell %d has content" % i)
+    ok(len(set(craft_frames)) == len(craft_frames), "every CRAFT cell highlights differently")
     sg.craft_cursor = 0
     sg.confirm()
     ok(sg.materials["wall"] == 1 and sg.craft_msg.startswith("Crafted"), "CRAFT row 1 crafts a WALL")
@@ -4836,9 +4946,21 @@ def render_section():
     sg.confirm()
     ok(sg.craft_msg.startswith("Need"), "CRAFT says what is missing")
     show("craft-need")
-    for _ in range(len(mt.RECIPES) + 2 - sg.craft_cursor):
+    n_cells = len(mt.craft_cells(sg))
+    sg.craft_cursor = 0
+    for _ in range(3):
+        sg.move_cursor(-1, 0)
+        sg.move_cursor(0, -1)
+    ok(sg.craft_cursor == 0, "the CRAFT cursor clamps at the top-left (no wrap)")
+    for _ in range(n_cells):
+        sg.move_cursor(1, 0)
+    ok(sg.craft_cursor == mt.CRAFT_COLS - 1, "right stops at the end of the row (%d)" % sg.craft_cursor)
+    for _ in range(n_cells):
         sg.move_cursor(0, 1)
-    ok(sg.craft_cursor == 0, "the CRAFT cursor wraps")
+    ok(sg.craft_cursor == n_cells - 1, "down clamps at the last cell (%d)" % sg.craft_cursor)
+    sg.move_cursor(0, -1)
+    ok(sg.craft_cursor == n_cells - 1 - mt.CRAFT_COLS and sg.craft_msg == "",
+       "up moves one row and clears the message")
     sg.cancel()
     ok(sg.mode == "overworld", "X closes CRAFT")
     sg.building = True
@@ -5735,68 +5857,272 @@ def render_section():
     keep("sandbox-craft")
     ok(hud_bytes() + [snap(toast_r)] == hud_ow, "with CRAFT open the HUD and toast are untouched")
 
-    # -- the CRAFT list scrolls in a CRAFT_ROWS window: HUD/toast never move, cues track it --
-    cqx, cqy, cqw, _cqh = mt.CRAFT_RECT
+    # -- the CRAFT grid scrolls by rows in a CRAFT_GRID_ROWS window: HUD/toast never move, cues track it --
+    cqx, cqy, _cqw, _cqh = mt.CRAFT_RECT
+    pitch = mt.CRAFT_SLOT + mt.CRAFT_GAP
 
-    def craft_cue(slot):
-        return tuple(sh.surf.get_at((cqx + cqw - 24, cqy + 92 + slot * mt.CRAFT_ROW_H + 8)))[:3] == mt.CUE_COL
+    def craft_cue(up):
+        cy = cqy + mt.CRAFT_GRID_Y + (8 if up else (mt.CRAFT_GRID_ROWS - 1) * pitch + mt.CRAFT_SLOT - 8)
+        return tuple(sh.surf.get_at((cqx + mt.CRAFT_CUE_X, cy)))[:3] == mt.CUE_COL
 
     def walk_craft(label):
-        n = len(mt.RECIPES) + 2
+        n = len(mt.craft_cells(sg))
+        rows = -(-n // mt.CRAFT_COLS)
         seen_up = seen_dn = False
         for cur in range(n):
             sg.craft_cursor = cur
             sh.render()
             ok(hud_bytes() + [snap(toast_r)] == hud_ow,
                "%s: CRAFT at cursor %d/%d leaves the HUD and toast untouched" % (label, cur, n))
-            top = mt.list_top(n, cur, mt.CRAFT_ROWS)
-            want_up, want_dn = top > 0, top + mt.CRAFT_ROWS < n
-            ok(craft_cue(0) == want_up and craft_cue(mt.CRAFT_ROWS - 1) == want_dn,
+            top = mt.list_top(rows, cur // mt.CRAFT_COLS, mt.CRAFT_GRID_ROWS)
+            ok(sh.craft_top(n) == top, "%s: the grid's top row %d tracks cursor %d" % (label, top, cur))
+            want_up, want_dn = top > 0, top + mt.CRAFT_GRID_ROWS < rows
+            ok(craft_cue(True) == want_up and craft_cue(False) == want_dn,
                "%s: CRAFT cursor %d/%d shows up cue %s, down cue %s" % (label, cur, n, want_up, want_dn))
+            r = sh.craft_cell_rect(cur, top)
+            ok(craft_r.contains(r.inflate(8, 8))
+               and tuple(sh.surf.get_at((r.x - 3, r.centery)))[:3] == mt.CRAFT_SEL_LINE,
+               "%s: the cursor cell %d is on screen inside CRAFT_RECT with its yellow outline" % (label, cur))
             seen_up, seen_dn = seen_up or want_up, seen_dn or want_dn
         return seen_up, seen_dn
 
-    ok(walk_craft("shipped") == (len(mt.RECIPES) + 2 > mt.CRAFT_ROWS,) * 2,
-       "the shipped CRAFT list shows scroll cues only if it outgrows CRAFT_ROWS")
-    saved_recipes = list(mt.RECIPES)
-    wall_r = next(r for r in mt.RECIPES if r["id"] == "wall")
+    n_ship = len(mt.craft_cells(sg))
+    ok(walk_craft("shipped") == (-(-n_ship // mt.CRAFT_COLS) > mt.CRAFT_GRID_ROWS,) * 2,
+       "the shipped %d-cell CRAFT grid shows scroll cues only if it outgrows CRAFT_GRID_ROWS" % n_ship)
+    real_cells = mt.craft_cells
     try:
-        mt.RECIPES.extend(dict(wall_r, id="x%d" % k) for k in range(1, 5))
-        ok(walk_craft("long") == (True, True), "a long CRAFT list scrolls and shows both cues")
-        sg.craft_cursor = len(mt.RECIPES) + 1
+        base = real_cells(sg)
+        mt.craft_cells = lambda g_: [dict(base[k % len(base)]) for k in range(23)]
+        ok(walk_craft("long") == (True, True), "a 23-cell CRAFT grid scrolls by rows and shows both cues")
+        sg.craft_cursor = 0
+        for _ in range(30):
+            sg.move_cursor(0, 1)
+        ok(sg.craft_cursor == 20, "down walks a 23-cell grid's first column to its last row (%d)" % sg.craft_cursor)
+        for _ in range(30):
+            sg.move_cursor(1, 0)
+        ok(sg.craft_cursor == 22, "right then stops on the last cell (%d)" % sg.craft_cursor)
         sh.render()
         keep("sandbox-craft-scrolled")
     finally:
-        mt.RECIPES[:] = saved_recipes
+        mt.craft_cells = real_cells
     sg.craft_cursor = 0
     sg.mode, sg.toast_t = "overworld", 0
 
-    # -- the IRON PICK row, the tier label, and every row inside CRAFT_RECT ---
+    # -- the IRON PICK cell, the tool chip, and every cell inside CRAFT_RECT ---
     cx0, cy0, cw0, ch0 = mt.CRAFT_RECT
-    n_rows = len(mt.RECIPES) + 2
-    last_bottom = cy0 + 92 + (min(n_rows, mt.CRAFT_ROWS) - 1) * mt.CRAFT_ROW_H - 6 + mt.CRAFT_ROW_H - 2
-    ok(last_bottom <= cy0 + ch0 - 34, "the visible CRAFT window (%d of %d rows) ends (y=%d) above the message line (y=%d)"
-       % (min(n_rows, mt.CRAFT_ROWS), n_rows, last_bottom, cy0 + ch0 - 34))
     iron_i = next(i for i, r in enumerate(mt.RECIPES) if r.get("sets_tier"))
-    iron_slot = iron_i - mt.list_top(n_rows, iron_i, mt.CRAFT_ROWS)   # its on-screen row
     sg.mode, sg.craft_cursor, sg.craft_msg = "craft", iron_i, ""
     sg.flags["pick"] = 1
     sg.materials = dict(stone=0, ore=0, wall=0)
     iron_short = show("craft-iron-short")
+    ok(mt.craft_cells(sg)[iron_i]["state"] == "locked", "a short IRON PICK cell is locked")
     sg.materials = dict(stone=6, ore=3, wall=0)
     iron_ready = show("craft-iron-ready")
-    ok(iron_ready != iron_short, "the IRON PICK row redraws when it becomes craftable")
-    row_r = pygame.Rect(cx0 + 16, cy0 + 92 + iron_slot * mt.CRAFT_ROW_H - 6, cw0 - 32, mt.CRAFT_ROW_H - 2)
-    ok(craft_r.contains(row_r) and busy(sh.surf.subsurface(row_r), 4),
-       "the IRON PICK row sits inside CRAFT_RECT with content")
+    ok(iron_ready != iron_short, "the IRON PICK cell redraws when it becomes craftable")
+    all_cells = mt.craft_cells(sg)
+    cell_rs = [sh.craft_cell_rect(k, sh.craft_top(len(all_cells))) for k in range(len(all_cells))]
+    ok(all(craft_r.contains(r.inflate(8, 8)) for r in cell_rs)
+       and not any(a.colliderect(b) for i_, a in enumerate(cell_rs) for b in cell_rs[i_ + 1:]),
+       "every CRAFT cell (with its outline) sits inside CRAFT_RECT, none overlapping")
+    ok(busy(sh.surf.subsurface(cell_rs[iron_i]), 4), "the IRON PICK cell has content")
     tier_r = pygame.Rect(cx0 + 116, cy0 + 16, 160, 26)
     tier1 = snap(tier_r)
     sg.confirm()
-    ok(sg.flags["pick"] == 2, "confirming the IRON PICK row crafts it")
+    ok(sg.flags["pick"] == 2, "confirming the IRON PICK cell crafts it")
+    sh.crfx.skip()
     iron_owned = show("craft-iron-owned")
-    ok(snap(tier_r) != tier1, "the CRAFT header shows the PICK tier changing to IRON PICK")
-    ok(iron_owned != iron_ready, "an owned IRON PICK row draws differently")
+    ok(snap(tier_r) != tier1, "the CRAFT header's PICK chip changes to IRON PICK")
+    ok(iron_owned != iron_ready, "an owned IRON PICK cell draws differently")
+    ok(bytes(mt.CRAFT_OK) in colours(sh.surf.subsurface(cell_rs[iron_i]).copy()),
+       "an owned cell carries the green check")
+
+    # -- icons: every id blits pixel for pixel ---------------------------------
+    icon_bad = []
+    for iid, rows_ in mt.ICONS.items():
+        img = sh.icon_surf(iid, 1)
+        for py_, row_ in enumerate(rows_):
+            for px_, ch_ in enumerate(row_):
+                c_ = img.get_at((px_, py_))
+                good = c_.a == 0 if ch_ == "." else (c_.a == 255 and tuple(c_)[:3] == mt.ICON_PALETTE[ch_][:3])
+                if not good:
+                    icon_bad.append((iid, px_, py_))
+    ok(not icon_bad and len(mt.ICONS) > 0, "all %d icons match their table pixel for pixel %s"
+       % (len(mt.ICONS), icon_bad[:3]))
+    grey_sat = [iid for iid in mt.ICONS for c_ in colours(sh.icon_surf(iid, 1, "grey"))
+                if max(c_) - min(c_) >= 24 and c_ != bytes((0, 0, 0))]
+    ok(not grey_sat, "grey icons carry no saturated pixel %s" % grey_sat[:3])
+
+    # -- the cell states, Z on cells, the craft animation ---------------------
+    axe_ci = [r["id"] for r in mt.RECIPES].index("axe")
+    wall_ci = [r["id"] for r in mt.RECIPES].index("wall")
+    build_ci = len(mt.RECIPES)
+
+    def craft_fresh(cursor=0):
+        stand(34, 46, "craft")
+        sg.flags.pop("pick", None)
+        sg.flags["axe"] = 0
+        sg.materials = dict(stone=0, ore=0, wall=0)
+        sg.bag, sg.balls, sg.lantern, sg.pulses = {}, 0, 100, 0
+        sg.found = {"balls", "lantern"}
+        sg.craft_cursor, sg.craft_msg, sg.building = cursor, "", False
+        sh.crfx.clear()
+
+    def icon_box(k):
+        r = sh.craft_cell_rect(k, sh.craft_top(len(mt.craft_cells(sg))))
+        return [tuple(sh.surf.get_at((r.x + 8 + i_, r.y + 8 + j_)))[:3] for j_ in range(32) for i_ in range(32)]
+
+    craft_fresh(0)
+    ok(mt.craft_cells(sg)[axe_ci]["state"] == "hidden", "a fresh game hides the AXE cell")
+    show("craft-fresh")
+    allowed = {mt.ICON_SHADOW, mt.CRAFT_SLOT_FILL, (255, 255, 255), (0, 0, 0)}
+    stray = {c_ for c_ in icon_box(axe_ci) if c_ not in allowed}
+    ok(not stray, "the hidden AXE cell shows only its silhouette and a white ? on the slot %s" % sorted(stray)[:3])
+    ok((255, 255, 255) in icon_box(axe_ci) and mt.ICON_SHADOW in icon_box(axe_ci),
+       "the hidden cell draws both the silhouette and the ?")
+    craft_fresh(1)
+    ok(mt.craft_cells(sg)[wall_ci]["state"] == "locked", "a fresh WALL cell is locked")
+    sh.render()
+    sat = [c_ for c_ in icon_box(wall_ci) if c_ != mt.CRAFT_SLOT_FILL and max(c_) - min(c_) >= 24]
+    ok(not sat, "the locked WALL cell has no saturated icon pixel %s" % sat[:3])
+
+    # Z on cells (spec 4 "Crafting through cells"), through Shell.key like a real key
+    craft_fresh(axe_ci)
+    hold = (dict(sg.bag), dict(sg.materials), sg.balls, dict(sg.flags))
+    ok(sh.key(pygame.K_z) and sg.mode == "craft" and sg.craft_msg == mt.CRAFT_MSG["hidden"]
+       and (dict(sg.bag), dict(sg.materials), sg.balls, dict(sg.flags)) == hold and not sh.crfx.active(),
+       "Z on a hidden cell crafts nothing and says %r" % sg.craft_msg)
+    craft_fresh(build_ci)
+    sh.key(pygame.K_z)
+    ok(sg.mode == "craft" and not sg.building and sg.craft_msg == mt.CRAFT_MSG["nowall"],
+       "Z on BUILD with no WALLs stays in CRAFT: %r" % sg.craft_msg)
+    show("craft-build-nowall")
+    sg.materials["wall"] = 1
+    sh.key(pygame.K_z)
+    ok(sg.mode == "overworld" and sg.building, "Z on BUILD with a WALL enters build mode")
+    sg.building = False
+    craft_fresh(0)
+    sh.key(pygame.K_x)
+    ok(sg.mode == "overworld", "X closes CRAFT")
+
+    # the animation: a real AXE craft, frame by frame
+    def axe_ready():
+        craft_fresh(axe_ci)
+        sg.bag = {"twig": 2, "flint": 1}
+        mt.note_found(sg)
+
+    axe_ready()
+    still_before = show("craft-axe-ready")
+    sounds = []
+    real_sfx = sg.sfx
+    sg.sfx = lambda name: (sounds.append(name), real_sfx(name))
+    rs_anim, fx_anim = random.getstate(), mt.FX_RNG.getstate()
+    try:
+        sh.key(pygame.K_z)
+    finally:
+        sg.sfx = real_sfx
+    ok(sg.flags["axe"] == 1 and sounds == ["craft"], "a craft plays one 'craft' ding, not 'level': %s" % sounds)
+    ok(sh.crfx.active() and sh.crfx.recipe == axe_ci and sh.crfx.before == {"twig": 2, "flint": 1},
+       "a craft starts CraftFx with the before counts %r" % sh.crfx.before)
+    ok(mt.FX_RNG.getstate() != fx_anim and len(sh.crfx.sparks) == mt.CRAFT_SPARKS,
+       "the sparks come from FX_RNG (%d)" % len(sh.crfx.sparks))
+    anim = {}
+    for t_ in (0.0, 0.15, 0.3, 0.425, 0.5):
+        if sh.crfx.active() and t_ > sh.crfx.t:
+            sh.crfx.update(t_ - sh.crfx.t)
+        sh.render()
+        anim[t_] = (snap(), sh.crfx.active())
+        if t_ == 0.15:
+            keep("craft-fly")
+            fly_counts = colours(sh.surf.subsurface((cqx + 440, cqy + 170, 40, 44)).copy())
+        if t_ == 0.425:
+            keep("craft-pop")
+            pop_cols = colours(sh.surf.subsurface((cqx + 340, cqy + 32, 100, 100)).copy())
+    ok(all(anim[t_][1] for t_ in anim), "the animation is still running at t = 0.5")
+    sh.crfx.update(mt.CRAFT_FLY_T + mt.CRAFT_POP_T - sh.crfx.t + 1e-9)
+    ok(not sh.crfx.active(), "the animation ends at CRAFT_FLY_T + CRAFT_POP_T = %.2f s"
+       % (mt.CRAFT_FLY_T + mt.CRAFT_POP_T))
+    still = show("craft-axe-owned")
+    outside = [pygame.Rect(0, 0, mt.W, cqy), pygame.Rect(0, cqy + _cqh, mt.W, mt.H - cqy - _cqh),
+               pygame.Rect(0, cqy, cqx, _cqh), pygame.Rect(cqx + _cqw, cqy, mt.W - cqx - _cqw, _cqh)]
+
+    def outside_of(raw):
+        img = pygame.image.frombytes(raw, (mt.W, mt.H), "RGB")
+        return [pygame.image.tobytes(img.subsurface(r_), "RGB") for r_ in outside]
+    ok(all(outside_of(anim[t_][0]) == outside_of(still) for t_ in anim),
+       "every animation frame (t = 0, 0.15, 0.3, 0.425, 0.5) changes nothing outside CRAFT_RECT")
+    ok(all(anim[t_][0] != still for t_ in anim) and still != still_before,
+       "every animation frame differs from the settled frame, which shows the owned AXE")
+    ok(bytes(mt.CRAFT_OK) in fly_counts, "while flying the need rows show the before counts (green)")
+    ok(bytes(mt.CRAFT_SPARK_COL) in pop_cols and bytes(mt.CRAFT_GLOW_COL) in pop_cols,
+       "mid-pop draws sparks over the glow")
+    ok(random.getstate() == rs_anim, "the craft and its animation never touch the engine random stream")
+
+    # a key during the fly skips to the end and is still handled
+    axe_ready()
+    sh.key(pygame.K_z)
+    sh.crfx.update(0.1)
+    ok(sh.crfx.flying(), "the second craft is mid-fly")
+    sh.key(pygame.K_z)
+    ok(not sh.crfx.active() and sg.craft_msg == "You already have the AXE.",
+       "Z mid-fly skips the animation and is handled: %r" % sg.craft_msg)
+    # leaving CRAFT clears it on the next shell frame
+    axe_ready()
+    sh.key(pygame.K_z)
     sg.mode = "overworld"
+    sh.update_cave_fx(1 / 60)
+    ok(not sh.crfx.active(), "the first shell frame outside CRAFT clears CraftFx")
+
+    # reduced motion: no fly, pop or sparks; a short glow and the icon at exactly 3x
+    try:
+        mt.REDUCED_MOTION = True
+        axe_ready()
+        fx_calm = mt.FX_RNG.getstate()
+        sh.key(pygame.K_z)
+        ok(sh.crfx.active() and sh.crfx.sparks == [] and mt.FX_RNG.getstate() == fx_calm
+           and not sh.crfx.flying() and sh.crfx.total() == mt.CRAFT_GLOW_T,
+           "reduced motion: no sparks, no FX_RNG draw, no fly, a %.1f s glow" % mt.CRAFT_GLOW_T)
+        sh.render()
+        keep("craft-calm-glow")
+        res = pygame.Rect(cqx + 360, cqy + 52, 60, 60)
+        art = mt.ICONS[mt.icon_id("axe")]
+        exact = all(tuple(sh.surf.get_at((res.x + 6 + px_ * 3 + d_, res.y + 6 + py_ * 3 + e_)))[:3]
+                    == mt.ICON_PALETTE[ch_][:3]
+                    for py_, row_ in enumerate(art) for px_, ch_ in enumerate(row_) if ch_ != "."
+                    for d_ in range(3) for e_ in range(3))
+        ok(exact, "reduced motion draws the result icon at exactly 3x")
+        ok(tuple(sh.surf.get_at((res.x - 3, res.centery)))[:3] == mt.CRAFT_GLOW_COL, "reduced motion glows")
+        sh.crfx.update(mt.CRAFT_GLOW_T)
+        ok(not sh.crfx.active(), "the glow ends after CRAFT_GLOW_T")
+    finally:
+        mt.REDUCED_MOTION = False
+    craft_fresh(0)
+    sg.mode = "overworld"
+
+    # -- the older Shell.key branches, kept by the CRAFT rework ----------------
+    keep_state = (sg.mode, sg.new_game_confirm, sg.focused, sg.menu_cursor,
+                  sg.settings["reducedMotion"], mt.REDUCED_MOTION, sh.cfx.lunge_age, sh.pending_confirm)
+    try:
+        sg.mode, sg.new_game_confirm = "title", False
+        ok(sh.key(pygame.K_x) is False, "X on the title (no KEEP SAVE / START NEW prompt) quits: key() is False")
+        sg.mode = "menu"
+        was_rm = sg.settings["reducedMotion"]
+        sh.key(pygame.K_F3)
+        ok(sg.settings["reducedMotion"] == (not was_rm) and mt.REDUCED_MOTION == (not was_rm),
+           "F3 on the menu flips settings reducedMotion and REDUCED_MOTION together")
+        sh.key(pygame.K_F3)
+        ok(sg.settings["reducedMotion"] == was_rm and mt.REDUCED_MOTION == was_rm, "F3 again flips them back")
+        sg.focused, sg.mode = False, "menu"
+        cur0 = sg.menu_cursor
+        ok(sh.key(pygame.K_DOWN) is True and sg.mode == "menu" and sg.menu_cursor == cur0,
+           "an unfocused window ignores a key: mode and cursor unchanged")
+        sg.focused, sg.mode = True, "overworld"
+        sh.pending_confirm, sh.cfx.lunge_age = False, 0.0
+        sh.key(pygame.K_z)
+        ok(sh.pending_confirm is True and sg.mode == "overworld",
+           "Z during the lunge flare is buffered in pending_confirm, not dropped")
+    finally:
+        (sg.mode, sg.new_game_confirm, sg.focused, sg.menu_cursor, sg.settings["reducedMotion"],
+         mt.REDUCED_MOTION, sh.cfx.lunge_age, sh.pending_confirm) = keep_state
 
     # -- the THICK TREE: a marked forest tree, and ordinary ground once cut ----
     def near_trunk(img):
@@ -6415,7 +6741,7 @@ function seamData(g) {
   // Sealed glades draw as forest: gladeMasked over probe tiles x {uncut, west cut, east cut, both cut}.
   const gladeMask = GLADE_PROBES.map(([x, y]) => [{}, { '19,84': '.' }, { '71,84': '.' }, { '19,84': '.', '71,84': '.' }]
     .map(e => g.gladeMasked(x, y, e)));
-  // Part B: axeTier over JSON-representable junk, the canMine matrix, and craftRows for three fixed states.
+  // Part B: axeTier over JSON-representable junk, the canMine matrix, and craftCells for five fixed states.
   const junk = [null, true, false, 0, 1, 2, -3, '1', 1.5, [], {}];
   const canMineMatrix = [];
   const row85 = g.MAP[85];
@@ -6434,7 +6760,6 @@ function seamData(g) {
     [{ pick: 1, axe: 0 }, { twig: 2, flint: 1 }, { stone: 8, ore: 4, wall: 1 }],
     [{ pick: 2, axe: 1 }, { leaf: 2, dewdrop: 1, potion: g.BAG_MAX, flint: 2, copperwire: 1 }, { stone: 3, ore: 1, wall: 0 }],
   ];
-  const craftRowsOut = [];
   const craftCellsOut = [];
   const foundStates = [new Set(), new Set(), new Set(), new Set(['balls', 'lantern']), new Set(['twig'])];
   const craftStates5 = craftStates.concat([
@@ -6442,11 +6767,6 @@ function seamData(g) {
     [{ pick: 0, axe: 0 }, {}, { stone: 0, ore: 0, wall: 0 }],
   ]);
   try {
-    for (const [fl, bag, mats] of craftStates) {
-      G.flags = Object.assign({}, fl); G.bag = Object.assign({}, bag); G.materials = Object.assign({}, mats);
-      G.balls = 3; G.lantern = 60; G.pulses = 1;
-      craftRowsOut.push(g.craftRows().map(r => [r[0], r[1], !!r[2]]));
-    }
     craftStates5.forEach(([fl, bag, mats], si) => {
       G.flags = Object.assign({}, fl); G.bag = Object.assign({}, bag); G.materials = Object.assign({}, mats);
       G.balls = 3; G.lantern = 60; G.pulses = 1; G.found = new Set(foundStates[si]);
@@ -6458,12 +6778,14 @@ function seamData(g) {
     for (const d of ['left', 'right', 'up', 'down']) gridMoveOut.push(g.gridMove(i, d, n, g.CRAFT_COLS));
   const cleanFoundOut = [['twig', 'axe'], ['twig', 3, null, 'nosuch'], null, 'twig', {}]
     .map(v => Array.from(g.cleanFound(v)).sort());
+  // The shared line-breaking rule over a fixed fake measure (7 px per char).
+  const wrapOut = ['one two three four five six', 'a  b', 'supercalifragilistic word', 'Stuns the stalker. Have 3/3.'].map(s => [null, 1, 2].map(ml => g.wrapLines(s, 70, t => t.length * 7, ml)));
   return {
     icons: g.ICONS, iconPalette: g.ICON_PALETTE, iconShadow: g.ICON_SHADOW,
     iconIds: ['ball', 'nosuch'].concat(Object.keys(g.ICONS).sort()).map(k => g.iconId(k)),
     craftCols: g.CRAFT_COLS, craftBlurb: g.CRAFT_BLURB, craftMsg: g.CRAFT_MSG,
-    gridMove: gridMoveOut, cleanFound: cleanFoundOut, craftCells: craftCellsOut,
-    axeMax: g.AXE_MAX, tree: g.TREE, axeTiers: junk.map(v => g.axeTier(v)), canMineMatrix, craftRows: craftRowsOut,
+    gridMove: gridMoveOut, cleanFound: cleanFoundOut, craftCells: craftCellsOut, wrapLines: wrapOut,
+    axeMax: g.AXE_MAX, tree: g.TREE, axeTiers: junk.map(v => g.axeTier(v)), canMineMatrix,
     seam: g.SEAM, grass: g.GRASS, pickMax: g.PICK_MAX, geode: g.GEODE, backstopOre: g.BACKSTOP_ORE,
     seams, tier1Count: tier1.length, deposits: g.ORE_DEPOSITS,
     tiers: [true, false, null, 0, 1, 2, 3, -1, '2'].map(v => g.pickTier(v)),
@@ -6484,7 +6806,12 @@ const SHELL_KEYS = ['SCENE_SKY', 'WEATHER_2D', 'WORLD_SHAKE_MAX', 'TRAUMA_MINE',
   'DEBRIS_MAX', 'DEBRIS_BURST', 'DEBRIS_BURST_ORE', 'DEBRIS_BURST_HEAVY', 'DEBRIS_BURST_HEAVY_ORE',
   'DEBRIS_SPEED_HEAVY', 'SPARKLE_RADIUS', 'SPARKLE_PERIOD', 'SPARKLE_TIME', 'GEODE_GLINT_ONE_IN',
   'GEODE_GLINT_PERIOD', 'GEODE_GLINT_TIME', 'GEODE_GLOW_ALPHA', 'GEODE_GLOW_STEPS', 'HUD_MAT_RECT',
-  'HUD_LEAD_RECT', 'MENU_W', 'MENU_Y', 'GEODE_DOOR', 'CRAFT_TIER_NAME', 'HUD_CAVE_RECT', 'CRAFT_ROW_H', 'CRAFT_ROWS',
+  'HUD_LEAD_RECT', 'MENU_W', 'MENU_Y', 'GEODE_DOOR', 'CRAFT_TIER_NAME', 'HUD_CAVE_RECT',
+  // the CRAFT grid and its animation
+  'CRAFT_RECT', 'CRAFT_COLS', 'CRAFT_GRID_X', 'CRAFT_GRID_Y', 'CRAFT_SLOT', 'CRAFT_GAP', 'CRAFT_GRID_ROWS', 'CRAFT_CUE_X',
+  'CRAFT_FLY_T', 'CRAFT_POP_T', 'CRAFT_POP_SCALE', 'CRAFT_SPARKS', 'CRAFT_GLOW_T', 'CRAFT_SLOT_FILL',
+  'CRAFT_SLOT_DARK', 'CRAFT_SLOT_LIGHT', 'CRAFT_SEL_FILL', 'CRAFT_SEL_LINE', 'CRAFT_OK', 'CRAFT_BAD',
+  'CRAFT_SPARK_COL', 'CRAFT_SPARK_EDGE', 'CRAFT_SPARK_R0', 'CRAFT_GLOW_COL', 'CRAFT_BTN_ON', 'CRAFT_BTN_OFF',
   'TREE_TRUNK', 'TREE_NOTCH', 'TREE_BAND', 'TREE_NOTCHES',
   // the DARK CAVE look, sound and feel
   'LAMP_TINT', 'LAMP_TINT_ALPHA', 'LAMP_DARK', 'LAMP_DARK_ALPHA', 'LAMP_FEATHER',
@@ -6499,7 +6826,7 @@ const SHELL_KEYS = ['SCENE_SKY', 'WEATHER_2D', 'WORLD_SHAKE_MAX', 'TRAUMA_MINE',
   'PULSE_SPARKS', 'DRONE_VOL',
   // the BAG screen, the CENTRE shop and the battle BAG list (layout and strings)
   'BAG_RECT', 'BAG_ROWS', 'BAG_ROW_H', 'BAG_PICK_RECT', 'SHOP_RECT', 'SHOP_ROWS', 'SHOP_ROW_H',
-  'SHOP_MENU_RECT', 'BBAG_ROWS', 'BBAG_ROW_H', 'BBAG_SPLIT_X', 'BAG_BALL_DESC', 'BAG_MAT_DESC',
+  'SHOP_MENU_RECT', 'BBAG_ROWS', 'BBAG_ROW_H', 'BBAG_SPLIT_X', 'LIST_ICON_GAP', 'COIN_ICON_GAP', 'BAG_BALL_DESC', 'BAG_MAT_DESC',
   'BAG_MSG', 'SHOP_STOCK', 'SHOP_OFFER', 'SHOP_MAIN', 'SHOP_MSG'];
 function shellData(g) {
   const out = Object.fromEntries(SHELL_KEYS.map(k => [k, g[k]]));
@@ -6894,7 +7221,13 @@ SHELL_KEYS = ("SCENE_SKY", "WEATHER_2D", "WORLD_SHAKE_MAX", "TRAUMA_MINE", "TRAU
               "DEBRIS_BURST_HEAVY_ORE", "DEBRIS_SPEED_HEAVY", "SPARKLE_RADIUS", "SPARKLE_PERIOD",
               "SPARKLE_TIME", "GEODE_GLINT_ONE_IN", "GEODE_GLINT_PERIOD", "GEODE_GLINT_TIME",
               "GEODE_GLOW_ALPHA", "GEODE_GLOW_STEPS", "HUD_MAT_RECT", "HUD_LEAD_RECT", "MENU_W",
-              "MENU_Y", "GEODE_DOOR", "CRAFT_TIER_NAME", "HUD_CAVE_RECT", "CRAFT_ROW_H", "CRAFT_ROWS",
+              "MENU_Y", "GEODE_DOOR", "CRAFT_TIER_NAME", "HUD_CAVE_RECT",
+              # the CRAFT grid and its animation
+              "CRAFT_RECT", "CRAFT_COLS", "CRAFT_GRID_X", "CRAFT_GRID_Y", "CRAFT_SLOT", "CRAFT_GAP",
+              "CRAFT_GRID_ROWS", "CRAFT_CUE_X", "CRAFT_FLY_T", "CRAFT_POP_T", "CRAFT_POP_SCALE",
+              "CRAFT_SPARKS", "CRAFT_GLOW_T", "CRAFT_SLOT_FILL", "CRAFT_SLOT_DARK", "CRAFT_SLOT_LIGHT",
+              "CRAFT_SEL_FILL", "CRAFT_SEL_LINE", "CRAFT_OK", "CRAFT_BAD", "CRAFT_SPARK_COL",
+              "CRAFT_SPARK_EDGE", "CRAFT_SPARK_R0", "CRAFT_GLOW_COL", "CRAFT_BTN_ON", "CRAFT_BTN_OFF",
               "TREE_TRUNK", "TREE_NOTCH", "TREE_BAND", "TREE_NOTCHES",
               # the DARK CAVE look, sound and feel
               "LAMP_TINT", "LAMP_TINT_ALPHA", "LAMP_DARK", "LAMP_DARK_ALPHA", "LAMP_FEATHER",
@@ -6909,7 +7242,8 @@ SHELL_KEYS = ("SCENE_SKY", "WEATHER_2D", "WORLD_SHAKE_MAX", "TRAUMA_MINE", "TRAU
               "PULSE_SPARKS", "DRONE_VOL",
               # the BAG screen, the CENTRE shop and the battle BAG list (layout and strings)
               "BAG_RECT", "BAG_ROWS", "BAG_ROW_H", "BAG_PICK_RECT", "SHOP_RECT", "SHOP_ROWS", "SHOP_ROW_H",
-              "SHOP_MENU_RECT", "BBAG_ROWS", "BBAG_ROW_H", "BBAG_SPLIT_X", "BAG_BALL_DESC", "BAG_MAT_DESC",
+              "SHOP_MENU_RECT", "BBAG_ROWS", "BBAG_ROW_H", "BBAG_SPLIT_X", "LIST_ICON_GAP", "COIN_ICON_GAP",
+              "BAG_BALL_DESC", "BAG_MAT_DESC",
               "BAG_MSG", "SHOP_STOCK", "SHOP_OFFER", "SHOP_MAIN", "SHOP_MSG")
 
 
@@ -7039,7 +7373,7 @@ def python_seam_data():
     for e in ({"19,84": "."}, {"71,84": "."}, {"20,84": "."}, {"19,84": "W"}):
         r = mt.load_edits(e)
         glade_edits.append([["%d,%d" % k, v] for k, v in sorted(r.items(), key=lambda kv: "%d,%d" % kv[0])])
-    # Part B: axe_tier over JSON-representable junk, the can_mine matrix, craft_rows for three fixed states.
+    # Part B: axe_tier over JSON-representable junk, the can_mine matrix, craft_cells for five fixed states.
     # 1.0 is left out on purpose: JS cannot tell 1.0 from 1.
     junk = [None, True, False, 0, 1, 2, -3, "1", 1.5, [], {}]
     can_mine_matrix = []
@@ -7059,12 +7393,7 @@ def python_seam_data():
         ({"pick": 2, "axe": 1}, {"leaf": 2, "dewdrop": 1, "potion": mt.BAG_MAX, "flint": 2, "copperwire": 1},
          {"stone": 3, "ore": 1, "wall": 0}),
     ]
-    craft_rows_out = []
     cg = mt.Game()
-    for fl, bag, mats in craft_states:
-        cg.flags, cg.bag, cg.materials = dict(fl), dict(bag), dict(mats)
-        cg.balls, cg.lantern, cg.pulses = 3, 60, 1
-        craft_rows_out.append([[n, d, bool(c)] for n, d, c in mt.craft_rows(cg)])
     craft_cells_out = []
     found_states = [set(), set(), set(), {"balls", "lantern"}, {"twig"}]
     empty_state = ({"pick": 0, "axe": 0}, {}, {"stone": 0, "ore": 0, "wall": 0})
@@ -7076,16 +7405,21 @@ def python_seam_data():
     grid_move_out = [mt.grid_move(i, d, n, mt.CRAFT_COLS) for n in range(1, 16) for i in range(n)
                      for d in ("left", "right", "up", "down")]
     clean_found_out = [sorted(mt.clean_found(v)) for v in (["twig", "axe"], ["twig", 3, None, "nosuch"], None, "twig", {})]
+    # The shared line-breaking rule over a fixed fake measure (7 px per char).
+    wrap_out = [[mt.wrap_lines(s, 70, lambda t: len(t) * 7, ml) for ml in (None, 1, 2)]
+                for s in ("one two three four five six", "a  b", "supercalifragilistic word",
+                          "Stuns the stalker. Have 3/3.")]
     new_tables = json.loads(json.dumps({
         "icons": mt.ICONS, "iconPalette": mt.ICON_PALETTE, "iconShadow": mt.ICON_SHADOW,
         "iconIds": [mt.icon_id(k) for k in ["ball", "nosuch"] + sorted(mt.ICONS)],
         "craftCols": mt.CRAFT_COLS, "craftBlurb": mt.CRAFT_BLURB, "craftMsg": mt.CRAFT_MSG,
         "gridMove": grid_move_out, "cleanFound": clean_found_out, "craftCells": craft_cells_out,
+        "wrapLines": wrap_out,
     }))
     return {
         **new_tables,
         "axeMax": mt.AXE_MAX, "tree": mt.TREE, "axeTiers": [mt.axe_tier(v) for v in junk],
-        "canMineMatrix": can_mine_matrix, "craftRows": craft_rows_out,
+        "canMineMatrix": can_mine_matrix,
         "seam": mt.SEAM, "grass": list(mt.GRASS), "pickMax": mt.PICK_MAX, "geode": list(mt.GEODE),
         "backstopOre": mt.BACKSTOP_ORE, "seams": seams, "tier1Count": len(tier1),
         "deposits": [list(p) for p in mt.ORE_DEPOSITS],

@@ -15,6 +15,7 @@ What exists afterwards: the mechanic, table rows, tests, a screenshot.
 - [ ] each criterion is checkable by a test, a number or a screenshot
 - [ ] lands in BOTH MONSTER TRAIL builds (if it touches the RPG)
 - [ ] `node .claude/scripts/verify.js` is green
+- [ ] no existing assertion removed: diff each edited test file's removed lines against the backup / `git diff` (lesson: edit-anchor-drops-assertion)
 
 ## Files you own (edit only these)
 - path ... (no other agent is editing these right now)

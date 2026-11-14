@@ -19,3 +19,6 @@ combat/clips/*
 .env*
 *.pem
 *.key
+
+# Playwright MCP page snapshots (temporary browser captures)
+.playwright-mcp/*.yml

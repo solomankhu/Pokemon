@@ -6,4 +6,5 @@
 - [Node test timer granularity](node-test-timer-granularity.md) — Windows wait(5) ~15 ms: polls miss short UI steps; log textContent writes instead
 - [MT_FRAME_DIR leaks into verify](mt-frame-dir-leaks-into-verify.md) — env makes combatpy fail; dump frames via py suite only, verify without it
 - [Webcam gesture fps + clip replay](webcam-gesture-fps-and-replay.md) — clips ~13 fps: use motion.recent not per-frame zones; replay = pause-style start, never learn:all
+- [Headless icon cache priming](headless-icon-cache-priming.md) — JS suite: prime ICON_CACHE stand-ins + record drawImage to test icon x/y
 - [Webcam throw vs punch](webcam-throw-vs-punch.md) — cross punch blob path mimics a throw; wind-up+follow-through+flow separate them; retract lags 1 frame

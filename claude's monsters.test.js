@@ -1433,18 +1433,22 @@ for (const junk of ['yes', 7, -2, null]) {
     ok(g.craftRecipe(potI) && same(G.bag, { flint: 2, potion: 1 }) && G.craftMsg === 'Crafted 1 POTION.',
        'a POTION crafts into the BAG: ' + JSON.stringify(G.bag) + ' ' + G.craftMsg);
     G.bag = { leaf: 2, dewdrop: 1, potion: g.BAG_MAX };
-    ok(!g.craftRows()[potI][2], 'a full POTION stack shows the row as not craftable');
+    g.noteFound();
+    ok(g.craftCells()[potI].state === 'locked', 'a full POTION stack shows the cell as locked');
     ok(!g.craftRecipe(potI) && G.craftMsg === 'Your BAG is full of POTION.'
        && same(G.bag, { leaf: 2, dewdrop: 1, potion: g.BAG_MAX }), 'a full BAG refuses and spends nothing');
     G.bag = {};
     ok(!g.craftRecipe(potI) && G.craftMsg === 'Need 2 LEAF, 1 DEW DROP.', 'short: ' + G.craftMsg);
-    let rows = g.craftRows();
-    ok(rows.length === g.RECIPES.length + 2, 'one CRAFT row per recipe plus BUILD and BACK');
-    ok(same(rows[axeI], ['AXE', 'owned - it cuts thin trees', false]), 'owned AXE row: ' + JSON.stringify(rows[axeI]));
-    G.flags.axe = 0; G.bag = { twig: 2, flint: 1 };
-    rows = g.craftRows();
-    ok(same(rows[axeI], ['AXE', 'from 2 TWIG, 1 FLINT - cuts thin trees', true]), 'craftable AXE row');
-    ok(same(rows[potI], ['1 POTION', 'from 2 LEAF, 1 DEW DROP', false]), 'loot row uses GOODS names');
+    let cells = g.craftCells();
+    ok(cells.length === g.RECIPES.length + 1 && cells[cells.length - 1].kind === 'build',
+       'one CRAFT cell per recipe plus BUILD (no BACK row)');
+    ok(cells[axeI].state === 'owned' && cells[axeI].name === 'AXE', 'owned AXE cell: ' + JSON.stringify(cells[axeI]));
+    G.flags.axe = 0; G.bag = { twig: 2, flint: 1 }; g.noteFound();
+    cells = g.craftCells();
+    ok(cells[axeI].state === 'ready' && same(cells[axeI].needs, [['twig', 2, 2], ['flint', 1, 1]]),
+       'craftable AXE cell: ' + JSON.stringify(cells[axeI]));
+    ok(cells[potI].state === 'locked' && cells[potI].name === 'POTION'
+       && same(cells[potI].needs.map(n => g.craftLabel(n[0])), ['LEAF', 'DEW DROP']), 'loot cell uses GOODS names');
     G.bag = { leaf: 5 }; G.materials = { stone: 0, ore: 4, wall: 0 }; G.balls = 2;
     ok(g.craftRecipe(ballI) && G.balls === 3 && same(G.materials, { stone: 0, ore: 2, wall: 0 }) && same(G.bag, { leaf: 5 }),
        'a BALL still spends materials into the pouch and leaves the BAG alone');
@@ -1628,11 +1632,20 @@ for (const junk of ['yes', 7, -2, null]) {
     g.update(0.016);
     delete G.bag.twig;
     ok(G.found.has('twig'), 'update records what is held, even if it is spent before the next frame');
+    // ... even while the campaign has the RPG paused (updateBody returns early; noteFound still runs)
+    G.found.delete('twig'); G.bag.twig = 1;
+    try {
+      g.setCampaignBusy(true);
+      g.update(0.016);
+      ok(G.found.has('twig'), 'update records holdings while campaignBusy pauses the RPG');
+    } finally { g.setCampaignBusy(false); }
+    delete G.bag.twig;
     G.bag.flint = 1;
     g.saveGame(); G.found = new Set(); g.loadGame();
     ok(G.found.has('flint'), 'saveGame records holdings before writing found');
   } finally {
-    g.setCraftHook(() => {});
+    g.setCraftHook((i, before) => g.CRFX.start(i, before));   // the shipped default
+    g.CRFX.clear();
     Object.assign(G, keepC);
     for (const k of Object.keys(G)) if (!(k in snapC)) delete G[k];
     Object.assign(G, snapC);
@@ -2501,6 +2514,209 @@ section('SHELL JUICE — seam tell, GEODE glints, tier-2 break, HUD/menu layout 
               '-frame hold, menu clear of ' + Object.keys(hud).length + ' HUD panels');
 }
 
+/* ------------------------------------------------------------ SHELL: CRAFT */
+// The CRAFT grid, its detail pane and the craft animation, through the pure
+// craftView() that drawCraft draws from (mirrors the Python RENDER checks).
+section('SHELL CRAFT - grid, detail pane, craft animation, wrapLines (headless)');
+{
+  const keepS = Object.assign({}, G);
+  const keepPosS = Object.assign({}, G.player);
+  const keepSettings = Object.assign({}, G.settings);
+  const [x, y, w, h] = g.CRAFT_RECT;
+  const inRect = (r, pad) => r[0] - pad >= x && r[1] - pad >= y && r[0] + r[2] + pad <= x + w && r[1] + r[3] + pad <= y + h;
+  const ids = g.RECIPES.map(r => r.id);
+  const axeC = ids.indexOf('axe'), wallC = ids.indexOf('wall'), buildC = g.RECIPES.length;
+  const fresh = cursor => {
+    G.mode = 'craft'; G.battle = null; G.fade = 0; G.fadeDir = 0; G.dialogue = null;
+    G.flags = Object.assign({}, G.flags, { pick: 0, axe: 0 });
+    G.materials = { stone: 0, ore: 0, wall: 0 }; G.bag = {}; G.balls = 0; G.lantern = 100; G.pulses = 0;
+    G.found = new Set(['balls', 'lantern']); G.craftCursor = cursor; G.craftMsg = ''; G.building = false;
+    g.CRFX.clear();
+  };
+  const tap = k => { g.press(k); g.release(k); };
+  const axeReady = () => { fresh(axeC); G.bag = { twig: 2, flint: 1 }; g.noteFound(); };
+  const realRandom = Math.random;
+  let draws = 0;
+  try {
+    // -- layout: every cell (with its 3 px outline) inside CRAFT_RECT, none overlapping, sel = cursor --
+    fresh(3);
+    let v = g.craftView();
+    ok(v.cells.length === g.RECIPES.length + 1 && v.top === 0 && !v.cueUp && !v.cueDown,
+       'the shipped ' + v.cells.length + '-cell grid shows every cell and never scrolls');
+    ok(v.cells.every(c => inRect([c.x, c.y, c.w, c.h], 4)), 'every CRAFT cell and outline sits inside CRAFT_RECT');
+    ok(v.cells.every((a, i) => v.cells.slice(i + 1).every(b => a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y)),
+       'no two CRAFT cells overlap');
+    ok(v.cells.filter(c => c.sel).map(c => c.k).join() === '3', 'sel marks exactly the cursor cell');
+    ok(v.cells.every(c => c.x + c.w + 4 < x + 298) && v.cueX + 5 < x + 298 && v.cueX - 5 > x + g.CRAFT_GRID_X + 4 * (g.CRAFT_SLOT + g.CRAFT_GAP) + g.CRAFT_SLOT + 3,
+       'the grid, its outline and the scroll cue column end left of the detail divider');
+    ok(v.cells[0].k === 0 && v.cells[0].x === x + g.CRAFT_GRID_X && v.cells[0].y === y + g.CRAFT_GRID_Y &&
+       v.cells[6].x === x + g.CRAFT_GRID_X + (g.CRAFT_SLOT + g.CRAFT_GAP) && v.cells[6].y === y + g.CRAFT_GRID_Y + g.CRAFT_SLOT + g.CRAFT_GAP,
+       'cells sit on the CRAFT_GRID_X/Y + CRAFT_SLOT/GAP lattice');
+    // a hidden cell reveals neither its name nor its needs
+    fresh(axeC);
+    v = g.craftView();
+    ok(v.cells[axeC].state === 'hidden' && v.detail.name === '???' && v.detail.hidden &&
+       v.detail.needs.length === 2 && v.detail.needs.every(n => n.name === '' && n.have === '?' && n.n === '?'),
+       'a hidden cell shows ???, no need names and ? counts');
+    ok(!v.detail.enabled && v.detail.button === 'Z: CRAFT', 'a hidden cell greys its button');
+    fresh(buildC);
+    v = g.craftView();
+    ok(v.detail.button === 'Z: BUILD' && !v.detail.enabled && v.detail.needs[0].ok === false, 'BUILD with no WALL: greyed Z: BUILD');
+    v.detail.needs.forEach(n => ok(inRect(n.slot, 0) && n.slot[1] + n.slot[3] <= y + h - 34, 'need slot inside the pane'));
+
+    // -- Z on cells, through press() like a real key --
+    fresh(axeC);
+    const hold = JSON.stringify([G.bag, G.materials, G.balls, G.flags]);
+    tap('z');
+    ok(G.mode === 'craft' && G.craftMsg === g.CRAFT_MSG.hidden && JSON.stringify([G.bag, G.materials, G.balls, G.flags]) === hold
+       && !g.CRFX.active(), 'Z on a hidden cell crafts nothing and says ' + G.craftMsg);
+    fresh(buildC);
+    tap('z');
+    ok(G.mode === 'craft' && !G.building && G.craftMsg === g.CRAFT_MSG.nowall, 'Z on BUILD with no WALLs stays in CRAFT');
+    G.materials.wall = 1;
+    tap('z');
+    ok(G.mode === 'overworld' && G.building, 'Z on BUILD with a WALL enters build mode');
+    G.building = false;
+    fresh(0);
+    tap('x');
+    ok(G.mode === 'overworld', 'X closes CRAFT');
+    // the cursor clamps, never wraps
+    fresh(0);
+    tap('arrowleft'); tap('arrowup');
+    ok(G.craftCursor === 0, 'the CRAFT cursor clamps at the top-left');
+    for (let i = 0; i < 9; i++) tap('arrowright');
+    ok(G.craftCursor === g.CRAFT_COLS - 1, 'right stops at the end of the row');
+    for (let i = 0; i < 9; i++) tap('arrowdown');
+    ok(G.craftCursor === g.RECIPES.length, 'down clamps at the last cell');
+
+    // -- a real AXE craft: one 'craft' ding, CRFX from fxRand, never Math.random --
+    axeReady();
+    const played = [];
+    const realCraft = g.SFX.craft, realLevel = g.SFX.level;
+    g.SFX.craft = () => played.push('craft'); g.SFX.level = () => played.push('level');
+    Math.random = () => { draws++; return realRandom(); };
+    try { tap('z'); } finally { g.SFX.craft = realCraft; g.SFX.level = realLevel; }
+    ok(G.flags.axe === 1 && same(played, ['craft']), "a craft plays one 'craft' ding, not 'level': " + played);
+    ok(g.CRFX.active() && g.CRFX.recipe === axeC && same(g.CRFX.before, { twig: 2, flint: 1 }) &&
+       g.CRFX.sparks.length === g.CRAFT_SPARKS, 'the craft hook starts CRFX with the before counts and its sparks');
+    const frames = {};
+    for (const t of [0, 0.15, 0.3, 0.425, 0.5]) {
+      if (g.CRFX.active() && t > g.CRFX.t) g.CRFX.update(t - g.CRFX.t);
+      frames[t] = { active: g.CRFX.active(), v: g.craftView() };
+    }
+    ok(Object.values(frames).every(f => f.active), 'the animation is still running at t = 0.5');
+    g.CRFX.update(g.CRAFT_FLY_T + g.CRAFT_POP_T - g.CRFX.t + 1e-9);
+    ok(!g.CRFX.active(), 'the animation ends at CRAFT_FLY_T + CRAFT_POP_T');
+    const fly = frames[0.15].v.anim, pop = frames[0.425].v.anim;
+    ok(!fly.showIcon && fly.ghosts.length === 2 && fly.sparks.length === 0 && !fly.glow,
+       'flying: the result slot is empty and two ghosts fly');
+    ok(frames[0.15].v.detail.needs.every(n => n.ok && n.have === n.n), 'flying: the need rows show the before counts');
+    ok(fly.ghosts.every(gh => gh.x > frames[0].v.anim.ghosts[0].x - 1 && gh.x <= x + 390), 'the ghosts move toward the result');
+    ok(pop.showIcon && pop.glow && pop.scale > 1 && pop.scale <= g.CRAFT_POP_SCALE && pop.sparks.length === g.CRAFT_SPARKS,
+       'popping: the result scales up over the glow with ' + pop.sparks.length + ' sparks');
+    ok(frames[0.425].v.detail.needs.every(n => !n.ok && n.have === 0), 'from the pop on, the live counts show');
+    ok(Object.values(frames).every(f => f.v.anim.sparks.every(([sx, sy]) => inRect([sx, sy, 4, 4], 0)) &&
+       f.v.anim.ghosts.every(gh => inRect([gh.x - 8, gh.y - 8, 16, 16], 0)) &&
+       inRect([f.v.anim.res[0] + 30 - f.v.anim.side / 2, f.v.anim.res[1] + 30 - f.v.anim.side / 2, f.v.anim.side, f.v.anim.side], 0)),
+       'every animation frame stays inside CRAFT_RECT');
+    const settled = g.craftView().anim;
+    ok(settled.showIcon && settled.scale === 1 && settled.side === 48 && !settled.glow && !settled.sparks.length,
+       'settled: the result at exactly 3x');
+    // a key during the fly skips to the end and is still handled
+    axeReady();
+    tap('z');
+    g.CRFX.update(0.1);
+    ok(g.CRFX.flying(), 'a second craft is mid-fly');
+    G.flags.axe = 1;
+    tap('z');
+    ok(!g.CRFX.active() && G.craftMsg === 'You already have the AXE.', 'Z mid-fly skips the animation and is handled: ' + G.craftMsg);
+    // leaving CRAFT clears it on the next frame
+    axeReady();
+    tap('z');
+    G.mode = 'overworld';
+    g.updateCaveFx(1 / 60);
+    ok(!g.CRFX.active(), 'the first frame outside CRAFT clears CRFX');
+    ok(draws === 0, 'the craft and CRFX never call Math.random (' + draws + ')');
+    Math.random = realRandom;
+
+    // -- reduced motion through the in-game setting (not the OS const alone) --
+    G.settings.reducedMotion = true;
+    axeReady();
+    tap('z');
+    v = g.craftView();
+    ok(g.crfxCalm() && g.CRFX.active() && g.CRFX.sparks.length === 0 && !g.CRFX.flying() && g.CRFX.total() === g.CRAFT_GLOW_T,
+       'reduced motion: no sparks, no fly, a ' + g.CRAFT_GLOW_T + ' s glow');
+    ok(v.anim.glow && v.anim.showIcon && v.anim.scale === 1 && v.anim.side === 48 && !v.anim.ghosts.length,
+       'reduced motion: the glow and the icon at exactly 3x, no ghosts');
+    g.CRFX.update(g.CRAFT_GLOW_T);
+    ok(!g.CRFX.active(), 'the glow ends after CRAFT_GLOW_T');
+    G.settings.reducedMotion = false;
+
+    // -- a synthetic 23-cell grid scrolls by rows --
+    fresh(0);
+    const base = g.craftCells();
+    const many = Array.from({ length: 23 }, (_, k) => Object.assign({}, base[k % base.length]));
+    const rowsN = Math.ceil(23 / g.CRAFT_COLS);
+    let scrollOk = true, sawUp = false, sawDn = false;
+    for (let cur = 0; cur < 23; cur++) {
+      G.craftCursor = cur;
+      const sv = g.craftView(many);
+      const want = g.listTop(rowsN, Math.floor(cur / g.CRAFT_COLS), g.CRAFT_GRID_ROWS);
+      const sel = sv.cells.find(c => c.sel);
+      if (sv.top !== want || !sel || sel.k !== cur || sv.cueUp !== (want > 0) || sv.cueDown !== (want + g.CRAFT_GRID_ROWS < rowsN)
+          || !sv.cells.every(c => inRect([c.x, c.y, c.w, c.h], 4))) scrollOk = false;
+      sawUp = sawUp || sv.cueUp; sawDn = sawDn || sv.cueDown;
+    }
+    ok(scrollOk && sawUp && sawDn, 'a 23-cell grid scrolls by rows, keeps the cursor cell on screen and shows both cues');
+
+    // -- drawCraft through a recording context: draws, and every string sits inside CRAFT_RECT --
+    let texts = [];
+    const sizeOf = f => +((/(\d+)px/.exec(f) || [0, 14])[1]);
+    const base2 = {
+      font: '14px x', textAlign: 'left', textBaseline: 'alphabetic', fillStyle: '', strokeStyle: '', lineWidth: 1,
+      imageSmoothingEnabled: true,
+      measureText(s) { return { width: String(s).length * sizeOf(this.font) * 0.6 }; },
+      fillText(s, tx, ty) {
+        const px = sizeOf(this.font), tw = String(s).length * px * 0.6;
+        const x0 = this.textAlign === 'right' ? tx - tw : this.textAlign === 'center' ? tx - tw / 2 : tx;
+        texts.push({ s: String(s), x0, x1: x0 + tw, top: ty - px * 0.8, bottom: ty + px * 0.25 });
+      },
+    };
+    const stub = new Proxy(base2, { get: (t, k) => (k in t ? t[k] : () => {}), set: (t, k, val) => { t[k] = val; return true; } });
+    const drawn = () => { texts = []; g.withCtx(stub, () => g.drawCraft()); return texts; };
+    const states = [['fresh', () => fresh(0)], ['axe-ready', axeReady], ['hidden', () => fresh(axeC)],
+                    ['mid-pop', () => { axeReady(); tap('z'); g.CRFX.update(0.425); G.craftMsg = 'Crafted the AXE. Thin trees give way now.'; }]];
+    for (const [tag, set] of states) {
+      set();
+      const ts = drawn();
+      const out = ts.filter(t => !(t.x0 >= x + 4 && t.x1 <= x + w - 4 && t.top >= y + 4 && t.bottom <= y + h - 4));
+      ok(ts.length >= 8 && !out.length, 'drawCraft ' + tag + ': ' + ts.length + ' strings inside CRAFT_RECT' +
+         (out.length ? ' (outside: ' + out.map(t => t.s).join(' | ') + ')' : ''));
+    }
+    g.CRFX.clear();
+
+    // -- wrapLines: the pure rule PARITY compares --
+    const m7 = t => t.length * 7;
+    const six = 'one two three four five six';
+    ok(same(g.wrapLines(six, 70, m7), ['one two', 'three four', 'five six']), 'wrapLines breaks greedily');
+    ok(same(g.wrapLines(six, 70, m7, 2), ['one two', 'three f...']) && same(g.wrapLines(six, 70, m7, 1), ['one two...']),
+       'wrapLines cuts at maxLines with a fitting ...');
+    ok(same(g.wrapLines(six, 70, m7, 3), g.wrapLines(six, 70, m7)), 'a limit that is not reached changes nothing');
+    ok(same(g.wrapLines('', 70, m7), []) && same(g.wrapLines('a  b', 70, m7), ['a b']),
+       'wrapLines: an empty string draws nothing; double spaces collapse like the pygame .strip()');
+  } finally {
+    Math.random = realRandom;
+    g.CRFX.clear();
+    for (const k of Object.keys(G)) if (!(k in keepS)) delete G[k];
+    Object.assign(G, keepS);
+    Object.assign(G.player, keepPosS);
+    Object.assign(G.settings, keepSettings);
+    for (const k of Object.keys(keepSettings)) G.settings[k] = keepSettings[k];
+  }
+  console.log('  craft: ' + (g.RECIPES.length + 1) + ' cells, ' + g.CRAFT_SPARKS + ' sparks, ' +
+              (g.CRAFT_FLY_T + g.CRAFT_POP_T).toFixed(2) + ' s animation, reduced motion ' + g.CRAFT_GLOW_T + ' s glow');
+}
+
 /* --------------------------------------------- SHELL: BAG, SHOP, BATTLE BAG */
 // The overworld BAG, the party picker, the CENTRE shop at every H door and the
 // polished battle BAG list: the same input flows the Python RENDER pass drives,
@@ -2523,8 +2739,62 @@ section('SHELL BAG/SHOP - BAG screen, party picker, CENTRE shop, battle BAG list
     createRadialGradient() { return { addColorStop() {} }; },
     getImageData() { return { data: new Uint8ClampedArray(4) }; }
   };
+  // Chunk 5: list and COINS icons. Headless iconCanvas has no canvas to build, so
+  // prime the 1x cache with tagged stand-ins and record every drawImage blit
+  // (with the index of the next string drawn: the row's name). The stand-ins live
+  // only for one recorded draw: draw() unprimes them in a finally, even on a throw.
+  let imgs = [];
+  base.drawImage = (cv, x, y, w, h) => { imgs.push({ id: cv.iconId, x, y, w, h, ti: texts.length }); };
   const stub = new Proxy(base, { get: (t, k) => (k in t ? t[k] : () => {}), set: (t, k, v) => { t[k] = v; return true; } });
-  const draw = fn => { texts = []; g.withCtx(stub, fn); return texts; };
+  const draw = fn => {
+    texts = []; imgs = [];
+    const primed = [];
+    try {
+      for (const id of Object.keys(g.ICONS)) {
+        const key = id + '|1|normal';
+        if (!g.ICON_CACHE.has(key)) { g.ICON_CACHE.set(key, { iconId: id }); primed.push(key); }
+      }
+      g.withCtx(stub, fn);
+    } finally {
+      for (const key of primed) g.ICON_CACHE.delete(key);
+    }
+    return texts;
+  };
+  const rowRects = (x0, y0, w0, rh, n) => Array.from({ length: n }, (_, j) => [x0, y0 + j * rh, w0, rh - 2]);
+  const within = (m, [x, y, w, h]) => m.x >= x && m.y >= y && m.x + m.w <= x + w && m.y + m.h <= y + h;
+  // Every row icon is 16x16 inside a row rect; the name starts at its right edge + 4 px
+  // or later, about level with it; the next string on the row starts 4 px past the
+  // name. With coinsIn, exactly one COINS icon lies inside it, its text 4+ px right.
+  const iconsOk = (tag, rects, want, coinsIn) => {
+    const got = imgs.filter(m => m.id !== 'coins'), bad = [];
+    for (const m of got) {
+      const nm = texts[m.ti], after = texts[m.ti + 1];
+      if (!nm || !rects.some(r => within(m, r)) || m.w !== 16 || m.h !== 16 || nm.x0 < m.x + m.w + 4
+          || Math.abs((nm.top + nm.bottom) / 2 - (m.y + 8)) > 3
+          || (after && after.top < nm.bottom && after.x0 < nm.x1 + 4)) bad.push(m.id + '@' + m.x + ',' + m.y + (nm ? ' ' + nm.s : ''));
+    }
+    ok(got.length === want && !bad.length, tag + ': ' + got.length + ' row icons (want ' + want + '), inside their rows, name 4+ px right'
+       + (bad.length ? ' (bad: ' + bad.slice(0, 3).join(' | ') + ')' : ''));
+    if (coinsIn) {
+      const cs = imgs.filter(m => m.id === 'coins'), [cx, cy, cw, ch] = coinsIn;
+      const good = cs.filter(m => within(m, [cx + 4, cy + 4, cw - 8, ch - 8]) && texts[m.ti] && texts[m.ti].s.startsWith('COINS ')
+        && texts[m.ti].x0 >= m.x + 16 + 4 && texts[m.ti].x0 - m.x === g.COIN_ICON_GAP
+        && Math.abs((texts[m.ti].top + texts[m.ti].bottom) / 2 - (m.y + 8)) <= 3);
+      ok(cs.length === 1 && good.length === 1, tag + ': the COINS icon sits inside ' + coinsIn + ', its text COIN_ICON_GAP right');
+    }
+    return got.map(m => m.id);
+  };
+  const bagWindow = () => {
+    const rows = g.bagRows(G.balls, G.bag, G.materials), ent = g.bagEntries(rows);
+    const top = g.listTop(rows.length, ent[Math.max(0, Math.min(G.bagCursor, ent.length - 1))], g.BAG_ROWS);
+    const win = rows.slice(top, top + g.BAG_ROWS).map(r => r[0]).filter(k => k === 'item' || k === 'mat' || k === 'loot');
+    return [win.length, win];
+  };
+  const bagRowRects = rowRects(g.BAG_RECT[0] + 16, g.BAG_RECT[1] + 56, g.BAG_RECT[2] - 32, g.BAG_ROW_H, g.BAG_ROWS);
+  const shopRowRects = rowRects(g.SHOP_RECT[0] + 16, g.SHOP_RECT[1] + 56, g.SHOP_RECT[2] - 32, g.SHOP_ROW_H, g.SHOP_ROWS);
+  const bbagRowRects = rowRects(28, 480 - 94 - 3, g.BBAG_SPLIT_X - 40, g.BBAG_ROW_H, g.BBAG_ROWS);
+  const kindsSeen = new Set();
+  const bagIcons = tag => { const [n, kinds] = bagWindow(); kinds.forEach(k => kindsSeen.add(k)); return iconsOk(tag, bagRowRects, n, g.BAG_RECT); };
   const inside = (ts, [x, y, w, h], pad) => ts.filter(t => !(t.x0 >= x + pad && t.x1 <= x + w - pad && t.top >= y + pad && t.bottom <= y + h - pad));
   const boxed = (tag, ts, rect, need) => {
     const out = inside(ts, rect, 4);
@@ -2566,6 +2836,7 @@ section('SHELL BAG/SHOP - BAG screen, party picker, CENTRE shop, battle BAG list
   g.confirmKey();
   ok(G.mode === 'bag' && G.bagCursor === 0 && !G.toast, 'MENU -> BAG opens the BAG screen');
   let s = boxed('BAG (empty)', draw(g.drawBag), g.BAG_RECT, 8);
+  bagIcons('BAG (empty) icons');
   ok(s.includes('COINS 100') && s.filter(t => t === '(none)').length === 2, 'the empty BAG shows COINS and (none) twice');
   g.confirmKey();
   ok(G.mode === 'bag' && !G.bagPick, 'confirm on a material is read-only');
@@ -2575,11 +2846,14 @@ section('SHELL BAG/SHOP - BAG screen, party picker, CENTRE shop, battle BAG list
   G.bag = {}; for (const k of Object.keys(g.GOODS)) G.bag[k] = g.BAG_MAX;
   g.openBag();
   s = boxed('BAG (full)', draw(g.drawBag), g.BAG_RECT, 10);
+  ok(bagIcons('BAG (full) icons').includes('balls'), 'the BAG BALL row draws the balls icon (iconId maps ball -> balls)');
   ok(s.includes('COINS ' + g.COINS_MAX) && s.includes('x' + g.BAG_MAX), 'the full BAG shows 99999 coins and x999');
   const nEnt = g.bagEntries(g.bagRows(G.balls, G.bag, G.materials)).length;
   for (let i = 0; i < nEnt + 3; i++) g.moveCursor(0, 1);
   ok(G.bagCursor === nEnt - 1, 'the BAG cursor clamps at the last row');
   s = boxed('BAG (scrolled)', draw(g.drawBag), g.BAG_RECT, 8);
+  bagIcons('BAG (scrolled) icons');
+  ok(same([...kindsSeen].sort(), ['item', 'loot', 'mat']), 'BAG icons were checked on item, mat and loot rows');
   ok(s.includes('SHADOW SILK') && !s.includes('BALL') && s.join(' ').includes(g.GOODS.shadowsilk.desc),
      'scrolled to the end: the last loot and its description show, BALL has scrolled off');
 
@@ -2622,15 +2896,29 @@ section('SHELL BAG/SHOP - BAG screen, party picker, CENTRE shop, battle BAG list
   const [mx, my, mw] = g.SHOP_MENU_RECT;
   s = boxed('SHOP / LEAVE', draw(g.drawShop), [mx, my, mw, 42 + 26 * 2 + 8], 3);
   ok(same(s.slice(1), g.SHOP_OFFER), 'the offer menu lists SHOP and LEAVE');
+  iconsOk('SHOP / LEAVE icons', [], 0, [mx, my, mw, 42 + 26 * 2 + 8]);
   g.moveCursor(0, 1); g.confirmKey();
   ok(G.mode === 'overworld' && G.shop === null, 'LEAVE closes the shop');
   g.openShop(); g.confirmKey();
   s = boxed('BUY / SELL / BACK', draw(g.drawShop), [mx, my, mw, 42 + 26 * 3 + 8], 4);
   ok(same(s.slice(1), g.SHOP_MAIN), 'SHOP opens BUY / SELL / BACK');
+  iconsOk('BUY / SELL / BACK icons', [], 0, [mx, my, mw, 42 + 26 * 3 + 8]);
   G.coins = 1000; G.balls = 5; G.bag = {};
   g.confirmKey();
   ok(G.shop.page === 'buy', 'BUY opens the buy list');
   s = boxed('BUY', draw(g.drawShop), g.SHOP_RECT, 15);
+  iconsOk('BUY icons', shopRowRects, Math.min(g.SHOP_ROWS, g.SHOP_STOCK.length), g.SHOP_RECT);
+  {
+    // Worst case (stub widths, 0.6 em): the widest "N each" (13 px, right edge x+262)
+    // against "have 999" (11 px, right edge x+SHOP_HAVE_DX), and that against the
+    // widest "< 10 >" (15 px, centred on x+374).
+    const eachEnd = 262, widestEach = Math.max(...g.shopRows('buy', {}).map(r => (r[2] + ' each').length));
+    const haveLeft = g.SHOP_HAVE_DX - ('have ' + g.BAG_MAX).length * 11 * 0.6;
+    const qtyLeft = 374 - ('< ' + g.SHOP_QTY_MAX + ' >').length * 15 * 0.6 / 2;
+    ok(eachEnd - widestEach * 13 * 0.6 > 0 && eachEnd + 4 <= haveLeft && g.SHOP_HAVE_DX + 4 <= qtyLeft,
+       'BUY: "each" ends 4+ px before "have ' + g.BAG_MAX + '" (gap ' + (haveLeft - eachEnd).toFixed(1)
+       + ' px), and "have" ends 4+ px before the quantity');
+  }
   ok(g.SHOP_STOCK.every(k => s.includes(g.bagName(k))) && s.includes(g.BALL_PRICE + ' each'), 'BUY lists the stock with prices');
   for (let i = 0; i < 13; i++) g.moveCursor(1, 0);
   ok(G.shop.qty === g.SHOP_QTY_MAX, 'RIGHT raises the quantity to SHOP_QTY_MAX and stops');
@@ -2655,6 +2943,7 @@ section('SHELL BAG/SHOP - BAG screen, party picker, CENTRE shop, battle BAG list
   g.moveCursor(0, 1); g.confirmKey();
   ok(G.shop.page === 'sell', 'SELL opens the sell list');
   s = boxed('SELL', draw(g.drawShop), g.SHOP_RECT, 10);
+  iconsOk('SELL icons', shopRowRects, g.shopRows('sell', G.bag).length, g.SHOP_RECT);
   ok(s.includes('TWIG') && s.includes('PEARL') && !s.includes('POTION'), 'SELL lists owned loot only');
   for (let i = 0; i < 13; i++) g.moveCursor(1, 0);
   ok(G.shop.qty === g.SHOP_QTY_MAX, 'selling TWIG (12 owned) caps the quantity at 10');
@@ -2665,6 +2954,7 @@ section('SHELL BAG/SHOP - BAG screen, party picker, CENTRE shop, battle BAG list
   g.confirmKey(); g.moveCursor(0, -1); g.moveCursor(1, 0); g.confirmKey();
   ok(same(G.bag, { potion: 3 }) && G.shop.msg.endsWith(g.SHOP_MSG.empty), 'selling the last loot says there is nothing left to sell');
   s = boxed('SELL (empty)', draw(g.drawShop), g.SHOP_RECT, 3);
+  iconsOk('SELL (empty) icons', shopRowRects, 0, g.SHOP_RECT);
   ok(s.includes(g.SHOP_MSG.empty), 'an empty SELL list says so');
   G.coins = g.COINS_MAX - 5; G.bag = { relicshard: 1 }; g.confirmKey();
   ok(same(G.bag, { relicshard: 1 }) && G.coins === g.COINS_MAX - 5 && G.shop.msg === g.SHOP_MSG.purse, 'a sale past COINS_MAX is refused');
@@ -2697,7 +2987,13 @@ section('SHELL BAG/SHOP - BAG screen, party picker, CENTRE shop, battle BAG list
     const low = draw(g.drawBattle).filter(t => t.top >= 480 - 118);
     boxed('battle BAG (cursor ' + cur + ')', low, panel, 7);
     ok(low.some(t => t.s === g.bagName(g.battleBagItems()[cur])), 'the selected item is listed');
+    imgs = imgs.filter(m => m.y >= 480 - 118);
+    iconsOk('battle BAG (cursor ' + cur + ') icons', bbagRowRects, Math.min(g.BBAG_ROWS, g.battleBagItems().length));
   }
+  // The longest real battle BAG name, after its icon, still ends 4+ px left of x999 (stub widths: 0.6 em).
+  const longest = Math.max(...['ball', ...g.BATTLE_BAG].map(k => g.bagName(k).length)) * 13 * 0.6;
+  ok(50 + g.LIST_ICON_GAP + longest + 4 <= g.BBAG_SPLIT_X - 30 - ('x' + g.BAG_MAX).length * 13 * 0.6,
+     'battle BAG: the longest name plus its count end left of BBAG_SPLIT_X');
   g.cancelKey();
   ok(b.phase === 'menu', 'cancel closes the battle BAG');
   // A POTION queues a 'heal' action (actor mine) from inside its first step: glow, then the message.
@@ -3074,21 +3370,22 @@ section('CAVE — lantern, tension, the GLOOMSTALK\'s hunt, the PULSE (DARK CAVE
   ok(![[8, 8, 150, 30], g.HUD_LEAD_RECT, g.HUD_MAT_RECT, menuR].some(r => hitR(r, g.HUD_CAVE_RECT)),
      'the cave HUD overlaps no other HUD panel or the menu');
   const [cx0, cy0, , ch0] = g.CRAFT_RECT;
-  const visBottom = cy0 + 92 + (g.CRAFT_ROWS - 1) * g.CRAFT_ROW_H - 6 + g.CRAFT_ROW_H - 2;
+  const pitchC = g.CRAFT_SLOT + g.CRAFT_GAP;
+  const visBottom = cy0 + g.CRAFT_GRID_Y + (g.CRAFT_GRID_ROWS - 1) * pitchC + g.CRAFT_SLOT + 4;   // + outline
   ok(visBottom <= cy0 + ch0 - 34,
-     'the ' + g.CRAFT_ROWS + ' visible CRAFT rows end above the message line (' + visBottom + ' <= ' + (cy0 + ch0 - 34) + ')');
-  ok(g.craftRows().length === g.RECIPES.length + 2, 'CRAFT lists every recipe, then BUILD and BACK');
+     'the ' + g.CRAFT_GRID_ROWS + ' visible CRAFT grid rows end above the message line (' + visBottom + ' <= ' + (cy0 + ch0 - 34) + ')');
+  ok(g.craftCells().length === g.RECIPES.length + 1, 'CRAFT has one cell per recipe, then BUILD');
   let craftWinOk = true;
   for (let n = 1; n < 16; n++) {
     for (let cur = 0; cur < n; cur++) {
-      const top = g.listTop(n, cur, g.CRAFT_ROWS);
-      if (!(top <= cur && cur < top + g.CRAFT_ROWS && top >= 0 && top <= Math.max(0, n - g.CRAFT_ROWS))) {
+      const top = g.listTop(n, cur, g.CRAFT_GRID_ROWS);
+      if (!(top <= cur && cur < top + g.CRAFT_GRID_ROWS && top >= 0 && top <= Math.max(0, n - g.CRAFT_GRID_ROWS))) {
         craftWinOk = false;
-        ok(false, 'CRAFT window keeps cursor ' + cur + ' of ' + n + ' visible (top ' + top + ')');
+        ok(false, 'CRAFT window keeps row ' + cur + ' of ' + n + ' visible (top ' + top + ')');
       }
     }
   }
-  ok(craftWinOk, 'the CRAFT window keeps the cursor visible for every list of 1..15 rows');
+  ok(craftWinOk, 'the CRAFT grid window keeps the cursor row visible for 1..15 rows');
   g.setScareCalm(null);
   caveGame(43, 107);
   G.mode = 'overworld';

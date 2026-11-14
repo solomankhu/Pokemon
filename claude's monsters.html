@@ -3295,33 +3295,6 @@ function gridMove(i, d, n, cols) {
   return i;
 }
 
-function craftRows() {
-  const tier = pickTier(G.flags.pick);
-  const axe = axeTier(G.flags.axe);
-  const m = G.materials;
-  const have = craftHave();
-  const rows = RECIPES.map(r => {
-    const need = Object.keys(r.needs).map(k => r.needs[k] + ' ' + craftLabel(k)).join(', ');
-    const can = craft(have, r, tier, axe) !== null && bagRoom(r);
-    if (r.setsTier) {
-      const owned = tier >= r.setsTier;
-      return [craftLabel(r.out), owned ? 'owned - it cracks seams' : 'from ' + need + ' - cracks seams',
-              !owned && can];
-    }
-    if (r.setsTool) {
-      const owned = axe >= r.setsTool[1];
-      return [craftLabel(r.out), owned ? 'owned - it cuts thin trees' : 'from ' + need + ' - cuts thin trees',
-              !owned && can];
-    }
-    if (r.out === 'lantern') return [craftLabel('lantern'), 'from ' + need + ' - lamp ' + G.lantern + '%', can];
-    if ('cap' in r) return [r.count + ' ' + craftLabel(r.out), 'from ' + need + ' - have ' + have[r.out] + '/' + r.cap, can];
-    return [r.count + ' ' + craftLabel(r.out), 'from ' + need, can];
-  });
-  rows.push(['BUILD WALLS', 'place WALLs in ROCKY PASS', m.wall > 0]);
-  rows.push(['BACK', '', true]);
-  return rows;
-}
-
 // The overworld BAG screen and the CENTRE shop. Pure list builders (the shell
 // only draws them) and their strings, compared across builds by PARITY.
 const BAG_BALL_DESC = 'A plain BALL for catching wild monsters. The CENTRE shop sells more.';
@@ -3539,7 +3512,7 @@ function craftRecipe(i) {
   const bag = {};
   for (const k of Object.keys(after)) if (after[k] > 0) bag[k] = after[k];
   G.bag = bag;
-  sfx('level');
+  sfx('craft');
   if (r.out === 'lantern') G.craftMsg = 'Lantern refilled to ' + G.lantern + '%.';
   else if (r.setsTier) {
     G.flags.pick = r.setsTier;
@@ -3839,9 +3812,31 @@ function juiceHit(b, side, eff, crit, type) {
   spawnBurst(at[0], at[1], n, TYPE_COLOR[type] || '#ffffff');
 }
 
-// A successful craft: (recipe index, {need: have before spending}). Cosmetic only;
-// Chunk 4 points the default at CRFX.start. Tests swap it through setCraftHook.
-let craftHook = (i, before) => {};
+/* The craft animation (spec 2.2): ingredients fly into the result slot, the
+   result pops and sparkles. Shell-only: started by juiceCraft, advanced by
+   updateCaveFx while G.mode is 'craft', cleared on any other frame. Never
+   reads or writes game state; its only randomness is fxRand. Mirrors the
+   pygame CraftFx. Reduced motion is the in-game setting OR the OS flag. */
+function crfxCalm() { return !!((G.settings && G.settings.reducedMotion) || REDUCED_MOTION); }
+const CRFX = {
+  t: null, recipe: null, before: {}, sparks: [],
+  start(i, before) {
+    CRFX.t = 0; CRFX.recipe = i; CRFX.before = Object.assign({}, before);
+    CRFX.sparks = [];
+    if (!crfxCalm()) for (let k = 0; k < CRAFT_SPARKS; k++) CRFX.sparks.push([fxRand() * 6.2832, 28 + fxRand() * 8]);
+    // no sound here: craftRecipe plays 'craft' itself
+  },
+  total() { return crfxCalm() ? CRAFT_GLOW_T : CRAFT_FLY_T + CRAFT_POP_T; },
+  active() { return CRFX.t !== null; },
+  flying() { return CRFX.t !== null && !crfxCalm() && CRFX.t < CRAFT_FLY_T; },
+  update(dt) { if (CRFX.t !== null) { CRFX.t += dt; if (CRFX.t >= CRFX.total()) CRFX.clear(); } },
+  skip() { CRFX.clear(); },
+  clear() { CRFX.t = null; CRFX.recipe = null; CRFX.before = {}; CRFX.sparks = []; },
+};
+
+// A successful craft: (recipe index, {need: have before spending}). Cosmetic only.
+// Tests swap it through setCraftHook.
+let craftHook = (i, before) => CRFX.start(i, before);
 function juiceCraft(i, before) { craftHook(i, before); }
 
 // The hunt's reveal: one decaying white flash plus a shake. With reduced
@@ -3964,10 +3959,28 @@ const TREE_NOTCHES = [12, 19, 26];   // tile-y of each notch (a wedge across the
 const DUST_COL = '#c4baa6';
 const FLOAT_COL = { stone: '#dccea9', ore: ORE_GLINT };
 const CRAFT_RECT = [70, 74, W - 140, 340];  // below the HUD (ends y=66), above the toast (y=420)
-const CRAFT_ROW_H = 30;                     // row pitch of the CRAFT list
-const CRAFT_ROWS = 7;                       // visible CRAFT rows; longer lists scroll (cues like the BAG)
-                                            // and the 7th row still ends above the message line
 const CRAFT_TIER_NAME = ['NONE', 'PICK', 'IRON PICK'];
+// The CRAFT recipe-book grid and its animation (same names and values in the pygame build).
+const CRAFT_GRID_X = 18, CRAFT_GRID_Y = 56;   // grid origin, panel-relative
+const CRAFT_SLOT = 48, CRAFT_GAP = 6;         // cell size and spacing
+const CRAFT_GRID_ROWS = 4;                    // visible grid rows; more scroll
+const CRAFT_CUE_X = CRAFT_GRID_X + CRAFT_COLS * (CRAFT_SLOT + CRAFT_GAP) + 4;  // scroll cues: clear of the
+                                              // last column's outline (+4) and of the divider (x+298)
+const CRAFT_FLY_T = 0.30, CRAFT_POP_T = 0.25, CRAFT_POP_SCALE = 1.35;  // s, s, peak scale of the pop
+const CRAFT_SPARKS = 8, CRAFT_GLOW_T = 0.2;   // sparkles per craft; reduced-motion glow (s)
+const CRAFT_SLOT_FILL = [201, 195, 176];      // bevelled slot: fill, dark top-left, light bottom-right
+const CRAFT_SLOT_DARK = [125, 118, 99];
+const CRAFT_SLOT_LIGHT = [255, 251, 233];
+const CRAFT_SEL_FILL = [233, 223, 184];       // the selected cell's light fill ...
+const CRAFT_SEL_LINE = [255, 204, 51];        // ... and its 3 px outline
+const CRAFT_OK = [46, 125, 50];               // have >= need, the owned check
+const CRAFT_BAD = [192, 57, 43];              // have < need
+const CRAFT_SPARK_COL = [255, 216, 74];
+const CRAFT_SPARK_EDGE = [176, 112, 24];      // a spark's 1 px drop shadow
+const CRAFT_SPARK_R0 = 8;                     // px from the result centre a spark starts (ends R0 + 28..36)
+const CRAFT_GLOW_COL = [255, 243, 176];       // the glow behind the result slot (pop, or reduced motion)
+const CRAFT_BTN_ON = [76, 175, 80];
+const CRAFT_BTN_OFF = [176, 176, 176];
 // The tier-2 break, the seam tell and the GEODE (same names and values in the pygame build).
 const TRAUMA_MINE_HEAVY = 0.9;    // a CRACKED SEAM (0.9^2 * 4 = ~3 px; still clamped at 1.0 -> WORLD_SHAKE_MAX)
 const MINE_HITSTOP = 0.06;        // s the world fx hold on a seam break (0 with reduced motion); input never stops
@@ -4004,6 +4017,12 @@ const SHOP_MENU_RECT = [W - 16 - MENU_W, MENU_Y, MENU_W, 128];   // SHOP / LEAVE
 const BBAG_ROWS = 3;                        // the battle BAG list, inside the bottom panel
 const BBAG_ROW_H = 22;
 const BBAG_SPLIT_X = 312;                   // list on the left, the selected item's description on the right
+// HTML only (pygame keeps x+318): the BUY/SELL "have n" column's right edge, from
+// SHOP_RECT's x. The canvas monospace is wider than pygame's consolas, so at 318
+// "have 999" came within ~3 px of "20 each" (which ends at x+262).
+const SHOP_HAVE_DX = 326;
+const LIST_ICON_GAP = 22;                  // a BAG / shop / battle BAG row: 16 px icon at the old name x, name this far right
+const COIN_ICON_GAP = 20;                   // each COINS line: the coins icon, then the text this far right
 const COIN_COL = '#b07828';
 const CUE_COL = '#4a90d8';                  // section titles and the scroll cues
 
@@ -4310,6 +4329,7 @@ function stalkerPx(st) {
 }
 
 function updateCaveFx(dt) {
+  if (G.mode === 'craft') CRFX.update(dt); else CRFX.clear();   // the craft animation lives only in CRAFT
   const calm = caveCalm();
   const live = G.mode === 'overworld' && inCave(G.player.ty);
   const fx = tensionFx(G.tension, calm);
@@ -4667,6 +4687,8 @@ const SFX = {
   hitWeak:   () => { const p = hitPitch(); tone(150 * p, 0.1, 'triangle', 0.035, 110 * p); },
   faint:     () => tone(400, 0.5, 'triangle', 0.05, 60),
   level:     () => { tone(523, 0.1, 'square', 0.04); setTimeout(() => tone(784, 0.18, 'square', 0.04), 100); },
+  // A craft: a quick rising ding, G6 then D7 (0.18 s; shorter and brighter than level).
+  craft:     () => { tone(1568, 0.07, 'square', 0.03); setTimeout(() => tone(2349, 0.11, 'triangle', 0.05), 70); },
   evolve:    () => { tone(392, 0.12, 'square', 0.04); setTimeout(() => tone(523, 0.12, 'square', 0.04), 120); setTimeout(() => tone(784, 0.3, 'square', 0.05), 240); },
   throw:     () => tone(520, 0.14, 'sine', 0.05, 900),
   catch:     () => { tone(660, 0.1, 'square', 0.05); setTimeout(() => tone(880, 0.1, 'square', 0.05), 110); setTimeout(() => tone(1175, 0.25, 'square', 0.05), 220); },
@@ -6058,19 +6080,31 @@ function drawDialogue() {
   }
 }
 
-function wrapText(s, x, y, maxW, lh, size, color) {
-  ctx.font = 'bold ' + size + 'px "Courier New", monospace';
-  const words = String(s).split(' ');
-  let line = '', ly = y;
-  for (const w of words) {
-    const test = line ? line + ' ' + w : w;
-    if (ctx.measureText(test).width > maxW && line) {
-      text(line, x, ly, size, color);
-      line = w; ly += lh;
-    } else line = test;
+// Greedy word wrap; past maxLines the last kept line ends in "...". Pure
+// (measure is a text -> width function), ported from the pygame wrap_lines,
+// .strip() included, so PARITY can compare the two.
+function wrapLines(s, maxW, measure, maxLines) {
+  let lines = [], line = '';
+  for (const word of String(s).split(' ')) {
+    const test = (line + ' ' + word).trim();
+    if (measure(test) > maxW && line) { lines.push(line); line = word; }
+    else line = test;
   }
-  if (line) text(line, x, ly, size, color);
-  return ly;
+  if (line) lines.push(line);
+  if (maxLines && lines.length > maxLines) {
+    let last = lines[maxLines - 1] + '...';
+    while (measure(last) > maxW && last.length > 3) last = last.slice(0, -4) + '...';
+    lines = lines.slice(0, maxLines - 1).concat([last]);
+  }
+  return lines;
+}
+
+// Draw s wrapped to maxW; returns the last line's baseline. align 'center' centres on x.
+function wrapText(s, x, y, maxW, lh, size, color, maxLines, align) {
+  ctx.font = 'bold ' + size + 'px "Courier New", monospace';
+  const lines = wrapLines(s, maxW, t => ctx.measureText(t).width, maxLines);
+  lines.forEach((line, k) => text(line, x, y + k * lh, size, color, align));
+  return y + Math.max(0, lines.length - 1) * lh;
 }
 
 function menuRows() { return (G.flags.gym ? MENU_ITEMS.slice(0,-1).concat(['DESCEND','CLOSE']) : MENU_ITEMS).concat(['SETTINGS']); }
@@ -6090,44 +6124,210 @@ function drawMenu() {
   });
 }
 
-// CRAFT: materials on top, one row per recipe, then BUILD and BACK. It starts
-// below the HUD (region, materials, lead HP end at y=66) and ends above the
-// toast strip (y=420), so it covers none of them.
+// Quadratic ease-out on 0..1 (the pygame ease_out).
+function easeOut(u) { u = clamp(u, 0, 1); return 1 - (1 - u) * (1 - u); }
+
+/* What the CRAFT screen shows, as plain numbers (spec 2.1): pure, no ctx.
+   drawCraft draws only from this, so the suite tests the real draw decision.
+   Every position is a screen px; the layout mirrors the pygame draw_craft. */
+function craftView(cellsIn) {           // cellsIn: a synthetic cell list (tests only)
+  const [x, y] = CRAFT_RECT;
+  const cells = cellsIn || craftCells(), n = cells.length;
+  const cur = clamp(G.craftCursor, 0, n - 1);
+  const rows = Math.ceil(n / CRAFT_COLS);
+  const top = listTop(rows, Math.floor(cur / CRAFT_COLS), CRAFT_GRID_ROWS);
+  const p = CRAFT_SLOT + CRAFT_GAP;
+  const vis = [];
+  for (let k = top * CRAFT_COLS; k < Math.min(n, (top + CRAFT_GRID_ROWS) * CRAFT_COLS); k++) {
+    const c = cells[k];
+    vis.push({ k, x: x + CRAFT_GRID_X + (k % CRAFT_COLS) * p, y: y + CRAFT_GRID_Y + (Math.floor(k / CRAFT_COLS) - top) * p,
+               w: CRAFT_SLOT, h: CRAFT_SLOT, state: c.state, kind: c.kind, icon: c.icon, sel: k === cur });
+  }
+  const tier = pickTier(G.flags.pick), axe = axeTier(G.flags.axe);
+  const chips = [{ icon: tier >= 2 ? 'iron_pick' : 'pick', on: tier >= 1, label: tier ? CRAFT_TIER_NAME[tier] : 'no PICK' },
+                 { icon: 'axe', on: axe >= 1, label: axe ? 'AXE' : 'no AXE' }];
+  const c = cells[cur], hidden = c.state === 'hidden';
+  const calm = crfxCalm();
+  const mine = CRFX.active() && c.kind === 'recipe' && c.recipe === CRFX.recipe;
+  const flying = mine && !calm && CRFX.t < CRAFT_FLY_T;
+  const popping = mine && !calm && CRFX.t >= CRAFT_FLY_T;
+  const res = [x + 360, y + 52, 60, 60], rcx = x + 390, rcy = y + 82;
+  const ghosts = [];
+  const u = flying ? easeOut(CRFX.t / CRAFT_FLY_T) : 0;
+  const needs = c.needs.slice(0, 3).map(([id, have, need], k) => {
+    const slot = [x + 302, y + 170 + k * 28, 24, 24];
+    if (hidden) return { id, icon: iconId(id), name: '', have: '?', n: '?', ok: false, slot };
+    if (flying) {
+      if (Object.prototype.hasOwnProperty.call(CRFX.before, id)) have = CRFX.before[id];
+      const sx = slot[0] + 12, sy = slot[1] + 12;
+      ghosts.push({ icon: iconId(id), x: Math.trunc(sx + (rcx - sx) * u), y: Math.trunc(sy + (rcy - sy) * u) });
+    }
+    return { id, icon: iconId(id), name: craftLabel(id), have, n: need, ok: have >= need, slot };
+  });
+  let scale = 1;
+  const sparks = [];
+  if (popping) {
+    const pp = Math.min(1, (CRFX.t - CRAFT_FLY_T) / CRAFT_POP_T);
+    scale = 1 + (CRAFT_POP_SCALE - 1) * Math.sin(Math.PI * pp);
+    const d = easeOut(pp);
+    for (const [a, rad] of CRFX.sparks) {
+      const r2 = CRAFT_SPARK_R0 + rad * d;
+      sparks.push([Math.trunc(rcx + Math.cos(a) * r2) - 1, Math.trunc(rcy + Math.sin(a) * r2) - 1]);
+    }
+  }
+  const owned = c.state === 'owned';
+  return {
+    top, rows, cur, cells: vis, chips,
+    cueUp: top > 0, cueDown: top + CRAFT_GRID_ROWS < rows,
+    cueX: x + CRAFT_CUE_X, cueUpY: y + CRAFT_GRID_Y + 8,
+    cueDownY: y + CRAFT_GRID_Y + (CRAFT_GRID_ROWS - 1) * p + CRAFT_SLOT - 8,
+    detail: { name: c.name, blurb: c.blurb, icon: c.icon, hidden, kind: c.kind, state: c.state, needs,
+              button: owned ? 'OWNED' : promptLabel('confirm') + (c.kind === 'build' ? ': BUILD' : ': CRAFT'),
+              enabled: c.state === 'ready' },
+    anim: { res, glow: mine && (calm || popping), showIcon: !flying, scale,
+            side: Math.round(48 * scale), sparks, ghosts },
+    msg: G.craftMsg,
+  };
+}
+
+// A cached 16*scale px icon canvas: one fillRect per opaque pixel, no smoothing.
+// mode 'normal' is the palette, 'shadow' ICON_SHADOW, 'grey' a faded zero-saturation luminance.
+const ICON_CACHE = new Map();
+function iconColour(ch, mode) {
+  const [r, g, b] = ICON_PALETTE[ch];
+  if (mode === 'shadow') return ICON_SHADOW;
+  if (mode === 'grey') { const l = Math.floor((r * 30 + g * 59 + b * 11) / 100), v = Math.floor((l + 2 * 200) / 3); return [v, v, v]; }
+  return [r, g, b];
+}
+function iconCanvas(id, scale, mode) {
+  scale = scale || 1; mode = mode || 'normal';
+  const key = id + '|' + scale + '|' + mode;
+  let cv = ICON_CACHE.get(key);
+  if (!cv) {
+    if (typeof document === 'undefined') return null;   // headless suites: nothing to blit
+    cv = document.createElement('canvas');
+    cv.width = cv.height = 16 * scale;
+    const c2 = cv.getContext('2d');
+    (ICONS[id] || []).forEach((row, py) => {
+      for (let px = 0; px < row.length; px++) {
+        const ch = row[px];
+        if (ch === '.') continue;
+        c2.fillStyle = rgbStr(iconColour(ch, mode));
+        c2.fillRect(px * scale, py * scale, scale, scale);
+      }
+    });
+    ICON_CACHE.set(key, cv);
+  }
+  return cv;
+}
+function drawIcon(id, x, y, scale, mode, size) {
+  const s = size || 16 * (scale || 1);
+  const cv = iconCanvas(id, size ? 1 : scale, mode);
+  if (!cv) return;
+  const was = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(cv, x, y, s, s);
+  ctx.imageSmoothingEnabled = was;
+}
+// A 1x icon at x, vertically centred in the band y..y+h (a list row's rect).
+function listIcon(id, x, y, h) {
+  const iy = y + Math.floor((h - 16) / 2);
+  drawIcon(id, x, iy, 1);
+  return [x, iy, 16, 16];
+}
+// COINS n with the coins icon to its left; y is the text baseline. The icon's top
+// sits one text size above the baseline, which centres its 16 px on the 13 px
+// capitals, as in the pygame build.
+function coinsLine(x, y) {
+  const size = 13;
+  drawIcon('coins', x, y - size, 1);
+  text('COINS ' + G.coins, x + COIN_ICON_GAP, y, size, COIN_COL);
+}
+
+// The hidden cell's '?', as hard pixels (the pygame build renders it without
+// anti-aliasing): 5x7 cells at 2x, a 1 px black shadow under white.
+const QMARK = ['.###.', '#...#', '....#', '...#.', '..#..', '.....', '..#..'];
+function drawQmark(cx, cy) {
+  const x0 = cx - 5, y0 = cy - 7;
+  for (const [off, col] of [[1, '#000000'], [0, '#ffffff']]) {
+    ctx.fillStyle = col;
+    QMARK.forEach((row, j) => { for (let i = 0; i < 5; i++) if (row[i] === '#') ctx.fillRect(x0 + i * 2 + off, y0 + j * 2 + off, 2, 2); });
+  }
+}
+
+function craftSlot(x, y, w, h, fill) {          // a bevelled slot: dark top-left edge, light bottom-right
+  ctx.fillStyle = rgbStr(fill || CRAFT_SLOT_FILL); ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = rgbStr(CRAFT_SLOT_DARK); ctx.fillRect(x, y, w, 2); ctx.fillRect(x, y, 2, h);
+  ctx.fillStyle = rgbStr(CRAFT_SLOT_LIGHT); ctx.fillRect(x, y + h - 2, w, 2); ctx.fillRect(x + w - 2, y, 2, h);
+}
+
+// CRAFT (spec 2.1): a recipe-book grid on the left, the selected cell's detail
+// pane on the right, and the craft animation (CRFX). It starts below the HUD
+// (region, materials, lead HP end at y=66) and ends above the toast strip
+// (y=420), so it covers none of them. Draws only from craftView().
 function drawCraft() {
   const [x, y, w, h] = CRAFT_RECT;
+  const v = craftView(), dim = '#6f8ba8', ink = '#22303f';
   panel(x, y, w, h);
-  text('CRAFT', x + 20, y + 34, 22, '#22303f');
-  const tier = pickTier(G.flags.pick);
-  const pickText = 'PICK: ' + CRAFT_TIER_NAME[tier];
-  text(pickText, x + 120, y + 33, 13, tier >= 2 ? '#b07828' : '#6f8ba8');
-  const axeOwned = axeTier(G.flags.axe) > 0;
-  text('AXE: ' + (axeOwned ? 'YES' : 'NO'), x + 120 + ctx.measureText(pickText).width + 16, y + 33, 13,
-       axeOwned ? '#b07828' : '#6f8ba8');
-  text(promptLabel('cancel') + ' back', x + w - 18, y + 32, 11, '#6f8ba8', 'right');
-  const m = G.materials;
-  text('STONE ' + m.stone + '   ORE ' + m.ore + '   WALL ' + m.wall + '   BALLS ' + G.balls,
-       x + 20, y + 64, 13, '#22303f');
-  ctx.fillStyle = '#2a3340';
-  ctx.fillRect(x + 16, y + 75, w - 32, 2);
-  const rows = craftRows();
-  const top = listTop(rows.length, G.craftCursor, CRAFT_ROWS), end = Math.min(rows.length, top + CRAFT_ROWS);
-  for (let i = top; i < end; i++) {
-    const [name, sub, can] = rows[i], ry = y + 92 + (i - top) * CRAFT_ROW_H;
-    if (i === G.craftCursor) {
-      ctx.fillStyle = '#e2ecf8';
-      rr(x + 16, ry - 6, w - 32, CRAFT_ROW_H - 2, 6); ctx.fill();
-      ctx.fillStyle = '#22303f';
-      ctx.beginPath();
-      ctx.moveTo(x + 24, ry + 4); ctx.lineTo(x + 34, ry + 9); ctx.lineTo(x + 24, ry + 14);
-      ctx.closePath(); ctx.fill();
-    }
-    text(name, x + 44, ry + 14, 15, can ? '#22303f' : '#969ca4');
-    // One line per row; the detail ends left of the scroll cue's column.
-    if (sub) text(sub, x + w - 40, ry + 14, 11, can ? '#6f8ba8' : '#aaaeb4', 'right');
+  text('CRAFT', x + 20, y + 34, 22, ink);
+  let cx = x + 120;
+  for (const ch of v.chips) {
+    drawIcon(ch.icon, cx, y + 18, 1, ch.on ? 'normal' : 'grey');
+    text(ch.label, cx + 20, y + 30, 11, ch.on ? ink : dim);
+    cx += 20 + ctx.measureText(ch.label).width + 14;
   }
-  if (top > 0) scrollCue(x + w - 24, y + 92 + 8, true);
-  if (end < rows.length) scrollCue(x + w - 24, y + 92 + (CRAFT_ROWS - 1) * CRAFT_ROW_H + 8, false);
-  if (G.craftMsg) text(G.craftMsg, x + w / 2, y + h - 20, 13, '#3c6e3c', 'center');
+  text(promptLabel('cancel') + ' back', x + w - 18, y + 30, 11, dim, 'right');
+  ctx.fillStyle = '#2a3340';
+  ctx.fillRect(x + 16, y + 41, w - 32, 2);
+
+  // -- the grid --
+  for (const c of v.cells) {
+    if (c.sel) { ctx.strokeStyle = rgbStr(CRAFT_SEL_LINE); ctx.lineWidth = 3; ctx.strokeRect(c.x - 2.5, c.y - 2.5, c.w + 5, c.h + 5); }
+    craftSlot(c.x, c.y, c.w, c.h, c.sel ? CRAFT_SEL_FILL : CRAFT_SLOT_FILL);
+    const mode = c.state === 'hidden' ? 'shadow' : c.state === 'locked' ? 'grey' : 'normal';
+    drawIcon(c.icon, c.x + 8, c.y + 8 - (c.kind === 'build' ? 4 : 0), 2, mode);
+    if (c.state === 'hidden') drawQmark(c.x + c.w / 2, c.y + c.h / 2);
+    if (c.state === 'owned') {
+      ctx.strokeStyle = rgbStr(CRAFT_OK); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(c.x + c.w - 14, c.y + 8); ctx.lineTo(c.x + c.w - 10, c.y + 12);
+      ctx.lineTo(c.x + c.w - 4, c.y + 4); ctx.stroke();
+    }
+    if (c.kind === 'build') text('BUILD', c.x + c.w / 2, c.y + c.h - 3, 11, ink, 'center');
+  }
+  if (v.cueUp) scrollCue(v.cueX, v.cueUpY, true);
+  if (v.cueDown) scrollCue(v.cueX, v.cueDownY, false);
+
+  // -- the detail pane --
+  const d = v.detail, a = v.anim, [rx, ry, rw, rh] = a.res;
+  ctx.fillStyle = rgbStr(CRAFT_SLOT_FILL);
+  for (let dy = 52; dy < 292; dy += 8) ctx.fillRect(x + 297, y + dy, 2, 5);   // dashed divider
+  if (a.glow) { ctx.fillStyle = rgbStr(CRAFT_GLOW_COL); rr(rx - 5, ry - 5, rw + 10, rh + 10, 4); ctx.fill(); }
+  craftSlot(rx, ry, rw, rh, CRAFT_SEL_FILL);
+  if (a.showIcon) {
+    const s = a.side;
+    drawIcon(d.icon, rx + rw / 2 - Math.floor(s / 2), ry + rh / 2 - Math.floor(s / 2), 3, d.hidden ? 'shadow' : 'normal',
+             a.scale !== 1 ? s : 0);
+  }
+  for (const [sx, sy] of a.sparks) {
+    ctx.fillStyle = rgbStr(CRAFT_SPARK_EDGE); ctx.fillRect(sx + 1, sy + 1, 3, 3);   // reads on the pale glow
+    ctx.fillStyle = rgbStr(CRAFT_SPARK_COL); ctx.fillRect(sx, sy, 3, 3);
+  }
+  text(d.name, x + 390, y + 130, 15, ink, 'center');
+  wrapText(d.blurb, x + 390, y + 145, 168, 13, 11, dim, 2, 'center');
+  for (const nd of d.needs) {
+    const [sx, sy, sw, sh] = nd.slot;
+    craftSlot(sx, sy, sw, sh);
+    drawIcon(nd.icon, sx + 4, sy + 4, 1, d.hidden ? 'shadow' : 'normal');
+    if (nd.name) text(nd.name, x + 332, sy + 16, 13, ink);
+    text(d.hidden ? '?' : nd.have + '/' + nd.n, x + 478, sy + 16, 13,
+         d.hidden ? dim : rgbStr(nd.ok ? CRAFT_OK : CRAFT_BAD), 'right');
+  }
+  for (const gh of a.ghosts) drawIcon(gh.icon, gh.x - 8, gh.y - 8, 1, 'normal');   // over the rows they leave
+  const bx = x + 390 - 62, by = y + 258;
+  ctx.fillStyle = rgbStr(d.enabled ? CRAFT_BTN_ON : CRAFT_BTN_OFF); rr(bx, by, 124, 22, 4); ctx.fill();
+  ctx.strokeStyle = d.enabled ? rgbStr(CRAFT_OK) : '#808080'; ctx.lineWidth = 2; rr(bx + 1, by + 1, 122, 20, 4); ctx.stroke();
+  text(d.button, x + 390, by + 16, 13, '#ffffff', 'center');
+  if (v.msg) text(v.msg, x + w / 2, y + h - 20, 13, '#3c6e3c', 'center');
 }
 
 function cursorArrow(x, y) {          // the pygame build's cursor_arrow: a 10x10 right-pointing triangle
@@ -6150,7 +6350,7 @@ function drawBag() {
   const [x, y, w, h] = BAG_RECT;
   panel(x, y, w, h);
   text('BAG', x + 20, y + 34, 22, '#22303f');
-  text('COINS ' + G.coins, x + 120, y + 33, 13, COIN_COL);
+  coinsLine(x + 120, y + 33);
   const rows = bagRows(G.balls, G.bag, G.materials), ent = bagEntries(rows);
   const cur = ent[Math.max(0, Math.min(G.bagCursor, ent.length - 1))];
   const item = rows[cur][1];
@@ -6168,7 +6368,8 @@ function drawBag() {
       cursorArrow(x + 24, ry + 7);
     }
     const col = k === 'mat' ? '#5a6470' : '#22303f';
-    text(bagName(it), x + 44, ry + 18, 15, col);
+    listIcon(iconId(it), x + 44, ry, BAG_ROW_H - 2);
+    text(bagName(it), x + 44 + LIST_ICON_GAP, ry + 18, 15, col);
     text('x' + n, x + w - 40, ry + 18, 15, col, 'right');
   }
   if (top > 0) scrollCue(x + w - 24, y + 56 + BAG_ROW_H / 2, true);
@@ -6207,7 +6408,7 @@ function drawShop() {
   if (s.page === 'offer' || s.page === 'main') {
     const items = s.page === 'offer' ? SHOP_OFFER : SHOP_MAIN, [x, y, w] = SHOP_MENU_RECT;
     panel(x, y, w, 42 + 26 * items.length + 8);
-    text('COINS ' + G.coins, x + 20, y + 26, 13, COIN_COL);
+    coinsLine(x + 20, y + 26);
     items.forEach((it, i) => {
       const ry = y + 42 + i * 26;
       if (i === s.cursor) cursorArrow(x + 18, ry + 3);
@@ -6218,7 +6419,7 @@ function drawShop() {
   const [x, y, w, h] = SHOP_RECT, buy = s.page === 'buy';
   panel(x, y, w, h);
   text(buy ? 'BUY' : 'SELL', x + 20, y + 34, 22, '#22303f');
-  text('COINS ' + G.coins, x + 120, y + 33, 13, COIN_COL);
+  coinsLine(x + 120, y + 33);
   text(promptLabel('cancel') + ' back', x + w - 18, y + 32, 11, '#6f8ba8', 'right');
   hRule(x + 16, x + w - 16, y + 48);
   const rows = shopRows(s.page, G.bag), ly = y + 56 + SHOP_ROWS * SHOP_ROW_H + 4;
@@ -6232,10 +6433,11 @@ function drawShop() {
         ctx.fillStyle = '#e2ecf8'; rr(x + 16, ry, w - 32, SHOP_ROW_H - 2, 6); ctx.fill();
         cursorArrow(x + 24, ry + 9);
       }
-      text(row[1], x + 44, ry + 20, 15, '#22303f');
+      listIcon(iconId(row[0]), x + 44, ry, SHOP_ROW_H - 2);
+      text(row[1], x + 44 + LIST_ICON_GAP, ry + 20, 15, '#22303f');
       text(row[2] + ' each', x + 262, ry + 20, 13, '#4a5a6a', 'right');
       const have = buy ? (row[0] === 'ball' ? G.balls : (G.bag[row[0]] || 0)) : row[3];
-      text((buy ? 'have ' : 'x') + have, x + 318, ry + 19, 11, '#6f8ba8', 'right');
+      text((buy ? 'have ' : 'x') + have, x + SHOP_HAVE_DX, ry + 19, 11, '#6f8ba8', 'right');
       if (sel) {
         const qty = Math.max(1, Math.min(s.qty, shopQtyCap(s.page, row)));
         text('< ' + qty + ' >', x + 374, ry + 20, 15, '#22303f', 'center');
@@ -6565,7 +6767,8 @@ function drawBattle() {
           ctx.fillStyle = '#e2ecf8'; rr(28, oy - 3, BBAG_SPLIT_X - 40, BBAG_ROW_H - 2, 5); ctx.fill();
           cursorArrow(34, oy + 2);
         }
-        text(bagName(k), 50, oy + 12, 13, '#22303f');
+        listIcon(iconId(k), 50, oy - 3, BBAG_ROW_H - 2);
+        text(bagName(k), 50 + LIST_ICON_GAP, oy + 12, 13, '#22303f');
         text('x' + (k === 'ball' ? G.balls : (G.bag[k] || 0)), BBAG_SPLIT_X - 30, oy + 12, 13, '#4a5a6a', 'right');
       }
       if (top > 0) scrollCue(BBAG_SPLIT_X - 18, H - 94 + 6, true);
@@ -7016,14 +7219,16 @@ function confirmKey() {
   if (G.mode === 'shop') { confirmShop(); return; }
 
   if (G.mode === 'craft') {
-    const c = G.craftCursor;
-    if (c < RECIPES.length) craftRecipe(c);
-    else if (c === RECIPES.length) {
+    const cells = craftCells();
+    const c = cells[clamp(G.craftCursor, 0, cells.length - 1)];
+    if (c.state === 'hidden') { sfx('cancel'); G.craftMsg = CRAFT_MSG.hidden; }
+    else if (c.kind === 'recipe') craftRecipe(c.recipe);
+    else if (c.state === 'ready') {
       sfx('select');
       G.building = true;
       G.mode = 'overworld';
       G.toast = { s: 'BUILDING: face bare ground and confirm.', t: 3 };
-    } else { sfx('cancel'); G.mode = 'overworld'; }
+    } else { sfx('cancel'); G.craftMsg = CRAFT_MSG.nowall; }
     return;
   }
 
@@ -7134,8 +7339,11 @@ function moveCursor(dx, dy) {
     return;
   }
   if (G.mode === 'craft') {
-    const n = RECIPES.length + 2;
-    if (dy) { G.craftCursor = (G.craftCursor + dy + n) % n; sfx('cursor'); }
+    const d = dx ? (dx < 0 ? 'left' : 'right') : dy ? (dy < 0 ? 'up' : 'down') : null;
+    if (d) {
+      const j = gridMove(G.craftCursor, d, craftCells().length, CRAFT_COLS);
+      if (j !== G.craftCursor) { G.craftCursor = j; G.craftMsg = ''; sfx('cursor'); }
+    }
     return;
   }
   if (G.mode === 'bag') {
@@ -7194,6 +7402,7 @@ function press(k) {
   if (campaignBusy || combatModal) return;
   if (keys[k]) return;          // ignore auto-repeat for one-shot actions
   keys[k] = true;
+  if (G.mode === 'craft') CRFX.skip();   // any key ends the craft animation, then is handled normally
   if (k === FULLSCREEN_KEY) { toggleFullscreen(); return; }
   if (k==='o' && G.mode==='battle') { openCombatSettings();return; }
   if (G.mode==='battle' && G.battle && G.battle.command && ['z','enter',' '].includes(k)) { commandInput(true,false);return; }
@@ -7624,7 +7833,14 @@ if (typeof globalThis !== 'undefined') {
     inSandbox, tileHash, canMine, mineDrop, withEdit, craft, tileBlocked, reachable, placementOk,
     loadEdits, zeroMaterials, tileHere, npcTiles, quarryTalk, mine, craftRecipe, placeWall,
     SEAM, GRASS, PICK_MAX, GEODE, MOSS_HOLLOW, OLD_GROVE, GATED_REGIONS, GLADES, GLADE_GATES, gladeMasked, BACKSTOP_ORE, ORE_DEPOSITS, pickTier, oreDeposits, quarryBackstop, TREE, AXE_MAX, axeTier, craftLabel, craftHave, bagRoom,
-    tryEncounter, CRAFT_RECT, CRAFT_ROW_H, CRAFT_ROWS, pickedGround, pickedText, PICKED_TEXT,
+    tryEncounter, CRAFT_RECT, pickedGround, pickedText, PICKED_TEXT,
+    // the CRAFT grid, its animation and the shared wrap rule (shell; read by the suites)
+    CRAFT_GRID_X, CRAFT_GRID_Y, CRAFT_SLOT, CRAFT_GAP, CRAFT_GRID_ROWS, CRAFT_CUE_X, CRAFT_FLY_T,
+    CRAFT_POP_T, CRAFT_POP_SCALE, CRAFT_SPARKS, CRAFT_GLOW_T, CRAFT_SLOT_FILL, CRAFT_SLOT_DARK,
+    CRAFT_SLOT_LIGHT, CRAFT_SEL_FILL, CRAFT_SEL_LINE, CRAFT_OK, CRAFT_BAD, CRAFT_SPARK_COL,
+    CRAFT_SPARK_EDGE, CRAFT_SPARK_R0, CRAFT_GLOW_COL, CRAFT_BTN_ON, CRAFT_BTN_OFF,
+    CRFX, crfxCalm, craftView, drawCraft, wrapLines, easeOut, juiceCraft,
+    setCampaignBusy: v => { campaignBusy = v; },   // test-only seam
     // shell juice for the seam and the GEODE (read by the suites; never by game logic)
     WFX, worldFx, updateWorldFx, worldOffset, resetWorldFx, liveDebris, oreTells, seamTells, geodeGlints,
     geodeOpen, geodeMasked, overworldGlyph, SEAM_SPOTS, GEODE_SPOTS, GEODE_DOOR, SFX, REDUCED_MOTION,
@@ -7645,7 +7861,7 @@ if (typeof globalThis !== 'undefined') {
     mulberry32, lanternFrac, lanternStep, lanternBucket, lanternRadius, keepOut, inSafeZone,
     tensionStep, tensionEvent, encounterRate, stalkerWalkable, caveDist, stalkerSense, newStalker,
     stalkerSpawn, stalkerTick, bump, pulseApply, syncCave, spawnStalker, caveStep, stalkerTurn,
-    beginHunt, firePulse, menuLabel, caveHudText, craftRows, loadCave, setCave, updateOverworld,
+    beginHunt, firePulse, menuLabel, caveHudText, loadCave, setCave, updateOverworld,
     drawCaveDark, drawStalker,
     // the DARK CAVE look, sound and feel (shell only; read by the suites, never by game logic)
     LAMP_TINT, LAMP_TINT_ALPHA, LAMP_DARK, LAMP_DARK_ALPHA, LAMP_FEATHER, LAMP_FLICKER_BELOW,
@@ -7677,6 +7893,10 @@ if (typeof globalThis !== 'undefined') {
     BAG_BALL_DESC, BAG_MAT_DESC, BAG_MSG, SHOP_STOCK, SHOP_OFFER, SHOP_MAIN, SHOP_MSG, fmtMsg, bagName, bagDesc,
     bagRows, bagEntries, listTop, healRefusal, shopRows, shopQtyCap, BAG_RECT, BAG_ROWS, BAG_ROW_H, BAG_PICK_RECT,
     SHOP_RECT, SHOP_ROWS, SHOP_ROW_H, SHOP_MENU_RECT, BBAG_ROWS, BBAG_ROW_H, BBAG_SPLIT_X,
+    LIST_ICON_GAP, COIN_ICON_GAP, listIcon, SHOP_HAVE_DX,
+    // test seam (like withCtx): exported only so the headless suite can prime 1x
+    // stand-ins, since iconCanvas builds nothing without a document
+    ICON_CACHE,
     openBag, confirmBag, openShop, closeShop, moveShop, confirmShop, drawBag, drawShop, drawBattle,
     // test seam: draw into a recording context (headless text-bounds checks); restores the real one
     withCtx(c, fn) { const keep = ctx; ctx = c; try { return fn(); } finally { ctx = keep; } },
