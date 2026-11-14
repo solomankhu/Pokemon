@@ -33,7 +33,7 @@ Gemini's game has its own suite, `node "gemini's code.test.js"`, but visual chan
 
 `combat/` holds the 3D battle presentation (plan: `docs/superpowers/plans/2026-10-17-3d-combat.md`). Its suites are `node combat/verify.cjs` (every `combat/*.test.js`) and `.venv/Scripts/python.exe combat/commands_py_test.py`; `claude's monsters.py` imports `combat.commands`, so tools that load the game by path must put the repo root on `sys.path` (lesson `tool-import-path`). `combat/webcam.js` adds opt-in webcam battle controls (motion zones, no ML, no assets; spec `docs/superpowers/specs/2026-10-18-webcam-battle-controls-design.md`). Its pure v2 pipeline (`createMotionModel`/`stepMotion`: blur, exposure fit, adaptive per-pixel noise, open, largest blob, block flow, fast-rise punch in `webcamZone`) and tracker turn motion into the same `commandInput`/`press` calls keys use; the old `classifyMotion` stays exported for comparison. The controller only streams while `G.mode === 'battle'`, focused and `G.settings.webcam === 'ON'`. On the battle menu (`getPhase()==='menu'`) `classifyGesture` adds body gestures as `battleAction(id)` calls: punch ATTACK, guard DEFEND, throw BALL (wild battles only), shove SWAP, raise BAG, lean moves the cursor to RUN; without a phase the output is unchanged. `combat/webcam-clips.test.js` replays the user's own clips (local only, never publish). `combat/webcam-scenarios.test.js` replays seeded synthetic videos (frozen parameters; tune `webcam.js`, never the scenes). Browser-only: `combat/commands.py` deliberately lacks the `webcam*` settings keys (`webcamGain`, `webcamPunch`, `webcamZone`, `webcamOverlay` included).
 
-This directory is **not a git repository**, so there is no history to diff against or revert to.
+This directory is a **git repository** (`main`, remote `origin` = https://github.com/solomankhu/Pokemon). History starts at the first push on 2026-11-14; nothing before that is in git. `.gitignore` keeps the user's webcam recordings (`combat/Webcam/`), `.venv/`, saves and `.claude/state/` out, and `core.autocrlf=false` keeps git from rewriting line endings. Commit only when the user asks.
 
 ## Unified browser campaign
 
@@ -41,7 +41,7 @@ This directory is **not a git repository**, so there is no history to diff again
 
 The chapter now has three distinct authored floors (Intake, Archives, Signal Core). Each `stageConfigs[n]` owns walls, rooms, refuge and exit; simulation, navigation and rendering use those same walls. `getNav(n)` caches a grid per floor. The exported legacy `walls` fixture remains only for collision regression tests. Arrival refuges exclude enemies and protect oxygen/sanity; all terminals lie outside. Paused FLOOR PLAN uses numbered rooms with a readable legend and accessible connectivity description.
 
-Run `node campaign.test.js` alongside both existing JavaScript suites and the Python suite. The real Chromium flow and touch/layout scenarios are documented in `docs/unified-game-playtest.md`. Source backups and evidence are under `.superpowers/sdd/2026-10-17-unified-monster-trail/` because this workspace has no Git history.
+Run `node campaign.test.js` alongside both existing JavaScript suites and the Python suite. The real Chromium flow and touch/layout scenarios are documented in `docs/unified-game-playtest.md`. Source backups and evidence are under `.superpowers/sdd/2026-10-17-unified-monster-trail/`, which predate the git history.
 
 ## Architecture: gemini's code.html
 
@@ -173,7 +173,7 @@ The full map of the harness is `docs/wiki/harness.md`. In short:
 - **Commands:** `/verify`, `/playtest`, `/review`, `/route`, `/status`.
 - **State:** `.claude/state/` (verify results; scratch, safe to delete). Unfinished work leaves a handoff in `docs/handoffs/`.
 
-This folder is not a git repo, so parallel agents must never edit the same file.
+Git does not stop two local sessions writing the same working tree, so parallel agents must still never edit the same file.
 
 ## Controls
 
