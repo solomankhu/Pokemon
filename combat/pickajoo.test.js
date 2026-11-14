@@ -1,0 +1,13 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),T=require('../vendor/three-r128.min.js'),M=require('./models');
+const store={};const c={console,localStorage:{getItem(k){return store[k]||null;},setItem(k,v){store[k]=v;}}};c.globalThis=c;
+vm.runInNewContext(fs.readFileSync("claude's monsters.html",'utf8').match(/<script>([\s\S]*)<\/script>/)[1],c);
+const g=c.__GAME__,sp=g.SPECIES.zapmote;
+assert.equal(sp.name,'PICKAJOO');assert(g.STARTERS.includes('zapmote'),'Pickajoo can be chosen at the start');
+const mon=g.makeMon('zapmote',5);assert(mon.moves.includes('thunderbolt'),'starter knows Thunder immediately');assert.equal(g.MOVES.thunderbolt.name,'THUNDER');
+g.G.party=[g.makeMon('emberling',5)];g.G.flags={starter:true,gym:false};g.professorTalk();assert.equal(g.G.party[1].name,'PICKAJOO');g.professorTalk();assert.equal(g.G.party.length,2,'gift cannot duplicate');
+g.G.party=Array.from({length:6},()=>g.makeMon('emberling',5));g.G.flags.pickajooGift=false;g.professorTalk();assert.equal(g.G.party.length,6,'full team is preserved');
+g.G.party=[{...mon,name:'ZAPMOTE',moves:['thundershock','tailwhip']}];g.saveGame();assert(g.loadGame());assert.equal(g.G.party[0].name,'PICKAJOO');assert(g.G.party[0].moves.includes('thunderbolt'),'old electric partner gains Thunder');
+const rig=M.buildCreature(T,'zapmote',sp);
+for(const name of ['pickajoo-cheek-left','pickajoo-cheek-right','pickajoo-lightning-tail','pickajoo-ear-tip-left','pickajoo-ear-tip-right'])assert(rig.root.getObjectByName(name),name);
+rig.dispose();console.log('Pickajoo: starter, immediate Thunder, red cheeks, ear tips and lightning tail verified');

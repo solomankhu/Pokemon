@@ -1,0 +1,762 @@
+{
+ "errors": [],
+ "log": [
+  {
+   "name": "tackle-mine-m320",
+   "t": 0.317,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0,
+    "shake": 0,
+    "hold": 0,
+    "held": false,
+    "punch": 0,
+    "fov": 40,
+    "impacts": 0,
+    "offset": [
+     0,
+     0,
+     0
+    ],
+    "rotation": [
+     0,
+     0
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 10,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-m120",
+   "t": 0.517,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0,
+    "shake": 0,
+    "hold": 0,
+    "held": false,
+    "punch": 0,
+    "fov": 40,
+    "impacts": 0,
+    "offset": [
+     0,
+     0,
+     0
+    ],
+    "rotation": [
+     0,
+     0
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 11,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-m030",
+   "t": 0.6,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0,
+    "shake": 0,
+    "hold": 0,
+    "held": false,
+    "punch": 0,
+    "fov": 40,
+    "impacts": 0,
+    "offset": [
+     0,
+     0,
+     0
+    ],
+    "rotation": [
+     0,
+     0
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 11,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-p017",
+   "t": 0.65,
+   "camera": {
+    "position": [
+     -7.192334809111355,
+     5.774951959123805,
+     11.177263374485596
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0.6,
+    "shake": 0.36,
+    "hold": 0.08999999999999964,
+    "held": true,
+    "punch": 0.06856138545953361,
+    "fov": 37,
+    "impacts": 1,
+    "offset": [
+     0.026065396649961544,
+     -0.004296689364736849,
+     0.003721810135979531
+    ],
+    "rotation": [
+     0.002110203487171833,
+     -0.0009671006171074903
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0.85
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 39,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-p050",
+   "t": 0.683,
+   "camera": {
+    "position": [
+     -6.764358676968205,
+     5.5865874104281215,
+     10.686111111111112
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0.6,
+    "shake": 0.36,
+    "hold": 0.0566666666666662,
+    "held": true,
+    "punch": 0.10949074074074074,
+    "fov": 37,
+    "impacts": 1,
+    "offset": [
+     -0.012553121412649556,
+     -0.0011810639806786518,
+     -0.003852183931052121
+    ],
+    "rotation": [
+     -0.0006125066360790048,
+     0.0020373828621050027
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0.85
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 39,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-p100",
+   "t": 0.733,
+   "camera": {
+    "position": [
+     -6.757325373396803,
+     5.5743382298981015,
+     10.68
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0.6,
+    "shake": 0.36,
+    "hold": 0.0066666666666660435,
+    "held": true,
+    "punch": 0.11,
+    "fov": 37,
+    "impacts": 1,
+    "offset": [
+     -0.011325373396802512,
+     -0.01104777229864656,
+     0.0015840694489917537
+    ],
+    "rotation": [
+     0.0005471421437637412,
+     -0.0012818379156497865
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0.85
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 39,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-p200",
+   "t": 0.833,
+   "camera": {
+    "position": [
+     -6.821876015895516,
+     5.611019748559677,
+     10.751266601878847
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0.4199999999999998,
+    "shake": 0.17639999999999983,
+    "hold": 0,
+    "held": false,
+    "punch": 0.10406111651009611,
+    "fov": 39.888888888888886,
+    "impacts": 1,
+    "offset": [
+     -0.008172744110611667,
+     -0.002150186139136159,
+     -0.0003934248878301503
+    ],
+    "rotation": [
+     0.0002032805714875054,
+     0.0005608391240598536
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0.4250000000000001
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 33,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-p400",
+   "t": 1.033,
+   "camera": {
+    "position": [
+     -7.8831077756254295,
+     6.051985421260833,
+     11.876851311953352
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0.05999999999999969,
+    "shake": 0.003599999999999963,
+    "hold": 0,
+    "held": false,
+    "punch": 0.01026239067055394,
+    "fov": 40,
+    "impacts": 1,
+    "offset": [
+     -0.00009902926974471601,
+     -0.000003943375598523716,
+     0.000008160646783013266
+    ],
+    "rotation": [
+     0.000001459073966632686,
+     0.000004196109392777978
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 27,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-m320",
+   "t": 0.5,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0,
+    "shake": 0,
+    "hold": 0,
+    "held": false,
+    "punch": 0,
+    "fov": 40,
+    "impacts": 1,
+    "offset": [
+     0,
+     0,
+     0
+    ],
+    "rotation": [
+     0,
+     0
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 79,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-m120",
+   "t": 0.7,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0,
+    "shake": 0,
+    "hold": 0,
+    "held": false,
+    "punch": 0,
+    "fov": 40,
+    "impacts": 1,
+    "offset": [
+     0,
+     0,
+     0
+    ],
+    "rotation": [
+     0,
+     0
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 92,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-m030",
+   "t": 0.783,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0,
+    "shake": 0,
+    "hold": 0,
+    "held": false,
+    "punch": 0,
+    "fov": 40,
+    "impacts": 1,
+    "offset": [
+     0,
+     0,
+     0
+    ],
+    "rotation": [
+     0,
+     0
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 95,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-p017",
+   "t": 0.833,
+   "camera": {
+    "position": [
+     -7.828726305312771,
+     5.917267891640646,
+     11.551234567901234
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0.35,
+    "shake": 0.12249999999999998,
+    "hold": 0.06166666666666576,
+    "held": true,
+    "punch": 0.037397119341563784,
+    "fov": 38.25,
+    "impacts": 2,
+    "offset": [
+     -0.0007530542839645913,
+     -0.0005472724759853215,
+     -0.0013158668289490508
+    ],
+    "rotation": [
+     -0.0007346059517203357,
+     -0.0006592702200825754
+    ],
+    "flash": {
+     "mine": 0.85,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 115,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-p050",
+   "t": 0.867,
+   "camera": {
+    "position": [
+     -7.719776307001981,
+     5.818078631419239,
+     11.283333333333333
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0.35,
+    "shake": 0.12249999999999998,
+    "hold": 0.028333333333332322,
+    "held": true,
+    "punch": 0.05972222222222222,
+    "fov": 38.25,
+    "impacts": 2,
+    "offset": [
+     0.00550147077579719,
+     0.009023052960630423,
+     0.0012721247696546162
+    ],
+    "rotation": [
+     0.00037498691709668343,
+     -0.0002397519897182029
+    ],
+    "flash": {
+     "mine": 0.85,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 115,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-p100",
+   "t": 0.917,
+   "camera": {
+    "position": [
+     -7.7273089778014175,
+     5.805660051873836,
+     11.281439729330886
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0.2899999999999999,
+    "shake": 0.08409999999999995,
+    "hold": 0,
+    "held": false,
+    "punch": 0.05988002255575952,
+    "fov": 39.176611796982165,
+    "impacts": 2,
+    "offset": [
+     -0.0027570815579110635,
+     -0.0026267821366967392,
+     0.0005856527009125054
+    ],
+    "rotation": [
+     -0.00024368106608455576,
+     0.00040424879604049834
+    ],
+    "flash": {
+     "mine": 0.7083333333333334,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 99,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-p200",
+   "t": 1.017,
+   "camera": {
+    "position": [
+     -7.759976286145236,
+     5.845296558560061,
+     11.37214267717669
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0.1099999999999999,
+    "shake": 0.012099999999999979,
+    "hold": 0,
+    "held": false,
+    "punch": 0.052321443568609106,
+    "fov": 39.99759945130315,
+    "impacts": 2,
+    "offset": [
+     -0.0006549265608390734,
+     0.00018714311729897155,
+     -0.00010492687531825481
+    ],
+    "rotation": [
+     -0.00003099895792325523,
+     0.00006181021204096326
+    ],
+    "flash": {
+     "mine": 0.2833333333333335,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 50,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-p400",
+   "t": 1.217,
+   "camera": {
+    "position": [
+     -7.990299871624135,
+     6.089727084265828,
+     11.974695317280352
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": {
+    "trauma": 0,
+    "shake": 0,
+    "hold": 0,
+    "held": false,
+    "punch": 0.0021087235599707333,
+    "fov": 40,
+    "impacts": 2,
+    "offset": [
+     0,
+     0,
+     0
+    ],
+    "rotation": [
+     0,
+     0
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 1
+    },
+    "reduced": false
+   },
+   "effects": 23,
+   "trauma": 0
+  },
+  {
+   "name": "faint-foe-t420",
+   "juice": {
+    "trauma": 0,
+    "shake": 0,
+    "hold": 0,
+    "held": false,
+    "punch": 0,
+    "fov": 40,
+    "impacts": 2,
+    "offset": [
+     0,
+     0,
+     0
+    ],
+    "rotation": [
+     0,
+     0
+    ],
+    "flash": {
+     "mine": 0,
+     "foe": 0
+    },
+    "fade": {
+     "mine": 1,
+     "foe": 0.6060606060606062
+    },
+    "reduced": false
+   }
+  },
+  {
+   "hpDrain": {
+    "before": 71,
+    "mid": 62.99600000000002,
+    "target": 56
+   }
+  }
+ ]
+}

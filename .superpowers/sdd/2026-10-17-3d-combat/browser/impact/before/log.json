@@ -1,0 +1,278 @@
+{
+ "errors": [],
+ "log": [
+  {
+   "name": "tackle-mine-m120",
+   "t": 0.517,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 11,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-m030",
+   "t": 0.6,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 11,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-p017",
+   "t": 0.65,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 29,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-p050",
+   "t": 0.683,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 27,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-p100",
+   "t": 0.733,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 24,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-p200",
+   "t": 0.833,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 19,
+   "trauma": 0
+  },
+  {
+   "name": "tackle-mine-p400",
+   "t": 1.033,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 16,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-m120",
+   "t": 0.7,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 92,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-m030",
+   "t": 0.783,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 95,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-p017",
+   "t": 0.833,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 106,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-p050",
+   "t": 0.867,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 90,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-p100",
+   "t": 0.917,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 66,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-p200",
+   "t": 1.017,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 32,
+   "trauma": 0
+  },
+  {
+   "name": "ember-foe-p400",
+   "t": 1.217,
+   "camera": {
+    "position": [
+     -8,
+     6.1,
+     12
+    ],
+    "target": [
+     0,
+     0.7,
+     0
+    ]
+   },
+   "juice": null,
+   "effects": 16,
+   "trauma": 0
+  },
+  {
+   "hpDrain": {
+    "before": 71,
+    "mid": 63.71599999999997,
+    "target": 56
+   }
+  }
+ ]
+}

@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/pm-route.js\"", "timeout": 10 } ] }
+    ],
+    "SessionStart": [
+      { "matcher": "startup|resume|clear|compact", "hooks": [ { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.js\"", "timeout": 15 } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit|Read|Bash|PowerShell", "hooks": [ { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-guard.js\"", "timeout": 10 } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Edit|Write|MultiEdit", "hooks": [ { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit-check.js\"", "timeout": 10 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop-gate.js\"", "timeout": 15 } ] }
+    ]
+  }
+}

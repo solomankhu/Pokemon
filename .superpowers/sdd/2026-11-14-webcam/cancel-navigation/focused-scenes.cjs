@@ -1,0 +1,5 @@
+const fs=require('fs'),path=require('path');const file=path.resolve('combat/webcam-scenarios.test.js'),s=fs.readFileSync(file,'utf8');let src=s.slice(0,s.indexOf('const nuisPeak={}'))+s.slice(s.indexOf('const GT0='),s.indexOf('const GWANT='))+s.slice(s.indexOf('const HZ13='),s.indexOf("for(const [g,want] of [['crosses'"));
+src+=`for(const g of ['throw','overhand'])for(const hz of [HZ13,15,30])for(const seed of SEEDS){const sc=(g==='throw'?GSCENE:G13)[g](seed);sc.dur=GT0+2.2;sc.sigma=2+seed;const r=runGesture(sc,{hz});if(r.actions.map(a=>a.id).join()!=='ball')console.log('BAD',g,hz,seed,JSON.stringify(r));} `;
+src+=`const ids=a=>a.map(x=>x.id).join()||'-';`;src+=s.slice(s.indexOf('// sweeps in the menu still'),s.indexOf('{let acts=0;for(const seed'));src+=s.slice(s.indexOf('// 2026-11-14: independent chest-height'),s.indexOf('// --- the table ---'));src+=`if(fails.length)fails.forEach(x=>console.log(x));else console.log('focused scenes passed');`;
+new Function('require','__dirname',src)(require('module').createRequire(file),path.dirname(file));
+

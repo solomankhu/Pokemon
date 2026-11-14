@@ -1,0 +1,63 @@
+{
+  "ts": "2026-10-17T15:31:26.823Z",
+  "ok": true,
+  "allOk": true,
+  "ran": [
+    "py"
+  ],
+  "results": [
+    {
+      "name": "py",
+      "label": "MONSTER TRAIL python suite (incl. RENDER + PARITY)",
+      "ok": true,
+      "code": 0,
+      "ms": 62499,
+      "summary": "4874 checks passed",
+      "failures": [],
+      "tail": ""
+    }
+  ],
+  "checks": {
+    "py": {
+      "ok": true,
+      "startedAt": 1792251024324,
+      "summary": "4874 checks passed"
+    },
+    "js": {
+      "ok": true,
+      "startedAt": 1792250930613,
+      "summary": "3331 checks passed"
+    },
+    "gemini": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "554 passed, 0 failed"
+    },
+    "campaign": {
+      "ok": true,
+      "startedAt": 1792250930613,
+      "summary": "8 campaign tests passed"
+    },
+    "combat": {
+      "ok": true,
+      "startedAt": 1792250930613,
+      "summary": "ok"
+    },
+    "combatpy": {
+      "ok": true,
+      "startedAt": 1792250930613,
+      "summary": "Ran 19 tests"
+    },
+    "hooks": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "70 hook checks passed"
+    },
+    "tables": {
+      "ok": true,
+      "startedAt": 1792250930613,
+      "summary": "ok"
+    }
+  },
+  "inputsMtime": 1792248903067
+}

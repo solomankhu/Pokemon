@@ -1,0 +1,2 @@
+- [Tested helper not wired](tested-helper-not-wired.md) — confirm the game calls the tested combat/ helper; read assertions, not test names
+- [Combat review hotspots](combat-review-hotspots.md) — ace-context parity, presenter rebuild churn, 2D HUD vs 3D overlap probes

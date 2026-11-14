@@ -1,0 +1,28 @@
+[
+  {
+    "name": "http",
+    "url": "http://127.0.0.1:8765/claude's%20monsters.html",
+    "title": "MONSTER TRAIL",
+    "canvas": [
+      {
+        "width": 640,
+        "height": 480
+      }
+    ],
+    "gameMode": "title",
+    "errors": []
+  },
+  {
+    "name": "file",
+    "url": "file:///E:/game/claude's%20monsters.html",
+    "title": "MONSTER TRAIL",
+    "canvas": [
+      {
+        "width": 640,
+        "height": 480
+      }
+    ],
+    "gameMode": "title",
+    "errors": []
+  }
+]

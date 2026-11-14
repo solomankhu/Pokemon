@@ -1,0 +1,95 @@
+pygame 2.6.1 (SDL 2.28.4, Python 3.13.14)
+Hello from the pygame community. https://www.pygame.org/contribute.html
+== SPECIES  (BST = base stat total)
+id           types              BST catch  evolves          wild levels
+nibbit       Normal             265   200  gnawtl@18        3-6, 4-8, 5-9, 8-12, 10-14, 11-15, 12-16
+nocturn      Dark               306   140  umbrawing@22     21-25, 22-26, 23-27
+pebblit      Rock               307   150  boulderon@20     8-12, 18-22, 17-21
+emberling    Fire               309    45  pyrelash@16      24-28
+dripling     Water              314    45  tidecoil@16      6-12, 15-22
+sprigling    Grass              318    45  thornmane@16     24-28
+cogling      Steel              320   150  ironclad@24      16-20, 18-22, 21-25, 22-26
+mirepuff     Poison             330   140  -                5-9, 8-12, 10-14, 13-17, 6-12
+flutterfly   Bug/Flying         338   150  -                3-6, 4-8, 8-12, 10-14
+galebeak     Flying             340   130  -                3-6, 4-8, 5-9, 11-15, 12-16
+zapmote      Electric           348   120  -                4-8, 17-21
+psywisp      Psychic            352   100  -                5-9, 10-14, 11-15, 13-17
+lanternfly   Bug/Electric       362   110  -                11-15, 25-29, 26-30, 26-30
+brinecrab    Water/Rock         374   110  -                13-17, 16-20, 15-22
+tidewhisk    Water/Flying       374   120  -                12-16, 13-17, 16-20, 15-22
+voltbloom    Grass/Electric     387    75  -                23-27, 24-28, 25-29, 26-30
+gnawtl       Normal             394    90  -                10-14, 11-15, 12-16, 17-21
+duneghast    Rock/Psychic       402    90  -                23-27, 25-29, 26-30, 26-30
+gloomstalk   Dark               410     3  -                not wild
+cinderpaw    Fire/Dark          420    45  -                18-22, 22-26, 26-30
+boulderon    Rock               440    70  -                18-22, 17-21, 21-25, 24-28
+tidecoil     Water              448    45  -                15-22
+umbrawing    Dark/Flying        464    60  -                21-25, 23-27, 25-29, 26-30, 26-30
+pyrelash     Fire               468    45  -                not wild
+ironclad     Steel/Rock         476    55  -                22-26, 23-27, 24-28, 25-29, 26-30
+thornmane    Grass              478    45  -                not wild
+
+== ZONES  (south -> north as listed)
+#0  ROUTE ONE    Lv  3-6   BST 265-340  nibbit:45, flutterfly:35, galebeak:20
+#1  ROUTE ONE    Lv  4-8   BST 265-348  nibbit:28, flutterfly:24, galebeak:26, zapmote:22
+#2  ROUTE ONE    Lv  5-9   BST 265-352  nibbit:26, mirepuff:26, psywisp:24, galebeak:24
+#3  DEEPWOOD     Lv  8-12  BST 265-338  mirepuff:32, flutterfly:28, nibbit:22, pebblit:18
+#4  DEEPWOOD     Lv 10-14  BST 265-394  flutterfly:28, mirepuff:24, psywisp:24, nibbit:14, gnawtl:10
+#5  DEEPWOOD     Lv 11-15  BST 265-394  psywisp:28, lanternfly:26, galebeak:22, nibbit:14, gnawtl:10
+#6  SEASIDE      Lv 12-16  BST 265-394  tidewhisk:32, galebeak:26, nibbit:32, gnawtl:10
+#7  SEASIDE      Lv 13-17  BST 330-374  tidewhisk:30, brinecrab:28, mirepuff:22, psywisp:20
+#8  SEASIDE      Lv 16-20  BST 320-374  brinecrab:40, tidewhisk:34, cogling:26
+#9  ROCKY PASS   Lv 18-22  BST 307-440  pebblit:37, boulderon:15, cogling:26, cinderpaw:22
+#10 ROCKY PASS   Lv 17-21  BST 307-440  pebblit:37, zapmote:24, gnawtl:24, boulderon:15
+#11 DARK CAVE    Lv 21-25  BST 306-464  nocturn:36, cogling:28, boulderon:20, umbrawing:16
+#12 DARK CAVE    Lv 22-26  BST 306-476  nocturn:32, ironclad:15, cogling:33, cinderpaw:20
+#13 DARK CAVE    Lv 23-27  BST 306-476  umbrawing:30, nocturn:20, ironclad:15, duneghast:20, voltbloom:15
+#14 DARK CAVE    Lv 24-28  BST 309-476  boulderon:30, ironclad:25, voltbloom:15, emberling:15, sprigling:15
+#15 SPIRE RUINS  Lv 25-29  BST 362-476  duneghast:20, lanternfly:26, umbrawing:22, ironclad:20, voltbloom:12
+#16 SPIRE RUINS  Lv 26-30  BST 362-464  duneghast:22, umbrawing:26, lanternfly:22, cinderpaw:18, voltbloom:12
+#17 SPIRE RUINS  Lv 26-30  BST 362-476  lanternfly:32, duneghast:28, ironclad:22, umbrawing:18
+
+== TYPES
+type      species  moves  super-effective vs                 weak to
+Normal          2      5  -                                  -
+Fire            3      3  Grass,Bug,Steel                    Water,Rock
+Water           4      4  Fire,Rock                          Grass,Electric
+Grass           3      4  Water,Rock                         Fire,Bug,Poison,Flying
+Electric        3      3  Water,Flying                       -
+Rock            5      3  Fire,Bug,Flying                    Water,Grass,Steel
+Bug             2      1  Grass,Psychic,Dark                 Fire,Rock,Flying
+Poison          1      2  Grass                              Psychic
+Flying          4      3  Grass,Bug                          Electric,Rock
+Psychic         2      3  Poison                             Bug,Dark
+Dark            4      3  Psychic                            Bug  immune to Psychic
+Steel           2      3  Rock                               Fire  immune to Poison
+
+== DUEL at Lv 25  (hits for ROW to KO COLUMN with its best move; lower = stronger)
+species       wins  avg-hits  BST
+gloomstalk      22       2.2  410
+thornmane       18       2.9  478
+pyrelash        16       2.3  468
+tidecoil        15       3.3  448
+boulderon       15       3.4  440
+ironclad        15       3.7  476
+duneghast       14       2.9  402
+cogling         14       4.5  320
+brinecrab       12       2.8  374
+pebblit         12       3.0  307
+umbrawing       12       3.0  464
+gnawtl          12       3.6  394
+voltbloom       11       3.8  387
+zapmote         10       2.5  348
+lanternfly      10       2.8  362
+cinderpaw       10       2.9  420
+mirepuff        10       6.3  330
+tidewhisk        8       3.0  374
+dripling         7       4.5  314
+emberling        6       4.1  309
+psywisp          5       4.0  352
+sprigling        5       5.1  318
+galebeak         3       5.6  340
+flutterfly       2       4.6  338
+nocturn          1       4.1  306
+nibbit           1       5.0  265
+(wins = matchups this species takes strictly faster than the foe; tiers should track BST and evolution stage)

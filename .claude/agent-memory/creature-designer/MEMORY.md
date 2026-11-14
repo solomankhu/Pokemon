@@ -1,0 +1,3 @@
+- [Line endings](line-endings.md): monsters.py is CRLF, test.py/html are LF; Git Bash grep lies about CR. Check in binary with Python.
+- [Loot seed vs transcripts](loot-seed-transcripts.md) — cross-Game transcript tests must pin tile/steps/battles or FORCE_NO_LOOT
+- [Gated glade level cap](gated-glade-level-cap.md) — optional pockets: max = next trainer ace, min = evo level (OLD GROVE 16-18)

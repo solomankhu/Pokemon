@@ -1,0 +1,14 @@
+[
+  "fresh campaign locked until gym victory",
+  "victory offers descent, defer keeps trail playable",
+  "post-victory menu exposes descent",
+  "same-window entry retains campaign and suspends RPG input",
+  "duplicate entry and spoofed messages do not mutate checkpoint",
+  "checkpoint and pause return preserve every RPG field",
+  "refresh and CONTINUE offer the saved descent checkpoint",
+  "three enter/return cycles leave one RPG and no child runtime",
+  "loading failure exposes return without losing trail",
+  "readiness timeout offers retry and recovers one active chapter",
+  "storage denial requires explicit memory-only choice or cancel",
+  "file URL campaign loads locally and returns"
+]

@@ -1,0 +1,2 @@
+- [Recipe loops in tests](recipe-loops-in-tests.md) — new RECIPES rows break the generic all-recipes conservation loop; extend its inventory
+- [New glyph needs sprite same chunk](new-glyph-needs-sprite-same-chunk.md) — a glyph in MAP fails RENDER "own art" until draw_tile draws it

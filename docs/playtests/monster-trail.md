@@ -1,0 +1,43 @@
+# Duty spec: MONSTER TRAIL (`claude's monsters.html`)
+
+URL: `http://127.0.0.1:8765/claude's%20monsters.html`. Start fresh with
+`localStorage.clear()` and then a reload. State lives in `__GAME__.G`.
+
+**Battles render through the 3D presenter by default** (`combat/`). Its state is
+`battleHost.is3D()` and `battleHost.presenter.diagnostics` (`projected`, `effects`).
+"Basic presentation (2D)" in the battle SETTINGS restores the 2D arena.
+
+**Webcam (MT-16) rules:**
+- **Never grant `camera` to the MCP browser context, and never call `getUserMedia` there.** On this machine that opens the user's real webcam. Always launch a separate Chromium with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream` (for the denied path, `--deny-permission-prompts`) from `browser_run_code_unsafe`, through `page.context().browser().browserType().launch({executablePath, args})`. The Chromium 1228 build under `%LOCALAPPDATA%\ms-playwright\` works. Keep the handles on `page`, not `globalThis`, which doesn't survive between calls. Close every instance you launch.
+- The fake feed's moving ball triggers gestures, so battles advance on their own once the webcam is live. Start a battle with the webcam OFF when a step needs a stable state.
+- Headless can't make `document.hidden` true. Simulate it with `Object.defineProperty(document,'hidden',{get:()=>true})` plus a `visibilitychange` event, and say in the report that it was simulated.
+- The SETTINGS button's accessible name is "Battle settings". On the title screen after a reload, CONTINUE is ArrowDown then Z; Z on NEW GAME with an existing save opens KEEP SAVE / START NEW, defaulting to KEEP SAVE; START NEW requires ArrowDown then Z. X/Escape cancels without changing the save.
+
+**Input timing:** a key tap pressed while `G.player.moving` is true is dropped. Wait about
+100 ms after each press before polling or pressing again.
+
+| ID | Tag | Duty | How | Assert |
+|---|---|---|---|---|
+| MT-01 | [smoke] | Boot to title | load | `G.mode === 'title'`; the canvas is 640x480; console is empty |
+| MT-02 | [smoke] | Start a new game and pick a starter | input: Z through the intro (ends in `overworld` at (43,107) with an empty party); walk ArrowDown, then ArrowRight ×18 to (61,108); ArrowUp to face PROF. CEDAR; Z ×3 → `starter`; Z ×3 | `G.mode` returns to `overworld`; party length is 1 |
+| MT-03 | [smoke] | Walk | input: 4 arrow presses, 100 ms apart | `G.player.tx/ty` moved 4 tiles; no error |
+| MT-04 | | 3D wild battle and a hit | seam: `startBattle(...)`, `takeTurn(...)`; poll `G.battle.trauma > 0` or `presenter.diagnostics.effects`, then screenshot | `is3D()`; `projected.foe.y < 286` (HP box clear); **visible** on contact: a camera shake, a hit flash on the target, and a contact burst in front of the target. The attacker's shadow follows the lunge |
+| MT-05 | | Catch flow | seam: battle, then BALL | the ball count drops by 1; party or box grows on success; the 3D ball throw and shakes are visible |
+| MT-06 | | Save round-trip | seam: `saveGame()`, reload, CONTINUE | party, balls, materials and picked items are equal before and after |
+| MT-07 | | Sandbox mine and build | seam: give a PICK, face a pass boulder, mine; CRAFT; BUILD | `G.materials` changes as `mineDrop` predicts; a wall places only where `placementOk` says |
+| MT-08 | | DARK CAVE feel | seam: teleport into `CAVE_BAND` | the lantern cut-out is visible and the 4 neighbour tiles are lit; the vignette shows at tension ≥ 50 |
+| MT-09 | | Hunt battle | seam: `startHunt(...)` | the scare queue runs dark → reveal → settled; BALL is refused without using a turn |
+| MT-10 | | Touch layout | `browser_resize` to 390x844, then 844x390 | the D-pad, A, B and RUN don't overlap the canvas; `fitCanvas` keeps the 4:3 ratio |
+| MT-11 | | Reduced motion | test both: `browser_emulate_media` reducedMotion=reduce, **and** the 3D presenter's own Reduced motion checkbox (`combat/host.js`) | no shake, flash or hit-stop in 2D or 3D; the meters and HP drain are still drawn |
+| MT-12 | | 2D fallback battle | SETTINGS → Basic presentation (2D); then the MT-04 steps | the 2D arena draws; shake, flash and particles are visible; HP box at y=248 clears the platform at y=240 |
+| MT-13 | | Battle SETTINGS | open SETTINGS in battle; cycle Action commands ON/ASSIST/AUTO and quality HIGH/STANDARD/LOW | each setting persists across a reload; no console error |
+| MT-14 | | Timed command | a move that has a `cmd` step; press and release Z inside, then outside, the window | the result label differs (e.g. PERFECT/GOOD vs OK, which shows no label); the damage follows the timing |
+| MT-15 | | Game window | open through `Play Monster Trail.vbs`, or check in page | no right-click menu, no text selection, no Ctrl+wheel or Ctrl± zoom, no F5/Ctrl+R reload mid-game; the fullscreen toggle works; the cursor hides when idle in fullscreen |
+| MT-16 | | Webcam battle controls (fake camera) | launch Chromium with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`; battle → SETTINGS → Webcam control ON → Apply; complete or skip calibration; finish the battle; start a second battle | the calibration card renders with the preview; the `Webcam control on` badge shows in battle; after the battle `__GAME__.webcam.state === 'off'` and no `video` element remains; the second battle does not re-prompt; a battle that ends by a webcam double-burst confirm leaves `keys` all false; switching tabs mid-battle (`document.hidden`) stops the stream; after a reload with webcam ON saved, note whether the first battle re-prompts (report it, don't fail on it); with permission denied (`--deny-permission-prompts`, or the context's permissions cleared) the toast "Camera blocked: keyboard and touch still work." appears and the setting returns to OFF; v2 (signal v2): SETTINGS shows Webcam gain (slider 1..9), Punch zone, Mirror, Show webcam overlay in battle and Test gestures; Test gestures opens a modal whose preview shows the mask and whose label names the last gesture, and closing it leaves the battle exactly as it was (no move picked); with the overlay ON a small mask panel sits under SETTINGS/CAM at desktop and at 390x844, clear of both HP boxes, and it is gone after the battle; the calibration result shows delay and punch strength; gesture set (no camera needed: open it with `__GAME__`/`battleHost.openTestGestures`): Test gestures labels PUNCH/GUARD/THROW/SHOVE/RAISE/LEAN and shows a RECORD button with a Clip label select on desktop; RECORD is hidden on a coarse pointer (simulate with `matchMedia`); screenshots must include Test gestures with RECORD; `__GAME__.webcamBattleAction(id)` on the battle menu opens ATTACK/DEFEND/BAG/SWAP, puts the cursor on RUN for `run-cursor` (never flees), and throws a BALL only in a wild battle with balls; the console is empty |
+
+| MT-17 | | Conditions and varied scenes | force each condition and scene through `setForceCondition`/`setForceScene`; inspect 2D and 3D, cave night, 390x844 and 844x390; enable reduced motion | announced condition matches tag; no double tag; all skies/weather draw behind HUD; cave remains readable; particles freeze under reduced motion; rain/static audio stops after battle; console empty |
+| MT-18 | | Loot, BAG and CENTRE shop | buy/sell quantities, overworld POTION picker, battle POTION/GREAT BALL/SMOKE, wild loot message, save/reload, 390x844 and 844x390 | exact coin/count changes; no item consumed on refusal; SMOKE escapes wild only; hunt refuses catch; rewards precede fade; save restores bag/coins/balls; phone panels fit; console empty |
+
+**pygame build:** you can't play it in a browser. Run the suite with
+`MT_FRAME_DIR=<scratch>` and inspect about 40 dumped PNGs instead. They count as the
+screenshots for any duty above that names a frame.

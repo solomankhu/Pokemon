@@ -1,0 +1,18 @@
+{
+  "passed": [
+    "boot",
+    "3D all conditions",
+    "2D all conditions",
+    "shop buy two potions conserves coins",
+    "sell two twigs",
+    "bag/shop phone layouts",
+    "WebAudio rain/static source lifecycle",
+    "loot save round trip",
+    "battle potion heals 20 and consumes one",
+    "battle smoke consumes one",
+    "great ball catch consumes one and adds foe to party",
+    "fake camera settings/test/overlay at desktop and 400px reduced motion",
+    "camera teardown"
+  ],
+  "errors": []
+}

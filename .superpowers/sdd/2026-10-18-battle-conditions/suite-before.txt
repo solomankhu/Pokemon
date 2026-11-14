@@ -1,0 +1,53 @@
+pygame 2.6.1 (SDL 2.28.4, Python 3.13.14)
+Hello from the pygame community. https://www.pygame.org/contribute.html
+
+== MAP - geometry, legend, connectivity
+  88x110 map, 5911 reachable tiles
+  gated: 2 seams open 42 GEODE tiles (5955 reachable with every seam mined)
+  doors: 2 heal, 1 lab, 1 gym
+  cast: 20 NPCs, 8 of them trainers
+  furniture: 13 signs, 12 item balls, 22 ledges, 101 fishable water tiles
+  terrain: 383 dark grass, 416 cave floor, 139 sand, 40 bridge
+
+== ENGINE - data integrity, damage, xp, catching
+  balance probe: L14 dripling needs ~3 water pulses for L12 zapmote
+
+== BATTLE - full fights driven to completion
+  one-shot KO transcript:
+    A wild SPRIGLING appeared!
+    Go, EMBERLING!
+    EMBERLING used EMBER!
+    It's super effective!
+    Wild SPRIGLING fainted!
+    EMBERLING gained 27 EXP!
+  200 randomised even fights resolved
+
+== WORLD - trainer sight lines, save/load round-trip
+  first trainer sees you at (43, 101) (ROUTE ONE)
+  full traverse: 170 tiles from CEDAR TOWN to the gym door
+  8/8 trainers reachable; gym needs 6
+
+== SANDBOX - mining, crafting, building in ROCKY PASS, the seam and the GEODE
+  55 boulders, 12 hold ORE: [(16, 48), (18, 48), (22, 50), (26, 41), (31, 46), (33, 46), (56, 42), (58, 43), (72, 43), (74, 44), (79, 49), (81, 49)]
+  placement: 143/202 sampled pass tiles buildable, 36 re-verified against 49 targets
+  playthrough: PICK -> 3 boulders mined -> 1 BALL crafted -> WALL built and mined back
+  GEODE: IRON PICK crafted -> seam mined -> grass fight in 27 steps -> 8-BALL item -> save/load
+
+== CAVE - lantern, tension, the GLOOMSTALK's hunt, the PULSE (DARK CAVE horror kit)
+  can't block: all 505 stalker positions (plus their 4 neighbours) leave the trunk open
+  always completable: 505/505 starts cross (35 contacts, all lost, at most 1 each); rest_lose 80 > farthest walk out 67 > crossing 16
+  cave: lantern 2.25-4.70 tiles, 505-tile domain, rest 40/80, 300-tick traces deterministic
+
+== RENDER - shell, sprites, tiles, every mode and battle phase, juice
+  1652 render checks in 39.7s
+
+== PARITY - the .py and .html builds carry identical tables
+  26 species, 47 moves, 18 zones identical in both builds
+  sandbox: 5 recipes, 3 blocks, 1232 tile hashes, 12 ore spots, 55 mineable, 143 buildable tiles identical in both builds
+  seam: 2 tier-2-only seams [[65, 33], [70, 34]], GEODE [65, 30, 75, 34], 27 backstop cases, 4 load_edits cases identical in both builds
+  shell: 76 juice/HUD constants, 10 GEODE crystals, door [70, 34], 12 picked-ball lines identical in both builds
+  cave feel: 101 lantern hole radii, 434 mask profile samples, 63 HUD bar states, 12 tension-fx cases, 101 vignette / heartbeat steps, 31 + 16 PULSE ring tiles identical in both builds
+  hunt: HUNT table, 41 hunt_level cases, 9 hunt_count cases, 2 hint lines, 7 scare tunables identical in both builds
+  cave: LANTERN/TENSION/KEEP_OUT/HUNT_AI/PULSE tables, 507-tile domain, 101 radius steps, 5 spawns, 4 PULSE probes, 3 x 300-tick stalker traces (7 hunt, 7 lost, 48 lunge, 19 retreat) identical in both builds
+
+4874 checks passed.

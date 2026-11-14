@@ -1,0 +1,24 @@
+- generic [active] [ref=f1e1]:
+  - button "Battle settings" [ref=f1e4] [cursor=pointer]: ⚙ SETTINGS
+  - dialog "Test webcam gestures" [ref=f1e31]:
+    - generic [ref=f1e32]:
+      - heading "Test webcam gestures" [level=2] [ref=f1e33]
+      - paragraph [ref=f1e34]: "Battle menu gestures: PUNCH toward the camera (ATTACK), cross your forearms and hold still (GUARD = DEFEND), raise a hand and hold it (RAISE = BAG), push both palms forward (SHOVE = SWAP), throw overhand from a top corner (THROW = BALL), or lean out of view for a second (LEAN = cursor to RUN). Sweep a hand across to move the cursor; double-punch confirms in other menus. To cancel, keep both hands moving in the upper corners for 1.5 seconds without stopping. Nothing reaches the battle while this is open. RECORD saves a 3-second clip of one gesture to this computer (after a 3-2-1 count) so the controls can be tuned to how you move."
+      - status [ref=f1e36]: "Last gesture: none yet"
+      - paragraph
+      - generic [ref=f1e37]:
+        - text: Clip label
+        - combobox "Clip label" [disabled] [ref=f1e38]:
+          - option "punch" [selected]
+          - option "guard"
+          - option "throw"
+          - option "shove"
+          - option "raise"
+          - option "lean"
+          - option "sweep"
+          - option "cancel"
+          - option "idle"
+          - option "talk"
+      - button "RECORD" [disabled] [ref=f1e39]
+      - paragraph [ref=f1e40]: "3"
+      - button "Close" [ref=f1e41]

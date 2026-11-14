@@ -1,0 +1,16 @@
+- generic [active] [ref=e1]:
+  - generic:
+    - generic: "STAGE: 1/3"
+    - generic: "OXYGEN: 100%"
+    - generic: "SANITY: 100%"
+    - generic: "STAMINA: 100%"
+    - generic: "BATTERY: 100%"
+    - generic: "JAMMER: OFF [SPACE]"
+    - generic: "FLASHLIGHT: ON [F]"
+    - generic: "TERMINALS: 0/3"
+  - generic [ref=e2] [cursor=pointer]:
+    - heading "THE STATIC BELOW" [level=1] [ref=e3]
+    - paragraph [ref=e4]: Click anywhere to lock mouse & enter stage 1
+    - paragraph [ref=e5]: "[W, A, S, D] Walk | [SHIFT] Sprint | [L-CLICK] Fire Pulse Wave | [SPACE] Jammer"
+    - paragraph [ref=e6]: "Red Spheres: Resonators (Drains Sanity) | Purple Tetrahedrons: Stalkers (Drains Oxygen)"
+    - paragraph [ref=e7]: "WARNING: Avoid letting enemies get too close!"

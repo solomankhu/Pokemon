@@ -1,0 +1,4 @@
+- [MT starter needs prof walk](mt-starter-needs-prof-walk.md) — new game gives party 0; real-key route to PROF. CEDAR for MT-02
+- [MT step tap timing](mt-step-tap-timing.md) — wait 100ms after an arrow tap before polling moving, or taps get dropped
+- [MT 3D battle juice probe](mt-3d-battle-juice-probe.md) — battleHost 3D presenter: poll trauma / presenter.diagnostics.effects to screenshot hits
+- [Never real webcam](never-real-webcam.md) — never grant camera in the MCP context; MT-16 uses a separately launched fake-device Chromium

@@ -1,0 +1,2024 @@
+/* Headless test suite for "claude's monsters.html" (MONSTER TRAIL).
+ *
+ *     node "claude's monsters.test.js"
+ *
+ * The game's lower three layers (DATA / ENGINE / STATE) carry no DOM
+ * dependency, and the file guards boot() behind a `document` check, so the
+ * whole <script> body can be eval'd here and driven without a browser.
+ * Exits non-zero if anything fails.
+ */
+'use strict';
+const fs = require('fs');
+const path = require('path');
+
+const HTML = path.join(__dirname, "claude's monsters.html");
+
+const store = {};
+global.localStorage = {
+  getItem: k => (k in store ? store[k] : null),
+  setItem: (k, v) => { store[k] = String(v); }
+};
+
+(0, eval)(fs.readFileSync(HTML, 'utf8').match(/<script>([\s\S]*)<\/script>/)[1]);
+
+const g = globalThis.__GAME__;
+const G = g.G;
+if (!g) { console.error('__GAME__ export missing — did the boot guard or export get removed?'); process.exit(1); }
+
+let fail = 0, pass = 0;
+const ok = (cond, msg) => { if (cond) { pass++; } else { console.log('  FAIL: ' + msg); fail++; } };
+const section = s => console.log('\n== ' + s);
+const key = (x, y) => x + ',' + y;
+
+/* ------------------------------------------------------------------ MAP */
+section('MAP — geometry, legend, connectivity');
+
+const widths = new Set(g.MAP.map(r => r.length));
+ok(widths.size === 1 && widths.has(g.MAP_W),
+   'every map row is ' + g.MAP_W + ' wide, saw ' + [...widths].join(','));
+g.MAP.forEach((r, i) => {
+  if (r.length !== g.MAP_W) console.log('    row ' + i + ' len ' + r.length + ' |' + r + '|');
+});
+
+const legend = new Set('#.,;_~=sfBCcHDGSovK');
+const stray = new Set();
+g.MAP.forEach(r => [...r].forEach(c => { if (!legend.has(c)) stray.add(c); }));
+ok(stray.size === 0, 'unknown map characters: ' + [...stray].map(c => JSON.stringify(c)).join(' '));
+
+const START = g.START_TILE;
+
+// Flood fill under the rules the player actually moves by: ledges are
+// enterable only downward and drop you a further tile; balls are solid.
+const seen = new Set([key(...START)]);
+const queue = [START];
+while (queue.length) {
+  const [x, y] = queue.shift();
+  for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= g.MAP_W || ny >= g.MAP_H) continue;
+    const t = g.tileAt(nx, ny);
+    if (t === 'v') {
+      if (dy !== 1) continue;
+      const lx = nx, ly = ny + 1;
+      if (g.SOLID.has(g.tileAt(lx, ly)) || seen.has(key(lx, ly))) continue;
+      seen.add(key(lx, ly)); queue.push([lx, ly]);
+      continue;
+    }
+    if (seen.has(key(nx, ny)) || g.SOLID.has(t)) continue;
+    seen.add(key(nx, ny)); queue.push([nx, ny]);
+  }
+}
+const adjacentToOpen = (x, y) =>
+  [[0, -1], [0, 1], [-1, 0], [1, 0]].some(([dx, dy]) => seen.has(key(x + dx, y + dy)));
+
+ok(!g.SOLID.has(g.tileAt(...START)), 'player start tile is walkable');
+console.log('  ' + g.MAP_W + 'x' + g.MAP_H + ' map, ' + seen.size + ' reachable tiles');
+
+// Gated reachability. `seen` above is the world with nothing mined, and every
+// required thing (NPC, door, sign, trainer) must sit in it - the proof that
+// nothing the trail needs is behind a mineable tile. `seenMined` is the same
+// fill with every cracked seam (K) mined open. The only tiles it may add are
+// the GEODE pocket plus the seams, and anything reachable only in `seenMined`
+// (an item, a zone) is "gated" and must lie inside the GEODE.
+function floodFill(edits) {
+  const out = new Set([key(...START)]);
+  const q = [START];
+  while (q.length) {
+    const [x, y] = q.shift();
+    for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= g.MAP_W || ny >= g.MAP_H) continue;
+      const t = g.tileAt(nx, ny, edits);
+      if (t === 'v') {
+        if (dy !== 1) continue;
+        if (g.SOLID.has(g.tileAt(nx, ny + 1, edits)) || out.has(key(nx, ny + 1))) continue;
+        out.add(key(nx, ny + 1)); q.push([nx, ny + 1]);
+        continue;
+      }
+      if (out.has(key(nx, ny)) || g.SOLID.has(t)) continue;
+      out.add(key(nx, ny)); q.push([nx, ny]);
+    }
+  }
+  return out;
+}
+const SEAMS = [];
+g.MAP.forEach((r, y) => [...r].forEach((c, x) => { if (c === g.SEAM) SEAMS.push([x, y]); }));
+const ALL_MINED = Object.fromEntries(SEAMS.map(([x, y]) => [key(x, y), g.BLOCKS[g.SEAM].leaves]));
+const seenMined = floodFill(ALL_MINED);
+const [GX1, GY1, GX2, GY2] = g.GEODE;
+const inGeode = (x, y) => x >= GX1 && x <= GX2 && y >= GY1 && y <= GY2;
+const adjacentToMined = (x, y) =>
+  [[0, -1], [0, 1], [-1, 0], [1, 0]].some(([dx, dy]) => seenMined.has(key(x + dx, y + dy)));
+const gated = (x, y) => !adjacentToOpen(x, y) && adjacentToMined(x, y) && inGeode(x, y);
+const GEODE_OPEN = new Set();
+for (let y = GY1; y <= GY2; y++) {
+  for (let x = GX1; x <= GX2; x++) {
+    const t = g.tileAt(x, y);
+    if (!g.SOLID.has(t) || t === g.SEAM) GEODE_OPEN.add(key(x, y));
+  }
+}
+const sameSet = (a, b) => a.size === b.size && [...a].every(v => b.has(v));
+ok(sameSet(floodFill({}), seen), 'the gated fill with no edits is exactly the plain fill');
+ok(SEAMS.length === 2 && SEAMS.every(([x, y]) => inGeode(x, y)),
+   'the map has exactly 2 cracked seams, both on the GEODE: ' + JSON.stringify(SEAMS));
+ok([...seen].every(k => seenMined.has(k)), 'mining a seam only ever adds ground');
+const added = new Set([...seenMined].filter(k => !seen.has(k)));
+ok(sameSet(added, GEODE_OPEN), 'mining the seams opens exactly the GEODE interior plus the seams ('
+   + added.size + ' vs ' + GEODE_OPEN.size + ')');
+ok(![...GEODE_OPEN].some(k => seen.has(k)), 'the GEODE is sealed until a seam is mined');
+ok(SEAMS.some(([x, y]) => adjacentToOpen(x, y)), 'at least one seam can be faced from the unmined world');
+ok(SEAMS.every(([x, y]) => adjacentToMined(x, y)), 'every seam can be faced once the GEODE is open');
+ok(SEAMS.every(([x, y]) => !g.inSandbox(x, y) && g.inCave(y)), 'the seams sit in the DARK CAVE, outside ROCKY PASS');
+ok(SEAMS.every(([x, y]) => g.DIRS4.every(([dx, dy]) => g.tileAt(x + dx, y + dy) !== '_')),
+   'no seam touches the trunk road');
+console.log('  gated: ' + SEAMS.length + ' seams open ' + (GEODE_OPEN.size - SEAMS.length)
+  + ' GEODE tiles (' + seenMined.size + ' reachable with every seam mined)');
+
+const doors = {};
+g.MAP.forEach((r, y) => [...r].forEach((c, x) => {
+  if ('HDG'.includes(c)) (doors[c] = doors[c] || []).push([x, y]);
+}));
+for (const [c, label] of [['H', 'heal centre'], ['D', 'lab'], ['G', 'gym']]) {
+  ok(doors[c], 'at least one ' + label + ' exists on the map');
+  (doors[c] || []).forEach(pos => ok(adjacentToOpen(...pos),
+    label + ' at ' + pos + ' can be stood next to'));
+}
+ok((doors.H || []).length >= 2, 'the bigger world has more than one heal centre');
+
+for (const n of g.NPCS) {
+  ok(!g.SOLID.has(g.tileAt(n.x, n.y)), 'NPC ' + n.id + ' is not embedded in a wall');
+  ok(g.tileAt(n.x, n.y) !== 'v', 'NPC ' + n.id + ' is not standing on a ledge');
+  ok(adjacentToOpen(n.x, n.y), 'NPC ' + n.id + ' at ' + n.x + ',' + n.y + ' is reachable');
+}
+const spots = g.NPCS.map(n => n.x + ',' + n.y);
+ok(spots.length === new Set(spots).size, 'no two NPCs start on the same tile');
+
+const trainers = g.NPCS.filter(n => n.kind === 'trainer');
+ok(trainers.length >= g.GYM_REQUIREMENT,
+   'enough trainers exist (' + trainers.length + ') for the gym requirement ('
+   + g.GYM_REQUIREMENT + ')');
+console.log('  cast: ' + g.NPCS.length + ' NPCs, ' + trainers.length + ' of them trainers');
+
+const GRASS = [',', ';'];
+ok(JSON.stringify(g.GRASS) === JSON.stringify(GRASS), "the game's GRASS (what tryEncounter rolls on) is , and ;");
+let gatedZones = 0;
+for (const z of g.ZONES) {
+  const rect = [];
+  for (let y = z.y1; y <= z.y2; y++) for (let x = z.x1; x <= z.x2; x++) rect.push([x, y]);
+  let n = rect.filter(([x, y]) => GRASS.includes(g.tileAt(x, y)) && seen.has(key(x, y))).length;
+  if (n === 0 && rect.every(([x, y]) => inGeode(x, y))) {         // gated: only behind a seam
+    gatedZones++;
+    n = rect.filter(([x, y]) => GRASS.includes(g.tileAt(x, y)) && seenMined.has(key(x, y))).length;
+  }
+  ok(n > 0, 'encounter zone ' + JSON.stringify([z.x1, z.y1, z.x2, z.y2]) + ' has reachable grass (gated: with the seams mined)');
+}
+ok(gatedZones === 1, 'exactly one encounter zone is gated, the GEODE\'s (' + gatedZones + ')');
+const GEODE_ZONE = g.ZONES.find(z => z.x1 === 66 && z.y1 === 31 && z.x2 === 74 && z.y2 === 32);
+ok(GEODE_ZONE && GEODE_ZONE.min === 24 && GEODE_ZONE.max === 28 &&
+   JSON.stringify(GEODE_ZONE.pool) === JSON.stringify([['boulderon', 30], ['ironclad', 25], ['voltbloom', 15],
+                                                        ['emberling', 15], ['sprigling', 15]]),
+   "the GEODE zone is x66..74, y31..32, L24-28 with the creature-designer's pool");
+const gzi = g.ZONES.indexOf(GEODE_ZONE);
+ok(gzi > 0 && g.ZONES[gzi - 1].x1 === 64 && g.ZONES[gzi - 1].y1 === 27 && g.ZONES[gzi - 1].min === 23,
+   'the GEODE zone sits right after the DARK CAVE 23-27 zone');
+
+let orphan = 0;
+g.MAP.forEach((r, y) => [...r].forEach((c, x) => { if (c === ',' && !g.zoneAt(x, y)) orphan++; }));
+ok(orphan === 0, orphan + ' tall-grass tiles sit outside every encounter zone');
+
+const pathCols = new Set();
+g.MAP.forEach(r => [...r].forEach((c, x) => { if (c === '_') pathCols.add(x); }));
+ok(pathCols.size === 2, 'the trunk road occupies exactly 2 columns, saw ' + [...pathCols].join(','));
+
+const tilesOf = ch => {
+  const out = [];
+  g.MAP.forEach((r, y) => [...r].forEach((c, x) => { if (c === ch) out.push([x, y]); }));
+  return out;
+};
+const signTiles = tilesOf('S'), itemTiles = tilesOf('o');
+const ledges = tilesOf('v'), water = tilesOf('~');
+
+ok(Object.keys(g.SIGNS).length === signTiles.length,
+   'every S tile has sign text (map ' + signTiles.length + ', table '
+   + Object.keys(g.SIGNS).length + ')');
+signTiles.forEach(([x, y]) => {
+  ok(g.SIGNS[x + ',' + y], 'sign at ' + x + ',' + y + ' has text');
+  ok(adjacentToOpen(x, y), 'sign at ' + x + ',' + y + ' can be read');
+});
+ok(Object.keys(g.ITEMS).length === itemTiles.length,
+   'every o tile has an item amount (map ' + itemTiles.length + ', table '
+   + Object.keys(g.ITEMS).length + ')');
+itemTiles.forEach(([x, y]) => {
+  ok(g.ITEMS[x + ',' + y] > 0, 'item at ' + x + ',' + y + ' gives a positive amount');
+  ok(adjacentToOpen(x, y) || gated(x, y), 'item at ' + x + ',' + y + ' can be reached (gated: inside the GEODE)');
+});
+const gatedItems = itemTiles.filter(([x, y]) => gated(x, y));
+ok(JSON.stringify(gatedItems) === '[[75,30]]', 'exactly one item is gated behind the seam: ' + JSON.stringify(gatedItems));
+ok(g.ITEMS['75,30'] === 8, 'the GEODE ball is worth 8');
+
+ok(ledges.length > 0, 'the map has ledges');
+ledges.forEach(([x, y]) => {
+  ok(!g.SOLID.has(g.tileAt(x, y + 1)) && g.tileAt(x, y + 1) !== 'v',
+     'ledge ' + [x, y] + ' has a clear landing below');
+  ok(!g.SOLID.has(g.tileAt(x, y - 1)), 'ledge ' + [x, y] + ' can be approached from above');
+});
+
+const fishable = water.filter(([x, y]) => adjacentToOpen(x, y));
+ok(fishable.length >= 10, 'at least 10 water tiles are fishable, got ' + fishable.length);
+for (const w of g.WATER_ZONES) {
+  const inside = fishable.filter(([x, y]) => x >= w.x1 && x <= w.x2 && y >= w.y1 && y <= w.y2);
+  ok(inside.length > 0, 'water zone ' + JSON.stringify([w.x1, w.y1, w.x2, w.y2])
+     + ' covers reachable water');
+  for (const [sid] of w.pool) ok(g.SPECIES[sid], 'water zone references unknown species ' + sid);
+}
+
+const darkGrass = tilesOf(';'), caveFloor = tilesOf('c');
+const sand = tilesOf('s'), bridge = tilesOf('=');
+for (const [name, tiles] of [['dark grass', darkGrass], ['cave floor', caveFloor],
+                             ['sand', sand], ['bridge', bridge]]) {
+  ok(tiles.length > 0, 'the world has ' + name);
+  ok(tiles.some(([x, y]) => seen.has(key(x, y))), name + ' is reachable');
+}
+const orphanDark = darkGrass.filter(([x, y]) => seenMined.has(key(x, y)) && !g.zoneAt(x, y)).length;
+ok(orphanDark === 0, orphanDark + ' reachable dark-grass tiles sit outside every zone');
+const geodeGrass = darkGrass.filter(([x, y]) => inGeode(x, y));
+ok(geodeGrass.length && geodeGrass.every(([x, y]) => x >= 66 && x <= 74 && y >= 31 && y <= 32 && g.zoneAt(x, y) === GEODE_ZONE),
+   'every GEODE dark-grass tile lies in the GEODE zone (' + geodeGrass.length + ')');
+const landEnds = bridge.filter(([x, y]) =>
+  [-1, 1].some(dx => seen.has(key(x + dx, y)) && g.tileAt(x + dx, y) !== '='));
+ok(landEnds.length >= 2, 'the bridge meets land at both ends, saw ' + landEnds.length);
+
+let named = 0;
+for (let y = 0; y < g.MAP_H; y++) if (g.regionName(y) !== 'THE TRAIL') named++;
+ok(named > g.MAP_H * 0.75, 'most rows belong to a named region (' + named + '/' + g.MAP_H + ')');
+ok(g.inCave(Math.floor((g.CAVE_BAND[0] + g.CAVE_BAND[1]) / 2)), 'the cave band reports as cave');
+ok(!g.inCave(START[1]), 'the start tile is not in the cave');
+
+console.log('  furniture: ' + signTiles.length + ' signs, ' + itemTiles.length
+  + ' items, ' + ledges.length + ' ledges, ' + fishable.length + ' fishable water');
+console.log('  terrain: ' + darkGrass.length + ' dark grass, ' + caveFloor.length
+  + ' cave floor, ' + sand.length + ' sand, ' + bridge.length + ' bridge');
+
+/* --------------------------------------------------------------- ENGINE */
+section('ENGINE — data integrity, damage, xp, catching');
+
+for (const [id, sp] of Object.entries(g.SPECIES)) {
+  for (const [, mid] of sp.learn) ok(g.MOVES[mid], id + ' references unknown move ' + mid);
+  ok(sp.learn.some(l => l[0] === 1), id + ' has no level-1 move');
+  if (sp.evo) ok(g.SPECIES[sp.evo.into], id + ' evolves into unknown species ' + (sp.evo || {}).into);
+  for (const t of sp.types) ok(g.TYPE_CHART[t], id + ' has unknown type ' + t);
+  for (let L = 1; L <= 60; L++) {
+    const mv = g.movesForLevel(id, L);
+    ok(mv.length >= 1 && mv.length <= 4, id + ' at L' + L + ' knows ' + mv.length + ' moves');
+  }
+}
+for (const [id, mv] of Object.entries(g.MOVES)) ok(g.TYPE_CHART[mv.type], 'move ' + id + ' has unknown type');
+
+ok(g.typeEffectiveness('Water', ['Fire']) === 2, 'water beats fire');
+ok(g.typeEffectiveness('Fire', ['Grass']) === 2, 'fire beats grass');
+ok(g.typeEffectiveness('Grass', ['Water']) === 2, 'grass beats water');
+ok(g.typeEffectiveness('Electric', ['Water', 'Flying']) === 4, 'dual weakness stacks to 4x');
+ok(g.typeEffectiveness('Grass', ['Bug', 'Flying']) === 0.25, 'dual resistance stacks to 0.25x');
+
+const fixed = () => 0.5;
+const fireMon = g.makeMon('emberling', 5);
+const grassMon = g.makeMon('sprigling', 5);
+ok(fireMon.maxhp > 0 && fireMon.hp === fireMon.maxhp, 'a new monster starts at full HP');
+
+const superEff = g.damageCalc(fireMon, grassMon, 'ember', {}, {}, fixed);
+ok(!superEff.missed && superEff.dmg > 0 && superEff.eff === 2, 'ember vs grass is super effective');
+ok(superEff.dmg < grassMon.maxhp, 'a level-5 hit does not one-shot (' + superEff.dmg + '/' + grassMon.maxhp + ')');
+ok(g.damageCalc(grassMon, fireMon, 'vinewhip', {}, {}, fixed).eff === 0.5, 'vine whip is resisted by fire');
+ok(g.damageCalc(fireMon, grassMon, 'growl', {}, {}, fixed).dmg === 0, 'status moves deal no damage');
+
+let missed = 0;
+for (let i = 0; i < 500; i++) if (g.damageCalc(fireMon, grassMon, 'aerialace', {}, {}, Math.random).missed) missed++;
+ok(missed === 0, 'a never-miss move never missed in 500 tries (missed ' + missed + ')');
+
+let miss90 = 0;
+for (let i = 0; i < 5000; i++) if (g.damageCalc(fireMon, grassMon, 'rockthrow', {}, {}, Math.random).missed) miss90++;
+ok(miss90 / 5000 > 0.06 && miss90 / 5000 < 0.14,
+   '90%-accuracy move missed ' + (100 * miss90 / 5000).toFixed(1) + '% of the time');
+
+const boosted = g.damageCalc(fireMon, grassMon, 'ember', { spa: 2 }, {}, fixed).dmg;
+const lowered = g.damageCalc(fireMon, grassMon, 'ember', { spa: -2 }, {}, fixed).dmg;
+ok(boosted > superEff.dmg && superEff.dmg > lowered,
+   'stat stages scale damage (' + lowered + ' < ' + superEff.dmg + ' < ' + boosted + ')');
+
+const evolver = g.makeMon('emberling', 5);
+const events = g.gainXp(evolver, g.xpForLevel(17) - evolver.xp);
+ok(evolver.level >= 16, 'gained levels, reached ' + evolver.level);
+ok(evolver.id === 'pyrelash', 'evolved into pyrelash, got ' + evolver.id);
+ok(events.some(e => e.t === 'evolve'), 'an evolve event was emitted');
+ok(evolver.moves.length <= 4, 'moveset stays capped at 4, got ' + evolver.moves.length);
+ok(evolver.hp <= evolver.maxhp, 'HP stays within max after level-ups');
+
+const nicknamed = g.makeMon('emberling', 15, 'SPARKY');
+g.gainXp(nicknamed, g.xpForLevel(17));
+ok(nicknamed.name === 'SPARKY', 'a nickname survives evolution, got ' + nicknamed.name);
+
+const hurt = g.makeMon('nibbit', 5);
+let caughtWeak = 0;
+for (let i = 0; i < 2000; i++) { hurt.hp = 1; if (g.catchRoll(hurt, 1.5, Math.random).caught) caughtWeak++; }
+ok(caughtWeak / 2000 > 0.7, 'a nearly-fainted nibbit is caught ' + (100 * caughtWeak / 2000).toFixed(0) + '% of the time');
+
+const healthy = g.makeMon('nibbit', 5);
+let caughtFull = 0;
+for (let i = 0; i < 2000; i++) if (g.catchRoll(healthy, 1.5, Math.random).caught) caughtFull++;
+ok(caughtFull < caughtWeak, 'a healthy monster is harder to catch than a hurt one');
+
+for (const id of Object.keys(g.SPECIES)) {
+  const mon = g.makeMon(id, 10);
+  mon.hp = 1;
+  const res = g.catchRoll(mon, 1.5, Math.random);
+  ok(res.shakes >= 0 && res.shakes <= 4, id + ' produced ' + res.shakes + ' shakes (must be 0..4)');
+}
+
+for (const z of g.ZONES) for (const [id] of z.pool) ok(g.SPECIES[id], 'encounter table references unknown species ' + id);
+for (const n of g.NPCS) if (n.team) for (const [id] of n.team) ok(g.SPECIES[id], 'trainer ' + n.id + ' uses unknown species ' + id);
+for (const [id] of g.GYM_LEADER.team) ok(g.SPECIES[id], 'gym leader uses unknown species ' + id);
+
+const probeMon = g.makeMon('dripling', 14);
+const probeFoe = g.makeMon('zapmote', 12);
+const hits = Math.ceil(probeFoe.maxhp / g.damageCalc(probeMon, probeFoe, 'waterpulse', {}, {}, fixed).dmg);
+ok(hits >= 2 && hits <= 8, 'gym lead takes a sane number of hits to fell (' + hits + ')');
+console.log('  balance probe: L14 dripling needs ~' + hits + ' water pulses for L12 zapmote');
+
+/* --------------------------------------------------------------- BATTLE */
+section('BATTLE — full fights driven to completion');
+
+// Play a battle the way a person would: tick the clock, press through every
+// message, and choose an action whenever the game asks for one.
+function runBattle(chooseAction) {
+  const log = [];
+  let guard = 0;
+  while (G.battle && G.battle.phase !== 'over' && guard++ < 20000) {
+    const b = G.battle;
+    g.updateBattle(1 / 60);
+    b.dispMine = b.mine.hp;           // settle HP bars instantly
+    b.dispFoe = b.foe.hp;
+    if (b.step && b.step.t === 'msg') { log.push(b.step.s); b.step = null; continue; }
+    if (b.step) continue;
+    if (b.phase === 'menu') {
+      g.takeTurn(b, chooseAction(b));
+    } else if (b.phase === 'swap' && b.forcedSwap) {
+      const next = G.party.find(m => m.hp > 0);
+      if (!next) break;
+      b.forcedSwap = false;
+      b.mine = next; b.dispMine = next.hp; b.stagesMine = {};
+      b.phase = 'menu';
+    }
+  }
+  ok(guard < 20000, 'battle terminated instead of spinning (' + guard + ' ticks)');
+  return log;
+}
+
+function freshBattle(mine, foe, trainer) {
+  G.party = Array.isArray(mine) ? mine : [mine];
+  G.balls = 20;
+  G.fadeDir = 0; G.fadeCb = null; G.mode = 'overworld';
+  g.startBattle(foe, trainer ? { trainer } : {});
+}
+
+// Message ordering. Steps queued from inside a running `do` must splice in at
+// the current position — if they appended, the faint would be narrated before
+// the attack that caused it.
+freshBattle(g.makeMon('emberling', 40), g.makeMon('sprigling', 3));
+let log = runBattle(() => ({ t: 'attack', move: 'ember' }));
+console.log('  one-shot KO transcript:');
+log.forEach(l => console.log('    ' + l));
+const iUsed = log.findIndex(s => s.includes('used EMBER'));
+const iFaint = log.findIndex(s => s.includes('fainted'));
+const iExp = log.findIndex(s => s.includes('EXP'));
+ok(iUsed >= 0, 'the attack was narrated');
+ok(iFaint > iUsed, 'the faint is narrated after the attack that caused it');
+ok(iExp > iFaint, 'EXP is narrated after the faint');
+
+const ids = Object.keys(g.SPECIES);
+for (let i = 0; i < 200; i++) {
+  const mine = g.makeMon(ids[i % ids.length], 20);
+  const foe = g.makeMon(ids[(i * 7 + 3) % ids.length], 20);
+  freshBattle(mine, foe);
+  runBattle(b => ({ t: 'attack', move: b.mine.moves[i % b.mine.moves.length] }));
+  ok(mine.hp >= 0 && mine.hp <= mine.maxhp, 'HP stayed in range for ' + mine.id);
+}
+console.log('  200 randomised even fights resolved');
+
+const maya = g.NPCS.find(n => n.id === 't2');
+freshBattle(g.makeMon('tidecoil', 45), g.makeMon(maya.team[0][0], maya.team[0][1]), maya);
+log = runBattle(() => ({ t: 'attack', move: 'aquatail' }));
+ok(log.filter(s => s.includes('sent out')).length === maya.team.length,
+   'trainer worked through all ' + maya.team.length + ' of their monsters');
+ok(log.some(s => s.includes(maya.defeat)), 'trainer spoke their defeat line');
+ok(G.beaten.t2 === true, 'trainer was recorded as beaten');
+
+let joined = 0;
+for (let i = 0; i < 60; i++) {
+  freshBattle(g.makeMon('dripling', 30), g.makeMon('nibbit', 4));
+  const before = G.party.length;
+  runBattle(b => { b.foe.hp = 1; return { t: 'ball' }; });
+  if (G.party.length > before) joined++;
+}
+ok(joined > 40, 'a weakened wild monster joined the party ' + joined + '/60 times');
+ok(G.balls < 20, 'balls were actually consumed (' + G.balls + ' left)');
+
+let escaped = 0;
+for (let i = 0; i < 60; i++) {
+  freshBattle(g.makeMon('zapmote', 30), g.makeMon('pebblit', 5));
+  if (runBattle(() => ({ t: 'run' })).some(s => s.includes('Got away'))) escaped++;
+}
+ok(escaped > 30, 'a much faster monster escaped ' + escaped + '/60 times');
+
+freshBattle(g.makeMon('sprigling', 3), g.makeMon('pyrelash', 50));
+runBattle(() => ({ t: 'attack', move: 'tackle' }));
+ok(!G.battle || G.battle.phase === 'over', 'a lost battle still ends cleanly');
+ok(!g.partyAlive(), 'the party is wiped after a loss');
+
+G.party = [g.makeMon('emberling', 20), g.makeMon('dripling', 20)];
+G.fadeDir = 0; G.mode = 'overworld';
+g.startBattle(g.makeMon('nibbit', 5), {});
+let hasSwapped = false;
+log = runBattle(b => {
+  if (!hasSwapped) { hasSwapped = true; return { t: 'swap', index: 1 }; }
+  return { t: 'attack', move: b.mine.moves[0] };
+});
+ok(log.some(s => s.includes('Come back')), 'swapping mid-fight was narrated');
+
+// A status-only fight must still terminate, and the -6 stage floor must report.
+freshBattle(g.makeMon('thornmane', 40), g.makeMon('nibbit', 3));
+log = runBattle(() => ({ t: 'attack', move: 'growl' }));
+ok(log.some(s => s.includes('ATTACK')), 'growl reported a stat change');
+ok(log.some(s => s.includes("won't go lower")), 'the -6 stat-stage floor was reached and reported');
+
+// -- the DARK CAVE hunt battle (GLOOMSTALK) ------------------------------------
+{
+  const sp = g.SPECIES.gloomstalk;
+  const b6 = sp.base;
+  ok(sp.name === 'GLOOMSTALK' && sp.types.join() === 'Dark', 'GLOOMSTALK is pure Dark');
+  ok([b6.hp, b6.atk, b6.def, b6.spa, b6.spd, b6.spe].join() === '75,100,60,40,60,75',
+     'GLOOMSTALK base stats 75/100/60/40/60/75 (BST 410)');
+  ok(sp.catchRate === 3 && sp.baseExp === 190 && sp.evo === null, 'GLOOMSTALK: catch rate 3, base EXP 190, no evolution');
+  ok(sp.art.kind === 'quad' && sp.art.big && sp.art.mane, 'GLOOMSTALK reuses the quad silhouette (big + mane)');
+  ok(g.HUNT.species === 'gloomstalk', 'HUNT names GLOOMSTALK');
+  ok(!g.ZONES.concat(g.WATER_ZONES).some(z => z.pool.some(([s]) => s === 'gloomstalk')),
+     'GLOOMSTALK is in no grass or fishing pool, so it can never be caught');
+  for (let lv = g.HUNT.lvMin; lv <= g.HUNT.lvMax; lv++) {
+    ok(g.movesForLevel('gloomstalk', lv).join() === 'bite,quickattack,howl,crunch',
+       'GLOOMSTALK L' + lv + ' knows BITE, QUICK ATTACK, HOWL, CRUNCH');
+  }
+  ok(g.huntLevel([1]) === 22 && g.huntLevel([23]) === 22 && g.huntLevel([24]) === 23, 'huntLevel: best - 1, floored at 22');
+  ok(g.huntLevel([29]) === 28 && g.huntLevel([100]) === 28, 'huntLevel is capped at 28');
+  ok(g.huntLevel([5, 26, 12]) === 25, "huntLevel reads the party's best level");
+  const curve = Array.from({ length: 100 }, (_, i) => g.huntLevel([i + 1]));
+  ok(curve.every((v, i) => v >= 22 && v <= 28 && (i === 0 || v >= curve[i - 1])),
+     'huntLevel stays in 22..28 and never falls');
+
+  const freshHunt = (mine, lv) => {
+    G.party = Array.isArray(mine) ? mine : [mine];
+    G.balls = 20; G.fadeDir = 0; G.fadeCb = null; G.mode = 'overworld';
+    g.startBattle(g.makeMon('gloomstalk', lv || 25), { hunt: true });
+    return G.battle;
+  };
+  const toMenu = events => {
+    const out = [];
+    let guard = 0;
+    while (G.battle && G.battle.phase !== 'menu' && G.battle.phase !== 'over' && guard++ < 5000) {
+      const b = G.battle;
+      g.updateBattle(1 / 60);
+      b.dispMine = b.mine.hp; b.dispFoe = b.foe.hp;
+      if (b.step && b.step.t === 'msg') {
+        out.push(b.step.s);
+        if (events) events.push(['msg', b.scare]);
+        b.step = null;
+      }
+    }
+    return out;
+  };
+
+  // The jumpscare intro, through the queue only, with the global RNG untouched.
+  const realRandom = Math.random;
+  const realScare = g.SFX.scare;
+  let draws = 0;
+  const events = [];
+  g.SFX.scare = () => events.push(['sfx', G.battle.scare]);
+  Math.random = () => { draws++; return realRandom(); };
+  let b = freshHunt(g.makeMon('pyrelash', 26));
+  ok(b.hunt === true && b.trainer === null && b.scare === 'dark', 'startBattle({hunt}) stores b.hunt, foe hidden');
+  ok(!b.queue.some(s => s.t === 'wait'), 'no held frame with motion on');
+  const intro = toMenu(events);
+  Math.random = realRandom;
+  g.SFX.scare = realScare;
+  ok(intro.join('|') === ['Something was breathing right behind you...', 'GLOOMSTALK lunged out of the dark!',
+     "It's hunting you. There's no time to aim a BALL!", 'Go, PYRELASH!'].join('|'),
+     'the scare intro narrates in order: ' + intro.join(' / '));
+  ok(events.map(e => e.join(':')).join() === 'sfx:dark,msg:dark,msg:reveal,msg:reveal,msg:',
+     'scare sfx, dark line, then the reveal lines, then Go: ' + events.map(e => e.join(':')).join());
+  ok(draws === 0, 'the scare intro never calls Math.random (' + draws + ')');
+  ok(b.scareFlash > 0 && b.scareFlash <= g.SCARE_FLASH_TIME && b.trauma > 0, 'the reveal fired one flash and a shake');
+  ok(G.battle.phase === 'menu' && G.battle.scare === null, 'the intro ends at the menu with the scare over');
+
+  // foePose: a lunge from close up that settles on the platform.
+  const pose = (scare, t) => g.foePose({ scare, scareT: t });
+  ok(pose('reveal', 0)[2] > 78 && pose('reveal', g.SCARE_LUNGE_TIME)[2] === 78 && pose(null, 0)[2] === 78,
+     'the foe lunges in large and settles at its platform size');
+
+  // BALL refused without using a turn.
+  const hp0 = [b.mine.hp, b.foe.hp];
+  draws = 0;
+  Math.random = () => { draws++; return realRandom(); };
+  g.takeTurn(b, { t: 'ball' });
+  const refused = toMenu();
+  Math.random = realRandom;
+  ok(refused.join() === 'It melts into the dark before the BALL can land!', 'BALL in a hunt is refused: ' + refused);
+  ok(G.balls === 20 && b.ballAnim === null && b.mine.hp === hp0[0] && b.foe.hp === hp0[1] && b.phase === 'menu',
+     'the refused BALL was not spent, and no turn was used');
+  ok(draws === 1, 'the refusal draws only the usual foe-move pick from Math.random (' + draws + ')');
+
+  // RUN uses the fixed HUNT odds whatever the speeds; a failure gives a free attack.
+  const huntLog = [];
+  for (const [id, lv] of [['pebblit', 22], ['galebeak', 60]]) {
+    for (const [roll, should] of [[g.HUNT.runOdds - 0.01, true], [g.HUNT.runOdds + 0.01, false]]) {
+      b = freshHunt(g.makeMon(id, lv));
+      toMenu();
+      // foe-move pick first, then the run roll
+      let n = 0;
+      Math.random = () => (n++ === 0 ? 0 : roll);
+      g.takeTurn(b, { t: 'run' });
+      Math.random = realRandom;
+      const out = toMenu();
+      const tag = id + ' L' + lv + ', roll ' + roll.toFixed(2);
+      if (should) {
+        ok(out[0] === 'You bolted into the dark... it lost your scent. For now.', tag + ': RUN succeeds under the fixed odds');
+        ok(b.phase === 'over' && b.result === 'run' && b.huntPaid, tag + ': the run ends the hunt through huntOver');
+      } else {
+        ok(out[0] === 'It cut you off!', tag + ': RUN fails above the fixed odds');
+        ok(out.slice(1).some(s => s.startsWith('Foe GLOOMSTALK used')), tag + ': a failed RUN gives the foe its free attack');
+        ok(b.phase === 'menu' && !b.huntPaid, tag + ': the fight goes on');
+      }
+    }
+  }
+
+  // huntOver rewards: first win vs repeat, conserved in materials.
+  G.flags.huntBeaten = 0;
+  G.materials = g.zeroMaterials();
+  G.materials.stone = 5;
+  const ores = [];
+  for (let n = 1; n <= 3; n++) {
+    b = freshHunt(g.makeMon('pyrelash', 60));
+    const out = runBattle(() => ({ t: 'attack', move: 'infernofang' }));
+    const want = n === 1 ? g.HUNT.rewardFirst.ore : g.HUNT.rewardRepeat.ore;
+    const iF = out.findIndex(s => s.includes('Wild GLOOMSTALK fainted'));
+    const iE = out.findIndex(s => s.includes('EXP'));
+    const iO = out.findIndex(s => s.includes('behind in the dark'));
+    ok(iF >= 0 && iF < iE && iE < iO && out[iO] === 'It left ' + want + ' ORE behind in the dark.',
+       'win ' + n + ': faint, then EXP, then the ' + want + '-ORE line (splice order kept)');
+    ok(b.result === 'win' && G.flags.huntBeaten === n, 'win ' + n + ': the win count is ' + n);
+    ores.push(G.materials.ore);
+    ok(G.materials.stone === 5 && Object.values(G.materials).reduce((a, c) => a + c, 0) === 5 + G.materials.ore,
+       'win ' + n + ': only ORE was added');
+  }
+  ok(ores.join() === '3,4,5', 'ORE: +3 on the first win, +1 after (' + ores + ')');
+
+  // Losing is the normal whiteout and pays nothing.
+  G.flags.huntBeaten = 0;
+  const ore0 = G.materials.ore;
+  b = freshHunt(g.makeMon('nibbit', 5), 28);
+  runBattle(() => ({ t: 'attack', move: 'tackle' }));
+  ok(b.result === 'lose' && G.materials.ore === ore0 && G.flags.huntBeaten === 0, 'a lost hunt pays nothing');
+  const cb = G.fadeCb; G.fadeCb = null; G.fadeDir = 0; cb();
+  ok(G.mode === 'dialogue' && G.party[0].hp === G.party[0].maxhp &&
+     G.player.tx === G.lastCentre[0] && G.player.ty === G.lastCentre[1],
+     'a lost hunt whites out to the centre, healed, like any loss');
+  G.mode = 'overworld'; G.dialogue = null;
+
+  // Reduced motion: the normal fade, a held 0.4 s dark frame, no flash or lunge.
+  try {
+    g.setScareCalm(true);
+    G.party = [g.makeMon('pyrelash', 26)];
+    G.fadeDir = 0; G.fadeCb = null; G.mode = 'overworld'; G.battle = null;
+    g.startHunt(g.makeMon('gloomstalk', 25));
+    ok(G.battle === null && G.fadeDir === 1 && G.fadeCb, 'reduced motion: startHunt fades in normally');
+    const c2 = G.fadeCb; G.fadeCb = null; G.fadeDir = 0; c2();
+    b = G.battle;
+    ok(b.queue.slice(0, 3).map(s => s.t + (s.ms || '')).join() === 'do,wait0.4,msg',
+       'reduced motion: sfx, a held 0.4 s dark frame, then the first line');
+    ok(toMenu().join('|') === intro.join('|'), 'reduced motion: the intro text is identical');
+    ok(b.scareFlash === 0 && b.trauma === 0, 'reduced motion: no flash and no shake at the reveal');
+    ok(g.foePose({ scare: 'reveal', scareT: 0 })[2] === 78, 'reduced motion: no lunge');
+  } finally {
+    g.setScareCalm(null);
+  }
+  ok(g.scareCalm() === g.REDUCED_MOTION, 'the scare override is restored');
+  G.fadeDir = 0; G.fadeCb = null; G.mode = 'overworld'; G.battle = null;
+  g.startHunt(g.makeMon('gloomstalk', 25));
+  ok(G.mode === 'battle' && G.battle.hunt && G.fadeDir === 0, 'motion on: startHunt is a hard cut');
+  G.battle = null; G.mode = 'overworld';
+  ok([null, '3', -4, true, NaN, [], 0, 2, 2.9].map(v => g.huntCount(v)).join() === '0,0,0,0,0,0,0,2,2',
+     'huntCount cleans a saved win count to a non-negative int');
+}
+
+/* ---------------------------------------------------------------- WORLD */
+section('WORLD — trainer sight lines, save/load round-trip');
+
+// BFS over tiles that are genuinely walkable, NPC bodies and ledges included.
+function route(sx, sy, tx, ty) {
+  const prev = new Map([[key(sx, sy), null]]);
+  const q = [[sx, sy]];
+  while (q.length) {
+    const [x, y] = q.shift();
+    if (x === tx && y === ty) {
+      const out = [];
+      let c = key(x, y);
+      while (c) { out.unshift(c.split(',').map(Number)); c = prev.get(c); }
+      return out;
+    }
+    for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+      const nx = x + dx, ny = y + dy;
+      if (prev.has(key(nx, ny))) continue;
+      if (g.tileAt(nx, ny) === 'v') {
+        if (dy !== 1) continue;
+        const lx = nx, ly = ny + 1;
+        if (prev.has(key(lx, ly)) || g.blockedFor(lx, ly, 'down')) continue;
+        prev.set(key(lx, ly), key(x, y)); q.push([lx, ly]);
+        continue;
+      }
+      if (g.blockedFor(nx, ny)) continue;
+      prev.set(key(nx, ny), key(x, y)); q.push([nx, ny]);
+    }
+  }
+  return null;
+}
+
+function walkTo(tx, ty) {
+  const p = G.player;
+  const legs = route(p.tx, p.ty, tx, ty);
+  if (!legs) return { unreachable: true };
+  for (const [x, y] of legs.slice(1)) {
+    p.dir = y < p.ty ? 'up' : y > p.ty ? 'down' : x < p.tx ? 'left' : 'right';
+    p.tx = x; p.ty = y;
+    g.checkTrainerSight();
+    if (G.mode !== 'overworld') return { engaged: true, at: [x, y] };
+  }
+  return { arrived: true, steps: legs.length };
+}
+
+const ALL_TRAINERS = g.NPCS.filter(n => n.kind === 'trainer');
+let GYM_DOOR = null;
+g.MAP.forEach((r, y) => [...r].forEach((c, x) => { if (c === 'G') GYM_DOOR = [x, y]; }));
+const APPROACH = [GYM_DOOR[0], GYM_DOOR[1] + 1];
+
+G.flags.starter = true;
+G.party = [g.makeMon('tidecoil', 40)];
+G.beaten = {};
+G.mode = 'overworld'; G.fadeDir = 0;
+G.player.tx = g.START_TILE[0]; G.player.ty = g.START_TILE[1];
+
+let r = walkTo(...APPROACH);
+ok(r.engaged, 'walking the trail runs into a trainer: ' + JSON.stringify(r));
+if (r.at) console.log('  first trainer sees you at ' + JSON.stringify(r.at)
+  + ' (' + g.regionName(r.at[1]) + ')');
+
+G.beaten = Object.fromEntries(ALL_TRAINERS.map(n => [n.id, true]));
+G.mode = 'overworld';
+G.player.tx = g.START_TILE[0]; G.player.ty = g.START_TILE[1];
+r = walkTo(...APPROACH);
+ok(r.arrived, 'the trail is walkable end to end once trainers are beaten: '
+   + JSON.stringify(r));
+if (r.arrived) console.log('  full traverse: ' + r.steps + ' tiles to the gym door');
+ok(g.tileAt(...GYM_DOOR) === 'G', 'the gym door is where the walk ends');
+
+let reachableTrainers = 0;
+for (const n of ALL_TRAINERS) {
+  const found = [[0, 1], [0, -1], [-1, 0], [1, 0]].some(([dx, dy]) =>
+    route(g.START_TILE[0], g.START_TILE[1], n.x + dx, n.y + dy));
+  if (found) reachableTrainers++;
+  else ok(false, 'trainer ' + n.id + ' cannot be reached from the start');
+}
+ok(reachableTrainers >= g.GYM_REQUIREMENT,
+   'at least ' + g.GYM_REQUIREMENT + ' trainers reachable (found ' + reachableTrainers + ')');
+
+// the gym refuses you until the requirement is met, then opens
+G.beaten = {};
+G.mode = 'overworld';
+G.player.tx = APPROACH[0]; G.player.ty = APPROACH[1]; G.player.dir = 'up';
+G.dialogue = null;
+g.interact();
+ok(G.mode === 'dialogue' && G.dialogue.lines.some(l => /budge|rule/i.test(l)),
+   'the gym turns you away before the requirement is met');
+G.dialogue = null; G.mode = 'overworld';
+G.beaten = Object.fromEntries(ALL_TRAINERS.map(n => [n.id, true]));
+g.interact();
+ok(G.mode === 'dialogue' && G.dialogue.lines.join(' ').includes('slide open'),
+   'the gym opens once enough trainers are beaten');
+G.dialogue = null; G.mode = 'overworld';
+
+// --- save / load round-trip, now carrying picked items and the last centre ---
+G.mode = 'overworld';
+G.beaten = { t1: true };
+G.party = [g.makeMon('umbrawing', 26), g.makeMon('ironclad', 24)];
+G.party[0].hp = 7;
+G.balls = 13;
+G.picked = new Set(['20,89', '52,68']);
+G.lastCentre = [12, 59];
+G.flags = { starter: true, gym: false };
+G.player.tx = 44; G.player.ty = 60; G.player.dir = 'left';
+
+ok(g.saveGame(), 'saveGame reported success');
+const snapshot = JSON.stringify(G.party.map(m => [m.id, m.level, m.hp, m.moves.join('|')]));
+G.party = []; G.balls = 0; G.beaten = {}; G.picked = new Set();
+G.flags = { starter: false, gym: false };
+G.lastCentre = g.START_TILE.slice();
+
+ok(g.loadGame(), 'loadGame reported success');
+ok(JSON.stringify(G.party.map(m => [m.id, m.level, m.hp, m.moves.join('|')])) === snapshot,
+   'the party round-tripped exactly');
+ok(G.balls === 13, 'ball count round-tripped, got ' + G.balls);
+ok(G.beaten.t1 === true, 'beaten-trainer flags round-tripped');
+ok(G.picked.has('20,89') && G.picked.has('52,68') && G.picked.size === 2,
+   'picked items round-tripped, got ' + [...G.picked].join(' '));
+ok(G.lastCentre[0] === 12 && G.lastCentre[1] === 59, 'last heal centre round-tripped');
+ok(G.player.tx === 44 && G.player.ty === 60, 'map position round-tripped');
+ok(G.player.px === 44 * 32, 'pixel position rebuilt from the tile position');
+
+// --- picking an item is one-way and credits the pouch ---
+G.picked = new Set();
+G.balls = 0;
+const ipos = Object.keys(g.ITEMS)[0];
+const [ix, iy] = ipos.split(',').map(Number);
+G.dialogue = null;
+g.pickUp(ix, iy);
+ok(G.balls === g.ITEMS[ipos], 'picking up ' + ipos + ' gave ' + g.ITEMS[ipos] + ' balls');
+ok(G.picked.has(ipos), 'the item is marked as taken');
+ok(!g.blockedFor(ix, iy), 'a taken item stops blocking its tile');
+const beforeBalls = G.balls;
+G.dialogue = null;
+g.pickUp(ix, iy);
+ok(G.balls === beforeBalls, 'picking the same item twice gives nothing more');
+
+// --- ledges only yield downward ---
+let led = null;
+g.MAP.forEach((rr2, y) => [...rr2].forEach((c, x) => { if (c === 'v' && !led) led = [x, y]; }));
+ok(g.blockedFor(led[0], led[1], 'up'), 'a ledge blocks you going up');
+ok(g.blockedFor(led[0], led[1], 'left'), 'a ledge blocks you going sideways');
+ok(!g.blockedFor(led[0], led[1], 'down'), 'a ledge lets you drop south');
+
+store['monster-trail-save-v1'] = '{"party":[{"id":"NOPE","level":5}],"balls":3}';
+ok(g.loadGame() === true, 'a save naming an unknown species still loads');
+ok(G.party.length === 0, 'the unknown species was dropped rather than crashing');
+store['monster-trail-save-v1'] = 'not json at all';
+ok(g.loadGame() === false, 'a corrupt save is rejected cleanly');
+
+/* --------------------------------------------------------------- SANDBOX */
+section('SANDBOX — mining, crafting, building in ROCKY PASS, the seam and the GEODE');
+
+const MAP_BEFORE = g.MAP.join('\n');
+const ROCK = g.ROCK_BAND;
+const BOULDERS = [];
+for (let y = ROCK[0]; y <= ROCK[1]; y++) {
+  for (let x = 2; x < g.MAP_W - 2; x++) if (g.MAP[y][x] === '#') BOULDERS.push([x, y]);
+}
+const ORE_TILES = BOULDERS.filter(([x, y]) => g.mineDrop('#', x, y).ore);
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// --- tables ---
+ok(!g.MAP.join('').includes(g.WALL), 'the WALL glyph is never authored into MAP');
+ok(g.SOLID.has(g.WALL) && g.SOLID.has('#') && g.SOLID.has(g.SEAM), 'walls, boulders and seams are solid');
+ok(same(Object.keys(g.BLOCKS).sort(), ['#', g.WALL, g.SEAM].sort()), 'only boulders, built walls and the seam can be mined');
+ok(g.BLOCKS['#'].tier === 1 && g.BLOCKS[g.WALL].tier === 1 && g.BLOCKS[g.SEAM].tier === 2,
+   'boulders and walls need PICK tier 1, the seam tier 2');
+ok(g.BLOCKS[g.SEAM].authoredOnly === true && !g.BLOCKS['#'].authoredOnly && !g.BLOCKS[g.WALL].authoredOnly,
+   'only the seam is authoredOnly');
+ok(!has(g.BLOCKS, 'C'), 'cave wall (C) is never mineable');
+for (const r of g.RECIPES) {
+  ok(g.MATERIALS.includes(r.out) || r.out === 'balls' || r.setsTier ||
+     ((r.out === 'lantern' || r.out === 'pulse') && 'cap' in r), 'recipe ' + r.id + ' makes a known thing');
+  ok(has(g.MATERIAL_LABEL, r.out), 'recipe ' + r.id + ' has a label');
+  ok(r.count > 0 && Object.keys(r.needs).every(k => g.MATERIALS.includes(k) && r.needs[k] > 0),
+     'recipe ' + r.id + ' needs known materials');
+}
+const wallRecipe = g.RECIPES.find(r => r.out === 'wall');
+ok(same(g.BLOCKS[g.WALL].drops, wallRecipe.needs), 'mining a WALL refunds exactly what it cost to craft');
+ok(g.MENU_ITEMS[3] === 'CRAFT', 'CRAFT sits in the overworld menu');
+
+// --- mine_drop: deterministic, ore ~1 in 4, only boulders ---
+ok(BOULDERS.every(([x, y]) => same(g.mineDrop('#', x, y), g.mineDrop('#', x, y))), 'mineDrop is pure');
+ok(BOULDERS.every(([x, y]) => g.mineDrop('#', x, y).stone === 1), 'every boulder gives 1 STONE');
+ok(BOULDERS.length >= 40, 'ROCKY PASS has plenty of boulders (' + BOULDERS.length + ')');
+ok(ORE_TILES.length >= BOULDERS.length / 8 && ORE_TILES.length <= BOULDERS.length / 2,
+   'ORE turns up in roughly 1 in 4 boulders (' + ORE_TILES.length + ' of ' + BOULDERS.length + ')');
+ok(!ORE_TILES.some(([x, y]) => g.mineDrop(g.WALL, x, y).ore), 'a WALL on an ore spot never yields ORE');
+ok(same(g.mineDrop('.', 30, 45), {}) && same(g.mineDrop('_', 42, 45), {}), 'ground drops nothing');
+ok(g.tileHash(87, 51) >= 0 && g.tileHash(87, 51) < 65536, 'tileHash stays in 16 bits');
+console.log('  ' + BOULDERS.length + ' boulders, ' + ORE_TILES.length + ' hold ORE');
+
+// --- canMine ---
+ok(BOULDERS.every(([x, y]) => g.canMine('#', x, y, true)), 'every pass boulder is mineable');
+ok(!BOULDERS.some(([x, y]) => g.canMine('#', x, y, false)), 'nothing breaks without a PICK');
+const outsideRock = [];
+g.MAP.forEach((row, y) => [...row].forEach((c, x) => {
+  if (c === '#' && (y < ROCK[0] || y > ROCK[1])) outsideRock.push([x, y]);
+}));
+ok(outsideRock.length && !outsideRock.some(([x, y]) => g.canMine('#', x, y, true)),
+   'trees and rock outside ROCKY PASS stay solid (' + outsideRock.length + ' checked)');
+let edgeMineable = false;
+for (let y = ROCK[0]; y <= ROCK[1]; y++) {
+  for (const x of [0, 1, g.MAP_W - 2, g.MAP_W - 1]) if (g.canMine('#', x, y, true)) edgeMineable = true;
+}
+ok(!edgeMineable, "the world-edge columns can't be dug");
+ok(!g.canMine('#', 43, ROCK[0] - 1, true) && !g.canMine('#', 10, ROCK[1] + 1, true),
+   "the band's bounding rows of rock stay solid");
+for (const glyph of 'CB~.,_S') ok(!g.canMine(glyph, 30, 45, true), glyph + ' is not mineable');
+
+// --- the overlay never mutates MAP ---
+const b0 = BOULDERS[0];
+const e1 = g.withEdit({}, b0[0], b0[1], '.');
+ok(g.tileAt(b0[0], b0[1], e1) === '.' && g.tileAt(b0[0], b0[1]) === '#',
+   'tileAt reads the overlay only when it is passed');
+const e2 = g.withEdit(e1, b0[0], b0[1], '#');
+ok(same(e2, {}) && same(e1, { [key(...b0)]: '.' }), 'restoring the authored glyph drops the diff; withEdit copies');
+ok(g.tileAt(-1, 45, { '-1,45': '.' }) === '#', 'off-map is rock whatever the overlay says');
+
+// --- craft conserves exactly and refuses when short ---
+const inv = { stone: 7, ore: 3, wall: 1, balls: 7 };
+const frozen = JSON.stringify(inv);
+for (const r of g.RECIPES) {
+  const after = g.craft(inv, r, 1);
+  ok(JSON.stringify(inv) === frozen, 'craft(' + r.id + ') does not mutate its input');
+  ok(after !== null, 'craft(' + r.id + ') succeeds with enough');
+  const keys = new Set([...Object.keys(after), ...Object.keys(inv)]);
+  const delta = {}, want = {};
+  for (const k of keys) { const d = (after[k] || 0) - (inv[k] || 0); if (d) delta[k] = d; }
+  for (const k in r.needs) want[k] = -r.needs[k];
+  if (!r.setsTier) want[r.out] = (want[r.out] || 0) + r.count;   // a tool raises the tier, not a counter
+  ok(same(Object.entries(delta).sort(), Object.entries(want).filter(([, v]) => v).sort()),
+     'craft(' + r.id + ') moves exactly the recipe: ' + JSON.stringify(delta));
+  const short = {};
+  for (const k in r.needs) short[k] = r.needs[k] - 1;
+  ok(g.craft(short, r) === null && g.craft({}, r) === null, 'craft(' + r.id + ') refuses when short');
+  ok(g.craft(Object.assign({}, r.needs), r) !== null, 'craft(' + r.id + ') works with exactly enough');
+}
+
+// --- PICK tiers, the seam, the IRON PICK, loadEdits and the backstop ---
+for (const [v, want] of [[true, 1], [false, 0], [null, 0], [undefined, 0], [0, 0], [1, 1], [2, 2], [3, 2],
+                         [-1, 0], ['2', 0], [1.5, 0]]) {
+  ok(g.pickTier(v) === want, 'pickTier(' + JSON.stringify(v) + ') is ' + want);
+}
+for (const [sx, sy] of SEAMS) {
+  ok(!g.canMine(g.SEAM, sx, sy, 0) && !g.canMine(g.SEAM, sx, sy, 1) && !g.canMine(g.SEAM, sx, sy, true),
+     'seam ' + sx + ',' + sy + ' does not break at tier 0/1');
+  ok(g.canMine(g.SEAM, sx, sy, 2), 'seam ' + sx + ',' + sy + ' breaks with the IRON PICK');
+  ok(same(g.mineDrop(g.SEAM, sx, sy), { ore: 2 }), 'seam ' + sx + ',' + sy + ' always drops exactly 2 ORE');
+}
+ok(!g.canMine(g.SEAM, 70, 35, 2) && !g.canMine(g.SEAM, 30, 45, 2), 'K breaks only where MAP authored it');
+ok(!g.canMine('c', 70, 34, 2), "a mined seam's floor is not mineable again");
+const caveWalls = [];
+g.MAP.forEach((row, y) => [...row].forEach((c, x) => { if (c === 'C') caveWalls.push([x, y]); }));
+ok(!caveWalls.some(([x, y]) => g.canMine('C', x, y, 2)), 'no cave wall breaks even with the IRON PICK (' + caveWalls.length + ')');
+ok(BOULDERS.every(([x, y]) => g.canMine('#', x, y, 2)) && g.canMine(g.WALL, 30, 44, 2), 'the IRON PICK still breaks boulders and walls');
+ok(!outsideRock.some(([x, y]) => g.canMine('#', x, y, 2)), "the IRON PICK still can't fell trees");
+
+const IRON = g.RECIPES.find(r2 => r2.id === 'iron_pick');
+ok(IRON.setsTier === 2 && g.PICK_MAX === 2 && same(IRON.needs, { ore: 3, stone: 6 }),
+   'the IRON PICK is 3 ORE + 6 STONE and sets the PICK to tier 2');
+const haveI = { stone: 6, ore: 3, wall: 1, balls: 5 };
+const gotIron = g.craft(haveI, IRON, 1);
+ok(same(gotIron, { stone: 0, ore: 0, wall: 1, balls: 5 }), 'crafting the IRON PICK takes exactly its needs: ' + JSON.stringify(gotIron));
+ok(gotIron && !has(gotIron, 'iron_pick'), 'the IRON PICK is never stored in materials');
+ok(same(haveI, { stone: 6, ore: 3, wall: 1, balls: 5 }), 'craft(iron_pick) does not mutate its input');
+ok(g.craft(haveI, IRON, 2) === null && g.craft({ stone: 99, ore: 99 }, IRON, 2) === null, "the IRON PICK can't be crafted a second time");
+ok(g.craft({ stone: 5, ore: 3 }, IRON, 1) === null && g.craft({ stone: 6, ore: 2 }, IRON, 1) === null,
+   'the IRON PICK refuses when short of either material');
+ok(same(g.craft({ stone: 4 }, wallRecipe, 2), { stone: 2, wall: 1 }), 'ordinary recipes ignore the tier');
+
+ok(same(Object.entries(g.loadEdits({ '70,34': 'c', '65,33': 'c' })).sort(), [['65,33', 'c'], ['70,34', 'c']]),
+   'loadEdits keeps both authored seams mined to cave floor');
+for (const [bk, bv, why] of [['70,34', '.', 'a seam mined to grass'], ['70,34', 'W', 'a wall on the seam'],
+                             ['70,34', 'K', 'the seam as itself'], ['64,33', 'c', 'a cave wall opened'],
+                             ['71,34', 'c', 'a cave wall beside the seam'], ['70,35', 'K', 'a seam painted onto floor'],
+                             ['30,45', 'K', 'a seam in the pass'], ['69,31', 'c', 'geode grass rewritten']]) {
+  ok(same(g.loadEdits({ [bk]: bv }), {}), 'loadEdits drops ' + why + ' (' + bk + '=' + bv + ')');
+}
+
+ok(same(g.ORE_DEPOSITS, ORE_TILES), 'ORE_DEPOSITS is every ORE boulder (' + g.ORE_DEPOSITS.length + ')');
+const ALL_DUG = Object.fromEntries(g.ORE_DEPOSITS.map(([x, y]) => [key(x, y), '.']));
+ok(same(g.quarryBackstop({ stone: 4, ore: 1, wall: 0 }, 1, ALL_DUG), { stone: 4, ore: 4, wall: 0 }),
+   'the backstop gives 3 ORE to a tier-1 player with < 3 ORE once every deposit is gone');
+ok(same(g.quarryBackstop({ ore: 0 }, true, Object.assign({}, ALL_DUG, { [key(...g.ORE_DEPOSITS[0])]: g.WALL })), { ore: 3 }),
+   'a WALL on a dug deposit still counts as dug; an old true pick is tier 1');
+const oneLeft = Object.fromEntries(g.ORE_DEPOSITS.slice(1).map(([x, y]) => [key(x, y), '.']));
+for (const [args, why] of [[[{ ore: 0 }, 0, ALL_DUG], 'no PICK at all'], [[{ ore: 0 }, 2, ALL_DUG], 'already has the IRON PICK'],
+                           [[{ ore: 3 }, 1, ALL_DUG], 'already has enough ORE'], [[{ ore: 0 }, 1, {}], 'ORE still in the ground'],
+                           [[{ ore: 0 }, 1, oneLeft], 'one deposit left']]) {
+  ok(g.quarryBackstop(...args) === null, 'no backstop when ' + why);
+}
+const frozenM = { ore: 1 };
+g.quarryBackstop(frozenM, 1, ALL_DUG);
+ok(same(frozenM, { ore: 1 }), 'quarryBackstop does not mutate its input');
+
+// --- placement: every forbidden case ---
+const NPC_T = new Set(g.NPCS.map(n => key(n.home ? n.home.x : n.x, n.home ? n.home.y : n.y)));
+const NONE = new Set();
+const P0 = [30, 44];
+ok(g.placementOk(30, 43, {}, NONE, NPC_T, P0)[0], 'a wall goes on open scree next to you');
+const forbidden = [
+  [[30, 44], "the player's own tile"], [[42, 44], 'the trunk road'], [[43, 46], 'the trunk road (east)'],
+  [[10, 42], 'tall grass'], [[24, 41], 'a boulder'], [[30, 60], 'outside ROCKY PASS'],
+  [[2, 39], "the band's edge row"], [[1, 45], 'the world-edge column'],
+  [[28, 41], 'right beside the pass sign'], [[50, 50], 'right beside the item ball'],
+  [[34, 46], 'right beside the QUARRY HAND'], [[35, 46], 'the QUARRY HAND himself']];
+for (const [[x, y], why] of forbidden) {
+  ok(!g.placementOk(x, y, {}, NONE, NPC_T, P0)[0], 'no wall on ' + why + ' ' + x + ',' + y);
+}
+
+const ringEdits = {};
+for (let x = 29; x <= 31; x++) for (let y = 43; y <= 45; y++) ringEdits[key(x, y)] = g.WALL;
+delete ringEdits[key(30, 44)]; delete ringEdits[key(31, 44)];
+const [gapOk, gapWhy] = g.placementOk(31, 44, ringEdits, NONE, NPC_T, [30, 44]);
+ok(!gapOk && gapWhy.includes('wall off'), 'closing the last gap around the player is refused (' + gapWhy + ')');
+ok(!g.placementOk(31, 44, ringEdits, NONE, NPC_T, [32, 44])[0], 'walling off an empty pocket is refused');
+
+const IX = 50, IY = 51;
+ok(g.tileAt(IX, IY) === 'o', 'the ROCKY PASS item ball is where the test expects');
+const penEdits = {};
+for (let x = IX - 2; x <= IX + 2; x++) penEdits[key(x, IY - 2)] = g.WALL;
+for (let y = IY - 2; y <= IY; y++) { penEdits[key(IX - 2, y)] = g.WALL; penEdits[key(IX + 2, y)] = g.WALL; }
+for (const k of Object.keys(penEdits)) if (g.tileAt(...k.split(',').map(Number)) !== '.') delete penEdits[k];
+delete penEdits[key(IX + 2, IY - 1)];
+const penReach = g.reachable([40, 45], penEdits, NONE, NPC_T);
+ok(g.DIRS4.some(([dx, dy]) => penReach.has(key(IX + dx, IY + dy))), 'the pen still lets you reach the ball');
+ok(!g.placementOk(IX + 2, IY - 1, penEdits, NONE, NPC_T, [IX + 3, IY - 1])[0],
+   'sealing the item ball inside a pen is refused');
+
+const west = {};
+for (let y = 40; y <= 51; y++) if (g.tileAt(30, y) === '.' && y !== 45) west[key(30, y)] = g.WALL;
+ok(!g.placementOk(30, 45, west, NONE, NPC_T, [31, 45])[0], 'closing the only door through a dividing wall is refused');
+ok(g.placementOk(31, 44, west, NONE, NPC_T, [31, 45])[0], 'a wall beside that door, cutting nothing off, is allowed');
+
+// --- Game: scripted playthrough: pick -> pass -> mine -> craft BALL -> place ---
+G.mode = 'title';
+delete store['monster-trail-save-v1'];
+G.starterCursor = 0;
+g.confirmKey();                                    // NEW GAME
+G.dialogue = null; G.mode = 'overworld';
+G.flags.starter = true;
+G.party = [g.makeMon('tidecoil', 40)];
+G.beaten = Object.fromEntries(ALL_TRAINERS.map(n => [n.id, true]));
+ok(same(G.edits, {}) && same(G.materials, { stone: 0, ore: 0, wall: 0 }) && !G.flags.pick,
+   'a new game starts with no edits, no materials and no PICK');
+
+const quarry = g.npcById('quarry');
+ok(quarry && quarry.y >= ROCK[0] && quarry.y <= ROCK[1], 'the QUARRY HAND stands in ROCKY PASS');
+G.player.tx = g.START_TILE[0]; G.player.ty = g.START_TILE[1];
+r = walkTo(quarry.x - 1, quarry.y);
+ok(r.arrived, 'you can walk from CEDAR TOWN to the QUARRY HAND: ' + JSON.stringify(r));
+
+G.player.tx = 34; G.player.ty = 46; G.player.dir = 'left';
+g.interact();
+ok(G.mode === 'dialogue' && G.dialogue.lines.join(' ').includes('PICK') && same(G.edits, {}),
+   'a boulder without a PICK just says you need one');
+G.dialogue = null; G.mode = 'overworld';
+G.player.dir = 'right';
+g.interact();
+ok(G.flags.pick && G.mode === 'dialogue' && G.dialogue.lines.some(l => l.includes('PICK')),
+   'the QUARRY HAND hands over a PICK');
+G.dialogue = null; G.mode = 'overworld';
+g.interact();
+ok(G.mode === 'dialogue' && G.dialogue.lines.join(' ').includes('CRAFT'), 'talking again gives tips, not a second pick');
+G.dialogue = null; G.mode = 'overworld';
+
+function faceAndMine(bx, by) {
+  for (const [dx, dy, d] of [[1, 0, 'left'], [-1, 0, 'right'], [0, 1, 'up'], [0, -1, 'down']]) {
+    const sx = bx + dx, sy = by + dy;
+    if (g.blockedFor(sx, sy) || g.tileHere(sx, sy) === 'v') continue;
+    const res = walkTo(sx, sy);
+    if (res.arrived) {
+      G.player.dir = d;
+      const before = Object.assign({}, G.materials);
+      g.interact();
+      const out = {};
+      for (const k in G.materials) out[k] = G.materials[k] - before[k];
+      return out;
+    }
+  }
+  return null;
+}
+
+const got = faceAndMine(33, 46);
+ok(same(got, { stone: 1, ore: 1, wall: 0 }), 'mining the ore boulder at 33,46 gives STONE + ORE: ' + JSON.stringify(got));
+ok(g.tileHere(33, 46) === '.' && g.MAP[46][33] === '#', 'the boulder is ground in the overlay only');
+ok(G.toast && G.toast.s.includes('STONE') && G.toast.s.includes('ORE'), 'mining toasts what you got');
+ok(!g.blockedFor(33, 46), 'you can walk onto a mined boulder');
+const again = JSON.stringify(G.materials);
+g.interact();
+ok(JSON.stringify(G.materials) === again, "the same tile can't be mined twice");
+
+let mined = 1;
+for (const [x, y] of ORE_TILES) {
+  if (G.materials.ore >= 2) break;
+  if (x === 33 && y === 46) continue;
+  if (faceAndMine(x, y)) mined++;
+}
+ok(G.materials.ore >= 2, 'walking the pass turns up a second ORE (' + mined + ' mined)');
+
+const balls0 = G.balls;
+G.mode = 'menu'; G.menu = { cursor: 0 };
+for (let i = 0; i < 3; i++) g.moveCursor(0, 1);
+g.confirmKey();
+ok(G.mode === 'craft', 'menu row 4 opens CRAFT');
+G.craftCursor = g.RECIPES.findIndex(r2 => r2.out === 'balls');
+const ore0 = G.materials.ore;
+g.confirmKey();
+ok(G.balls === balls0 + 1 && G.materials.ore === ore0 - 2,
+   'crafting turns 2 ORE into 1 BALL in the pouch (' + balls0 + ' -> ' + G.balls + ')');
+G.materials.ore = 0;
+g.confirmKey();
+ok(G.balls === balls0 + 1 && G.craftMsg.includes('Need'), 'crafting without ORE refuses: ' + G.craftMsg);
+
+for (const [x, y] of BOULDERS) {
+  if (G.materials.stone >= 2) break;
+  if (g.tileHere(x, y) === '#') faceAndMine(x, y);
+}
+G.mode = 'craft';
+G.craftCursor = g.RECIPES.findIndex(r2 => r2.out === 'wall');
+const st0 = G.materials.stone;
+g.confirmKey();
+ok(G.materials.wall === 1 && G.materials.stone === st0 - 2, '2 STONE craft 1 WALL');
+G.craftCursor = g.RECIPES.length;
+g.confirmKey();
+ok(G.mode === 'overworld' && G.building, 'BUILD WALLS drops you into build mode');
+
+walkTo(30, 44);
+G.player.dir = 'up';
+g.interact();
+ok(g.tileHere(30, 43) === g.WALL && G.materials.wall === 0, 'confirm while building places a WALL');
+ok(g.blockedFor(30, 43), 'a built WALL is solid');
+ok(g.MAP.join('\n') === MAP_BEFORE, 'MAP is untouched after mining and building');
+G.player.dir = 'left';
+g.interact();
+ok(g.tileHere(29, 44) === '.' && G.toast.s.includes('No WALL'), 'with no WALLs left nothing is placed');
+g.cancelKey();
+ok(!G.building && G.mode === 'overworld', 'B leaves build mode instead of opening the menu');
+g.cancelKey();
+ok(G.mode === 'menu', 'and the next B opens the menu as usual');
+G.mode = 'overworld'; G.menu = null;
+
+G.player.dir = 'up';
+const st1 = G.materials.stone;
+g.interact();
+ok(g.tileHere(30, 43) === '.' && !has(G.edits, '30,43') && G.materials.stone === st1 + 2,
+   'mining your own WALL returns its 2 STONE and leaves no diff');
+
+G.materials.wall = 1; G.building = true;
+walkTo(41, 45);
+G.player.dir = 'right';
+g.interact();
+ok(g.tileHere(42, 45) === '_' && G.materials.wall === 1 && G.toast.s.includes('bare ground'),
+   'the Game refuses a WALL on the trunk road, and says why: ' + G.toast.s);
+G.building = false;
+
+const t6 = g.npcById('t6');
+G.beaten = {};
+G.edits = { [key(t6.x, t6.y + 1)]: g.WALL };       // injected; the rules forbid it on the road
+G.player.tx = t6.x; G.player.ty = t6.y + 2; G.mode = 'overworld';
+g.checkTrainerSight();
+ok(G.mode === 'overworld', "a WALL in a trainer's line of sight blocks it");
+G.edits = {};
+g.checkTrainerSight();
+ok(G.mode === 'dialogue', 'without the wall the trainer spots you');
+G.dialogue = null; G.mode = 'overworld';
+G.beaten = Object.fromEntries(ALL_TRAINERS.map(n => [n.id, true]));
+
+// --- save / load round-trip, a tampered save, and an old-format save ---
+G.edits = { '33,46': '.', '30,43': 'W', '24,41': 'W' };
+G.materials = { stone: 3, ore: 1, wall: 2 };
+G.flags.pick = true;
+G.player.tx = 30; G.player.ty = 44;
+ok(g.saveGame(), 'a sandbox save writes');
+const raw = JSON.parse(store['monster-trail-save-v1']);
+ok(same(raw.edits, { '24,41': 'W', '30,43': 'W', '33,46': '.' }), 'edits save as an x,y diff');
+G.edits = {}; G.materials = { stone: 0, ore: 0, wall: 0 }; G.flags = { starter: false, gym: false };
+ok(g.loadGame(), 'the sandbox save loads');
+ok(same(Object.entries(G.edits).sort(), [['24,41', 'W'], ['30,43', 'W'], ['33,46', '.']]), 'edits round-tripped');
+ok(same(G.materials, { stone: 3, ore: 1, wall: 2 }), 'materials round-tripped');
+ok(G.flags.pick === 1, 'the PICK round-tripped as tier 1');
+ok(g.tileHere(33, 46) === '.' && g.blockedFor(30, 43), 'the loaded overlay is live');
+
+Object.assign(raw.edits, { '10,100': 'W', '42,45': 'W', 'nope': 'W', '30,44': '#', '31,44': '.' });
+raw.materials = { stone: -4, ore: '2', wall: null, gold: 9 };
+store['monster-trail-save-v1'] = JSON.stringify(raw);
+ok(g.loadGame(), 'a tampered sandbox save still loads');
+ok(same(Object.keys(G.edits).sort(), ['24,41', '30,43', '33,46']), 'impossible edits are dropped on load');
+ok(same(G.materials, { stone: 0, ore: 2, wall: 0 }), 'materials are sanitised on load: ' + JSON.stringify(G.materials));
+
+G.balls = 4; G.picked = new Set(['20,89']);
+g.saveGame();
+const old = JSON.parse(store['monster-trail-save-v1']);
+delete old.edits; delete old.materials; delete old.flags.pick;
+store['monster-trail-save-v1'] = JSON.stringify(old);
+G.edits = { '1,1': 'W' }; G.materials = { stone: 9, ore: 9, wall: 9 }; G.flags.pick = true;
+ok(g.loadGame(), 'an old save without sandbox fields loads');
+ok(same(G.edits, {}) && same(G.materials, { stone: 0, ore: 0, wall: 0 }) && !G.flags.pick,
+   'an old save means no edits, no materials, no PICK');
+ok(G.balls === 4 && G.picked.has('20,89') && G.picked.size === 1, 'and the rest of the old save is intact');
+console.log('  playthrough: PICK -> ' + mined + '+ boulders mined -> 1 BALL crafted -> WALL built and mined back');
+
+// An old save from before tiers stored the PICK as true: it loads as tier 1.
+old.flags.pick = true;
+store['monster-trail-save-v1'] = JSON.stringify(old);
+ok(g.loadGame() && G.flags.pick === 1 && G.flags.backstop === false, 'an old save with pick=true loads as tier 1, no backstop paid');
+for (const junk of ['yes', 7, -2, null]) {
+  old.flags.pick = junk;
+  store['monster-trail-save-v1'] = JSON.stringify(old);
+  ok(g.loadGame() && G.flags.pick === g.pickTier(junk), 'a junk pick flag ' + JSON.stringify(junk) + ' loads as tier ' + g.pickTier(junk));
+}
+
+// --- Game: IRON PICK -> the seam -> the GEODE: grass, the ball, save/load ---
+{
+  G.flags = { starter: true, gym: false, pick: 1 };
+  G.party = [g.makeMon('tidecoil', 40)];
+  G.beaten = Object.fromEntries(ALL_TRAINERS.map(n => [n.id, true]));
+  G.edits = {}; G.picked = new Set(); G.building = false; G.mode = 'overworld'; G.dialogue = null;
+  G.materials = { stone: 6, ore: 3, wall: 0 };
+  G.player.tx = g.START_TILE[0]; G.player.ty = g.START_TILE[1];
+  r = walkTo(70, 35);
+  ok(r.arrived, 'you can walk from CEDAR TOWN to the seam face at 70,35: ' + JSON.stringify(r));
+  G.player.dir = 'up';
+  ok(same(g.facingTile(G.player), [70, 34]) && g.tileHere(70, 34) === g.SEAM, 'standing on 70,35 faces the seam');
+  g.interact();
+  ok(G.mode === 'dialogue' && G.dialogue.lines.join(' ').includes('IRON PICK') && same(G.edits, {}),
+     'a plain PICK skids off the seam and says what it needs');
+  G.dialogue = null; G.mode = 'overworld';
+
+  G.mode = 'menu'; G.menu = { cursor: 0 };
+  for (let i = 0; i < 3; i++) g.moveCursor(0, 1);
+  g.confirmKey();
+  G.craftCursor = g.RECIPES.indexOf(IRON);
+  g.confirmKey();
+  ok(G.flags.pick === 2 && same(G.materials, { stone: 0, ore: 0, wall: 0 }) && G.craftMsg.startsWith('Crafted'),
+     'CRAFT turns 3 ORE + 6 STONE into the IRON PICK: ' + G.craftMsg);
+  G.materials = { stone: 6, ore: 3, wall: 0 };
+  g.confirmKey();
+  ok(G.flags.pick === 2 && same(G.materials, { stone: 6, ore: 3, wall: 0 }) && G.craftMsg.includes('already'),
+     'a second IRON PICK is refused and costs nothing: ' + G.craftMsg);
+  G.materials = { stone: 0, ore: 0, wall: 0 };
+  g.cancelKey();
+  ok(G.mode === 'overworld', 'B leaves CRAFT');
+
+  G.player.dir = 'up';
+  g.interact();
+  ok(g.tileHere(70, 34) === 'c' && g.MAP[34][70] === g.SEAM && same(G.edits, { '70,34': 'c' }),
+     'the IRON PICK opens the seam, in the overlay only');
+  ok(same(G.materials, { stone: 0, ore: 2, wall: 0 }) && G.toast.s.includes('ORE'), 'the seam drops 2 ORE and toasts it: ' + G.toast.s);
+  ok(!g.blockedFor(70, 34), 'the opened seam is walkable');
+  r = walkTo(70, 31);
+  ok(r.arrived, 'you can walk into the GEODE: ' + JSON.stringify(r));
+
+  // Seeded Math.random so the encounter roll is reproducible.
+  const realRandom = Math.random;
+  let seed = 2024;
+  Math.random = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return (seed >>> 8) / 16777216; };
+  let foe = null, tries = 0;
+  while (!foe && tries < 400) {
+    G.player.tx = 66 + tries % 9; G.player.ty = 31 + Math.floor(tries / 9) % 2;
+    g.tryEncounter();
+    foe = G.pendingEncounter;
+    tries++;
+  }
+  ok(foe, 'walking the GEODE dark grass fires an encounter (' + tries + ' steps)');
+  if (foe) {
+    ok(GEODE_ZONE.pool.some(([id]) => id === foe.id) && foe.level >= 24 && foe.level <= 28,
+       'the GEODE foe comes from its pool at L24-28: ' + foe.id + ' L' + foe.level);
+  }
+  G.pendingEncounter = null; G.fadeDir = 0; G.fade = 0; G.fadeCb = null; G.mode = 'overworld';
+  const dead = [];
+  for (const z of g.ZONES) {
+    let spot = null;
+    for (let y = z.y1; y <= z.y2 && !spot; y++) for (let x = z.x1; x <= z.x2 && !spot; x++) {
+      if (GRASS.includes(g.tileAt(x, y))) spot = [x, y];
+    }
+    let fired = false;
+    for (let i = 0; i < 200; i++) {
+      G.player.tx = spot[0]; G.player.ty = spot[1];
+      g.tryEncounter();
+      if (G.pendingEncounter) {
+        fired = z.pool.some(([id]) => id === G.pendingEncounter.id);
+        G.pendingEncounter = null; G.fadeDir = 0; G.fade = 0; G.fadeCb = null;
+        break;
+      }
+    }
+    if (!fired) dead.push(spot);
+  }
+  ok(dead.length === 0, 'every zone, tall grass or dark grass, can fire an encounter (dead: ' + JSON.stringify(dead) + ')');
+  Math.random = realRandom;
+
+  G.player.tx = 70; G.player.ty = 31;
+  const balls0g = G.balls;
+  r = walkTo(75, 31);
+  G.player.dir = 'up';
+  g.interact();
+  ok(r.arrived && G.balls === balls0g + 8 && G.picked.has('75,30'), 'the GEODE ball is worth 8 BALLS (' + balls0g + ' -> ' + G.balls + ')');
+  G.dialogue = null; G.mode = 'overworld';
+  r = walkTo(66, 33);
+  G.player.dir = 'left';
+  g.interact();
+  ok(r.arrived && g.tileHere(65, 33) === 'c' && G.materials.ore === 4, 'the inner seam at 65,33 is mined from inside for 2 more ORE');
+  ok(!g.blockedFor(65, 33) && g.blockedFor(64, 33), 'it opens one tile; the C wall behind it holds');
+
+  ok(g.saveGame(), 'a GEODE save writes');
+  const rawG = JSON.parse(store['monster-trail-save-v1']);
+  ok(same(rawG.edits, { '65,33': 'c', '70,34': 'c' }) && rawG.flags.pick === 2,
+     'the opened seams and the tier save: ' + JSON.stringify(rawG.edits) + ' ' + rawG.flags.pick);
+  G.edits = {}; G.picked = new Set(); G.flags = { starter: false, gym: false }; G.balls = 0;
+  ok(g.loadGame(), 'the GEODE save loads');
+  ok(g.tileHere(70, 34) === 'c' && !g.blockedFor(70, 34) && G.flags.pick === 2,
+     'after loading the GEODE is still open and the IRON PICK still held');
+  ok(G.picked.has('75,30') && !g.blockedFor(75, 30), 'after loading the GEODE ball is still gone');
+  G.player.tx = 70; G.player.ty = 35;
+  ok(walkTo(70, 31).arrived, 'and you can walk back into the GEODE');
+  G.player.tx = 75; G.player.ty = 31; G.player.dir = 'up';
+  const balls1g = G.balls;
+  g.interact();
+  ok(G.balls === balls1g && G.dialogue.lines.join(' ').includes('Nothing'), 'the taken ball gives nothing twice');
+  G.dialogue = null; G.mode = 'overworld';
+
+  // --- the QUARRY HAND's backstop: once, and only when ORE has truly run out ---
+  G.player.tx = quarry.x - 1; G.player.ty = quarry.y; G.player.dir = 'right';
+  G.flags.pick = 1; G.flags.backstop = false;
+  G.materials = { stone: 6, ore: 0, wall: 0 }; G.edits = {};
+  g.interact();
+  ok(G.materials.ore === 0 && G.dialogue.lines.join(' ').includes('IRON PICK'), 'with ORE in the ground he only hints at the seam');
+  G.dialogue = null; G.mode = 'overworld';
+  G.edits = Object.assign({}, ALL_DUG);
+  G.materials.ore = 1;
+  g.interact();
+  ok(G.materials.ore === 1 + g.BACKSTOP_ORE && G.flags.backstop === true && G.dialogue.lines.join(' ').includes('3 ORE'),
+     'out of ORE for good, he hands over 3 ORE');
+  G.dialogue = null; G.mode = 'overworld';
+  G.materials.ore = 0;
+  g.interact();
+  ok(G.materials.ore === 0 && G.dialogue.lines.join(' ').includes('IRON PICK'), 'the backstop pays exactly once');
+  G.dialogue = null; G.mode = 'overworld';
+  g.saveGame();
+  G.flags.backstop = false;
+  g.loadGame();
+  ok(G.flags.backstop === true, 'the paid backstop survives a save/load');
+  G.player.tx = quarry.x - 1; G.player.ty = quarry.y; G.player.dir = 'right';
+  G.flags.pick = 2; G.flags.backstop = false;
+  g.interact();
+  ok(G.materials.ore === 0, 'an IRON PICK holder never gets the backstop');
+  G.dialogue = null; G.mode = 'overworld';
+  G.edits = {}; G.picked = new Set();
+  console.log('  GEODE: IRON PICK crafted -> seam mined -> grass fight in ' + tries + ' steps -> 8-BALL item -> save/load');
+}
+ok(g.MAP.join('\n') === MAP_BEFORE, 'MAP is byte-identical after the whole SANDBOX section');
+
+// --- input: a tap pressed and released between two frames still turns + steps ---
+{
+  G.flags.starter = true;
+  G.edits = {}; G.mode = 'overworld'; G.fadeDir = 0; G.fade = 0; G.battle = null;
+  G.beaten = Object.fromEntries(g.NPCS.filter(n => n.kind === 'trainer').map(n => [n.id, true]));
+  const p = G.player;
+  const put = (x, y, d) => { p.tx = x; p.ty = y; p.px = x * 32; p.py = y * 32; p.moving = false; p.dir = d; };
+  put(30, 44, 'up');
+  g.press('arrowleft'); g.release('arrowleft');
+  ok(g.TAPS.left === true, 'press() latches a direction tap in the overworld');
+  g.update(1 / 60);
+  ok(p.dir === 'left' && p.moving && p.tx === 29, 'a one-frame tap turns the player and starts a step: ' +
+     p.dir + ' ' + p.tx);
+  ok(!g.TAPS.left, 'the latch is consumed after one frame');
+  for (let i = 0; i < 60 && p.moving; i++) g.update(1 / 60);
+  ok(!p.moving && p.tx === 29, 'the tapped step completes and stops (no phantom repeat)');
+  // A tap against a wall still turns you: face (33,46)'s boulder from (34,46).
+  put(34, 46, 'up');
+  g.press('a'); g.release('a');
+  g.update(1 / 60);
+  ok(p.dir === 'left' && !p.moving && p.tx === 34, 'a tap toward a boulder turns without moving');
+  // Held keys behave exactly as before: held for several frames = continuous steps.
+  put(30, 44, 'up');
+  g.press('arrowright');
+  for (let i = 0; i < 40; i++) g.update(1 / 60);
+  g.release('arrowright');
+  ok(p.tx >= 32 && p.ty === 44, 'a held key keeps walking (tx ' + p.tx + ')');
+  for (let i = 0; i < 60 && p.moving; i++) g.update(1 / 60);
+  // Menus never latch: a cursor press in the menu does not walk you after closing it.
+  put(30, 44, 'up');
+  G.mode = 'menu'; G.menu = { cursor: 0 };
+  g.press('arrowdown'); g.release('arrowdown');
+  ok(G.menu.cursor === 1 && !g.TAPS.down, 'a menu cursor press moves the cursor and latches nothing');
+  G.mode = 'overworld'; G.menu = null;
+  g.update(1 / 60);
+  ok(p.tx === 30 && p.ty === 44 && !p.moving && p.dir === 'up', 'closing the menu does not replay the press as a step');
+  console.log('  input: one-frame taps turn and step; holds, walls and menus unchanged');
+}
+
+/* ------------------------------------------------------- SHELL JUICE */
+// The HTML shell has no canvas here, but its world-fx state, tells and
+// constants are plain functions behind __GAME__, so the polish rules that do
+// not need pixels are checked headlessly (pixels: the Python RENDER pass and
+// a browser playtest).
+section('SHELL JUICE — seam tell, GEODE glints, tier-2 break, HUD/menu layout (headless)');
+{
+  const realRandom = Math.random;
+  let engineRolls = 0;
+  Math.random = () => { engineRolls++; return realRandom(); };
+  const p = G.player;
+  const put = (x, y, d) => { p.tx = x; p.ty = y; p.px = x * 32; p.py = y * 32; p.moving = false; p.dir = d || 'up'; };
+  const over = (fn, period) => {               // every spot that glints over two periods
+    const seen = new Set(); let bad = 0;
+    for (let i = 0; i < Math.ceil(2 * period * 60); i++) {
+      G.time = i / 60;
+      for (const [x, y, k] of fn()) { seen.add(x + ',' + y); if (!(k >= 0 && k <= 1)) bad++; }
+    }
+    return { seen, bad };
+  };
+  const [gx1, gy1, gx2, gy2] = g.GEODE;
+  const inGeode = (x, y) => x >= gx1 && x <= gx2 && y >= gy1 && y <= gy2;
+  G.mode = 'overworld'; G.battle = null; G.edits = {}; G.picked = new Set(); G.flags.starter = true;
+  ok(!g.REDUCED_MOTION, 'node has no matchMedia, so reduced motion is off');
+  ok(same(g.GEODE_DOOR, [70, 34]), 'GEODE_DOOR is the seam on the GEODE bottom row: ' + g.GEODE_DOOR);
+  ok(g.GEODE_SPOTS.length > 0 && g.GEODE_SPOTS.every(([x, y]) => inGeode(x, y) && 'c;,'.includes(g.MAP[y][x])),
+     g.GEODE_SPOTS.length + ' GEODE crystals, all on open tiles inside GEODE');
+
+  // Sealed: no glints, and the pocket is masked as rock; the mask stays inside GEODE.
+  G.flags.pick = 2;
+  put(70, 35);
+  ok(!g.geodeOpen() && over(g.geodeGlints, g.GEODE_GLINT_PERIOD).seen.size === 0, 'sealed: no GEODE glints');
+  ok(g.geodeMasked(70, 32) && g.geodeMasked(75, 30) && !g.geodeMasked(70, 34) && !g.geodeMasked(64, 32) &&
+     !g.geodeMasked(70, 35), 'sealed: the pocket (grass, ball) is masked, the seam and the outside are not');
+
+  // Seam tell: tier 2 only, near, unmined, open face only.
+  G.flags.pick = 1;
+  ok(over(g.seamTells, g.SPARKLE_PERIOD).seen.size === 0, 'plain PICK: no seam sparkle');
+  G.flags.pick = 2;
+  const t2 = over(g.seamTells, g.SPARKLE_PERIOD);
+  ok(same([...t2.seen], ['70,34']) && t2.bad === 0, 'IRON PICK: the faced seam sparkles: ' + [...t2.seen]);
+  put(62, 33);
+  ok(over(g.seamTells, g.SPARKLE_PERIOD).seen.size === 0, 'the sealed inner seam (65,33) has no open face: no sparkle');
+  put(30, 44);
+  ok(over(g.seamTells, g.SPARKLE_PERIOD).seen.size === 0, 'far from any seam: no sparkle');
+
+  // The tier-2 break: heavy trauma (clamped), a world-fx hold, more debris, a deeper sound.
+  const sounds = [];
+  const realHeavy = g.SFX.mineHeavy, realMine = g.SFX.mine;
+  g.SFX.mineHeavy = () => sounds.push('mineHeavy');
+  g.SFX.mine = () => sounds.push('mine');
+  put(70, 35, 'up');
+  G.materials = { stone: 0, ore: 0, wall: 0 };
+  g.resetWorldFx();
+  g.interact();
+  ok(g.tileHere(70, 34) === 'c' && sounds[sounds.length - 1] === 'mineHeavy', 'a seam break plays mineHeavy');
+  ok(Math.abs(g.WFX.trauma - Math.min(1, g.TRAUMA_MINE_HEAVY)) < 1e-9 && g.TRAUMA_MINE_HEAVY > g.TRAUMA_MINE_ORE,
+     'a seam break adds TRAUMA_MINE_HEAVY (' + g.WFX.trauma + ')');
+  ok(Math.abs(g.WFX.freeze - g.MINE_HITSTOP) < 1e-9, 'a seam break starts a MINE_HITSTOP hold');
+  ok(g.liveDebris() === g.DEBRIS_BURST_HEAVY + g.DEBRIS_BURST_HEAVY_ORE, 'a seam break sprays ' +
+     (g.DEBRIS_BURST_HEAVY + g.DEBRIS_BURST_HEAVY_ORE) + ' bits, saw ' + g.liveDebris());
+  const before = JSON.stringify([g.WFX.trauma, [...g.WFX.cracks], Object.keys(g.WFX)]);
+  const rolls0 = engineRolls;
+  // The game runs on through the hold: update() moves the player while world fx stay put.
+  g.press('arrowleft');
+  g.update(1 / 60);
+  ok(p.dir === 'left' && p.moving, 'input is never blocked: during the hold the player turns and steps');
+  ok(JSON.stringify([g.WFX.trauma, [...g.WFX.cracks], Object.keys(g.WFX)]) === before,
+     'hit-stop frame 1: trauma and the crack frame hold');
+  g.release('arrowleft');
+  let holdFrames = 1;
+  while (g.WFX.freeze > 0 && holdFrames < 30) { g.updateWorldFx(1 / 60); holdFrames++; }
+  ok(holdFrames === Math.ceil(g.MINE_HITSTOP * 60 - 1e-9), 'the hold lasts MINE_HITSTOP (' + holdFrames + ' frames)');
+  const tr = g.WFX.trauma;
+  g.updateWorldFx(1 / 60);
+  ok(g.WFX.trauma < tr, 'after the hold the shake decays again');
+  for (let i = 0; i < 120 && p.moving; i++) g.update(1 / 60);
+  for (let i = 0; i < 5; i++) g.worldFx('mine', 70, 34, g.SEAM, { ore: 2 });
+  let peak = 0;
+  for (let i = 0; i < 3000; i++) { const [a, b] = g.worldOffset(); peak = Math.max(peak, Math.abs(a), Math.abs(b)); }
+  ok(g.WFX.trauma === 1 && peak <= g.WORLD_SHAKE_MAX && Math.abs(g.WFX.freeze - g.MINE_HITSTOP) < 1e-9,
+     'stacked seam breaks clamp trauma at 1 (peak ' + peak + ' px <= WORLD_SHAKE_MAX) and never stack the hold');
+  ok(g.liveDebris() <= g.DEBRIS_MAX, 'stacked seam breaks stay inside DEBRIS_MAX');
+  g.resetWorldFx();
+  put(34, 46, 'left');
+  g.interact();
+  ok(sounds[sounds.length - 1] === 'mine' && g.WFX.freeze === 0, 'a boulder still plays mine and never holds');
+  g.SFX.mineHeavy = realHeavy; g.SFX.mine = realMine;
+  g.resetWorldFx();
+
+  // Opened: glints only inside GEODE; the inner seam sparkles from inside.
+  G.edits = { '70,34': 'c' };
+  put(70, 32);
+  const og = over(g.geodeGlints, g.GEODE_GLINT_PERIOD);
+  ok(g.geodeOpen() && !g.geodeMasked(70, 32) && og.seen.size > 0 && og.bad === 0 &&
+     [...og.seen].every(k => g.GEODE_SPOTS.some(([x, y]) => x + ',' + y === k)),
+     'opened: ' + og.seen.size + ' crystals glint, all GEODE spots');
+  put(66, 33);
+  ok(over(g.seamTells, g.SPARKLE_PERIOD).seen.has('65,33'), 'opened: the inner seam sparkles from inside');
+  ok(engineRolls === rolls0, 'tells, glints, the hold and the shake never call Math.random (the engine stream)');
+  Math.random = realRandom;
+
+  // HUD and menu rectangles: nothing overlaps at 640x480.
+  const hit = (a, b) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
+  const menuR = [640 - g.MENU_W - 16, g.MENU_Y, g.MENU_W, 26 * g.MENU_ITEMS.length + 24];
+  const hud = { region: [8, 8, 150, 30], mats: g.HUD_MAT_RECT, lead: g.HUD_LEAD_RECT,
+                build: [640 / 2 - 148, 8, 296, 30], toast: [640 / 2 - 130, 480 - 60, 260, 34] };
+  for (const [name, r] of Object.entries(hud)) ok(!hit(menuR, r), 'the MENU ' + menuR + ' clears the ' + name + ' panel ' + r);
+  ok(menuR[1] + menuR[3] <= 480 && menuR[0] + menuR[2] <= 640, 'the MENU fits in 640x480');
+  ok(!hit(hud.build, hud.mats) && !hit(hud.build, hud.lead) && g.HUD_MAT_RECT[1] + g.HUD_MAT_RECT[3] <= g.CRAFT_RECT[1],
+     'the wider materials panel clears the BUILDING banner and ends above CRAFT');
+  ok(same(g.CRAFT_TIER_NAME, ['NONE', 'PICK', 'IRON PICK']), 'the HUD tier labels are NONE / PICK / IRON PICK');
+
+  // The picked-ball line follows the ground.
+  ok(g.pickedText(20, 28).includes('cave floor') && g.pickedText(52, 68).includes('sand') &&
+     g.pickedText(50, 51).includes('scree') && g.pickedText(56, 100).includes('grass'),
+     'picked-ball lines: cave floor / sand / scree / grass');
+  G.picked = new Set(['20,28']);
+  g.pickUp(20, 28);
+  ok(G.dialogue && G.dialogue.lines[0] === 'Nothing left here but a scuff on the cave floor.',
+     'a taken cave ball says: ' + (G.dialogue && G.dialogue.lines[0]));
+  G.dialogue = null; G.mode = 'overworld'; G.picked = new Set(); G.edits = {}; G.flags.pick = 0;
+  console.log('  shell: seam tell at tier 2 only, ' + og.seen.size + ' GEODE glints once open, ' + holdFrames +
+              '-frame hold, menu clear of ' + Object.keys(hud).length + ' HUD panels');
+}
+
+/* ----------------------------------------------------------------- CAVE */
+section('CAVE — lantern, tension, the GLOOMSTALK\'s hunt, the PULSE (DARK CAVE horror kit)');
+{
+  const CNPC = new Set(g.NPCS.map(n => n.x + ',' + n.y));
+  const SEAMS_OPEN = {};
+  g.MAP.forEach((r, y) => [...r].forEach((c, x) => { if (c === g.SEAM) SEAMS_OPEN[x + ',' + y] = 'c'; }));
+  const L = g.LANTERN, T = g.TENSION, HA = g.HUNT_AI, PU = g.PULSE;
+  const NONE = new Set();
+  const D4 = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+  const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  // Shortest player path from start to the north mouth row (y=24).
+  function trunkRoute(avoid, edits, start) {
+    avoid = avoid || NONE; edits = edits || {}; start = start || [42, 39];
+    const prev = new Map([[start + '', null]]);
+    let frontier = [start];
+    while (frontier.length) {
+      const nxt = [];
+      for (const [x, y] of frontier) {
+        if (y === 24) {
+          const out = []; let cur = [x, y];
+          while (cur) { out.unshift(cur); cur = prev.get(cur + ''); }
+          return out;
+        }
+        for (const [dx, dy] of D4) {
+          const n = [x + dx, y + dy];
+          if (prev.has(n + '') || avoid.has(n + '') || n[1] < 23 || n[1] > 40) continue;
+          if (g.tileBlocked(n[0], n[1], 'none', edits, NONE, CNPC)) continue;
+          prev.set(n + '', [x, y]); nxt.push(n);
+        }
+      }
+      frontier = nxt;
+    }
+    return null;
+  }
+
+  function caveGame(x, y) {
+    G.party = [g.makeMon('pyrelash', 26)]; G.balls = 20;
+    G.flags = { starter: true, gym: false, huntBeaten: 0, pick: 0 };
+    G.materials = g.zeroMaterials(); G.edits = {}; G.picked = new Set();
+    g.loadCave(null);
+    G.mode = 'overworld'; G.battle = null; G.fade = 0; G.fadeDir = 0; G.fadeCb = null;
+    G.dialogue = null; G.pendingEncounter = null; G.toast = null; G.building = false;
+    const p = G.player;
+    p.tx = x; p.ty = y; p.px = x * 32; p.py = y * 32; p.moving = false; p.dir = 'up';
+    g.syncCave();
+  }
+
+  function stepTo(x, y) {
+    const p = G.player;
+    const k = y < p.ty ? 'arrowup' : y > p.ty ? 'arrowdown' : x < p.tx ? 'arrowleft' : 'arrowright';
+    g.press(k); g.release(k);
+    g.update(1 / 60);
+    for (let i = 0; i < 60 && p.moving; i++) g.update(1 / 60);
+    return G.mode;
+  }
+
+  function finish(result) {
+    g.endBattle(G.battle, result);
+    for (let i = 0; i < 2000 && (G.battle || G.fadeDir); i++) {
+      g.update(1 / 60);
+      if (G.battle && G.battle.step && G.battle.step.t === 'msg') G.battle.step = null;
+    }
+  }
+
+  // --- tables ---
+  ok(g.ENC_BASE === 0.14, 'ENC_BASE keeps the old 0.14 wild roll');
+  ok(g.MENU_ITEMS.indexOf('PULSE') === 4 && g.MENU_ITEMS.indexOf('CLOSE') === 5, 'PULSE is menu row 4, CLOSE row 5');
+  const oil = g.RECIPES.find(r => r.id === 'oil'), pul = g.RECIPES.find(r => r.id === 'pulse');
+  ok(eq(oil, { id: 'oil', out: 'lantern', count: L.oil, needs: { ore: 1 }, cap: L.max }), 'OIL: 1 ORE -> +50 lantern, capped');
+  ok(eq(pul, { id: 'pulse', out: 'pulse', count: 1, needs: { ore: 1, stone: 2 }, cap: PU.max }), 'PULSE: 1 ORE + 2 STONE, carry 3');
+
+  // --- 1. lantern ---
+  const radii = Array.from({ length: 101 }, (_, c) => g.lanternRadius(c));
+  ok(Math.min(...radii) >= L.rMin && radii[0] === L.rMin && radii[100] === L.rMax, 'the lantern never shrinks below R_MIN');
+  ok(radii.every((r, i) => i === 0 || radii[i - 1] <= r), 'lanternRadius is monotone');
+  ok(eq([0, 1, 12, 13, 50, 99, 100, 150, -5].map(g.lanternBucket), [0, 1, 1, 2, 4, 8, 8, 8, 0]), 'lanternBucket: ceil to eighths');
+  ok(g.lanternStep(100, true) === 99 && g.lanternStep(0, true) === 0 && g.lanternStep(57, false) === 57 &&
+     g.lanternStep(150, false) === 100, 'lanternStep drains 1 in the cave only');
+  caveGame(43, 33);
+  for (let i = 0; i < 5; i++) g.caveStep();
+  ok(G.lantern === 95, 'five cave steps drain the lantern to 95 (got ' + G.lantern + ')');
+  G.player.ty = 45; g.caveStep();
+  ok(G.lantern === 95, 'a step outside the cave never drains it');
+  g.healParty();
+  ok(G.lantern === 100, 'healParty refills it');
+  caveGame(43, 33);
+  G.materials.ore = 2; G.lantern = 40;
+  const oi = g.RECIPES.indexOf(oil), pi = g.RECIPES.indexOf(pul);
+  ok(g.craftRecipe(oi) && G.lantern === 90 && G.materials.ore === 1 && G.craftMsg === 'Lantern refilled to 90%.',
+     'OIL refills 40 -> 90 for 1 ORE: ' + G.craftMsg);
+  ok(g.craftRecipe(oi) && G.lantern === 100 && G.materials.ore === 0, 'a second OIL caps at 100');
+  G.materials.ore = 1;
+  ok(!g.craftRecipe(oi) && G.materials.ore === 1, 'OIL is refused at a full lantern, spending nothing');
+  G.materials.ore = 5; G.materials.stone = 10;
+  const made = [0, 1, 2, 3].map(() => g.craftRecipe(pi));
+  ok(eq(made, [true, true, true, false]) && G.pulses === 3 && G.materials.ore === 2 && G.materials.stone === 4,
+     'PULSE crafts to its cap of 3, then refuses without spending');
+
+  // --- 2. tension ---
+  ok(eq([100, 50, 49, 20, 19, 0].map(c => g.tensionStep(10, c, false, false) - 10), [1, 1, 2, 2, 4, 4]),
+     'tension climbs +1 base, +1 under 50% light, +2 more under 20%');
+  ok(g.tensionStep(10, 100, true, false) === 14 && g.tensionStep(10, 0, true, true) === 8, '+3 hunted; safe -2');
+  ok(eq(['win', 'run', 'pulse', 'nonsense'].map(e => g.tensionEvent(50, e)), [40, 55, 35, 50]), 'tensionEvent table');
+  ok(g.encounterRate(0) === 0.14 && Math.abs(g.encounterRate(100) - 0.245) < 1e-12, 'encounterRate 0.14 .. 0.245');
+  // Same number of Math.random() calls at any tension.
+  const realRandom = Math.random;
+  const calls = {};
+  try {
+    for (const v of [0.5, 0.2, 0.1]) for (const t of [0, 100]) {
+      caveGame(20, 30); G.tension = t;
+      let n = 0; Math.random = () => { n++; return v; };
+      g.tryEncounter();
+      calls[v + '/' + t] = [n, !!G.pendingEncounter];
+    }
+  } finally { Math.random = realRandom; }
+  ok(eq(calls['0.5/0'], calls['0.5/100']) && eq(calls['0.5/0'], [1, false]) && eq(calls['0.1/0'], calls['0.1/100']) &&
+     calls['0.1/0'][1], 'tryEncounter makes the same Math.random() calls at tension 0 and 100: ' + JSON.stringify(calls));
+  ok(eq(calls['0.2/0'], [1, false]) && calls['0.2/100'][1], 'a 0.2 roll misses calm but hits at full tension');
+  G.pendingEncounter = null; G.fadeDir = 0; G.fadeCb = null; G.fade = 0;
+
+  // --- 3. domain ---
+  const dom = [];
+  for (let y = 0; y < g.MAP_H; y++) for (let x = 0; x < g.MAP_W; x++) if (g.stalkerWalkable(x, y, {}, NONE, CNPC)) dom.push([x, y]);
+  ok(dom.length === 505, 'the stalker domain is 505 tiles (got ' + dom.length + ')');
+  let rowBad = false;
+  for (const ed of [{}, SEAMS_OPEN]) for (const y of [24, 25, 26, 37, 38, 39]) for (let x = 0; x < g.MAP_W; x++)
+    rowBad = rowBad || g.stalkerWalkable(x, y, ed, NONE, CNPC);
+  ok(!rowBad, 'it never stands on a chokepoint or mouth row');
+  ok(!g.stalkerWalkable(42, 31, {}, NONE, CNPC), "CAVER NOX's tile is solid to it");
+  const legs = HA.patrol.map((w, i) => g.caveDist(w, {}, NONE, CNPC).get(HA.patrol[(i + 1) % 12] + ''));
+  ok(HA.patrol.every(([x, y]) => g.stalkerWalkable(x, y, {}, NONE, CNPC)) && legs.every(v => v !== undefined),
+     'every patrol waypoint is walkable and every leg connected: ' + legs);
+
+  // --- 4. can't block ---
+  const blockers = dom.filter(([x, y]) => !trunkRoute(new Set([[x, y], ...D4.map(([dx, dy]) => [x + dx, y + dy])].map(p => p + ''))));
+  ok(blockers.length === 0, "even solid with its 4 neighbours, no stalker position seals the trunk: " + blockers.slice(0, 3));
+  caveGame(43, 33); G.stalker = g.newStalker(43, 32);
+  ok(!g.blockedFor(43, 32), 'the stalker is never in blockedFor');
+
+  // --- 5. always completable ---
+  const route = trunkRoute();
+  let finished = 0, worst = 0, contacts = 0;
+  dom.forEach(([sx, sy], si) => {
+    const rng = g.mulberry32(si);
+    let st = g.newStalker(sx, sy), rest = 0, i = 0, steps = 0, c = 0;
+    while (i < route.length - 1 && steps < 400) {
+      steps++;
+      const nxt = route[i + 1];
+      let hit;
+      if (st && g.bump(st, nxt)) hit = true;
+      else {
+        i++; hit = false;
+        if (rest > 0) {
+          rest--;
+          if (rest === 0) { const sp = g.stalkerSpawn(route[i], {}, NONE, CNPC); st = g.newStalker(sp[0], sp[1]); }
+        } else if (st) {
+          const r = g.stalkerTick(st, route[i], 0, 100, {}, NONE, CNPC, rng);
+          st = r[0]; hit = r[1] === 'lunge';
+        }
+      }
+      if (hit) { c++; st = null; rest = HA.restLose; i = 0; }
+    }
+    if (i === route.length - 1) finished++;
+    contacts += c; worst = Math.max(worst, c);
+  });
+  ok(finished === dom.length && worst <= 1, 'zero light, max tension, no PULSE: every start crosses with at most one lost fight (' +
+     finished + '/' + dom.length + ', worst ' + worst + ')');
+  console.log('  always completable: ' + finished + '/' + dom.length + ' starts cross (' + contacts + ' contacts); ' +
+              "can't block: all " + dom.length + ' positions leave the trunk open');
+
+  // --- 6. light shield ---
+  {
+    const prng = g.mulberry32(99), srng = g.mulberry32(3);
+    let pp = [43, 32], st = g.newStalker(38, 30), lunges = 0, bad = 0;
+    for (let k = 0; k < 1000; k++) {
+      const opts = D4.map(([dx, dy]) => [pp[0] + dx, pp[1] + dy]).filter(([x, y]) => y >= 26 && y <= 37 &&
+        !g.tileBlocked(x, y, 'none', {}, NONE, CNPC) && !(x === st.x && y === st.y));
+      if (opts.length) pp = opts[Math.floor(prng() * opts.length)];
+      const charge = 50 + Math.floor(prng() * 51), tension = Math.floor(prng() * 75);
+      const before = [st.x, st.y];
+      const [s2, ev] = g.stalkerTick(st, pp, charge, tension, {}, NONE, CNPC, srng);
+      st = s2;
+      if (ev === 'lunge') lunges++;
+      const man = Math.abs(st.x - pp[0]) + Math.abs(st.y - pp[1]);
+      if ((st.x !== before[0] || st.y !== before[1]) && ev !== 'retreat' && man < g.keepOut(charge, tension)) bad++;
+    }
+    ok(lunges === 0 && bad === 0, '1000 ticks at >= 50% light, tension < 75: no lunge, no move inside keepOut (' + lunges + ', ' + bad + ')');
+  }
+  let st = Object.assign(g.newStalker(42, 32), { grace: 3 });
+  const gseq = [];
+  for (let k = 0; k < 4; k++) {
+    const r = g.stalkerTick(st, [43, 32], 0, 100, {}, NONE, CNPC, g.mulberry32(1));
+    st = r[0]; st.x = 42; st.y = 32; gseq.push(r[1]);
+  }
+  ok(!gseq.slice(0, 2).includes('lunge') && gseq[2] === 'lunge', 'no lunge during grace, then the lunge: ' + gseq);
+
+  // --- 7. determinism ---
+  function trace(seed) {
+    const rng = g.mulberry32(seed);
+    const sp = g.stalkerSpawn([43, 30], {}, NONE, CNPC);
+    let s = g.newStalker(sp[0], sp[1]);
+    const walk = [[43, 30], [44, 30], [45, 30], [46, 30], [47, 30], [48, 30]];
+    const out = [];
+    for (let k = 0; k < 300; k++) {
+      const pp = walk[Math.floor(k / 25) % walk.length];
+      const r = g.stalkerTick(s, pp, Math.max(0, 100 - Math.floor(k / 2)), Math.min(100, Math.floor(k / 3)), {}, NONE, CNPC, rng);
+      s = r[0];
+      out.push([s.x, s.y, s.mode, s.stun, r[1]]);
+    }
+    return out;
+  }
+  ok(eq(trace(7), trace(7)) && !eq(trace(7), trace(8)), 'the same seed replays an identical 300-tick trace');
+  const r1 = g.mulberry32(1);
+  ok(eq([r1(), r1(), r1()].map(v => Math.round(v * 1e6) / 1e6), [0.627074, 0.002736, 0.527447]), 'mulberry32(1) reference values');
+
+  // --- 8. pace, sense, no movement without a step ---
+  st = g.newStalker(...HA.lair);
+  const srng = g.mulberry32(11), moved = [];
+  for (let k = 0; k < 200; k++) {
+    const b = [st.x, st.y];
+    st = g.stalkerTick(st, [42, 25], 100, 0, {}, NONE, CNPC, srng)[0];
+    moved.push([st.tick, st.x !== b[0] || st.y !== b[1]]);
+  }
+  const nMoved = moved.filter(m => m[1]).length;
+  ok(moved.every(([t, m]) => !m || t % 2 === 0) && nMoved >= 70 && nMoved <= 100, 'patrol moves only on every other step (' + nMoved + '/100)');
+  st = Object.assign(g.newStalker(20, 30), { mode: 'hunt' });
+  const hm = [];
+  for (let k = 0; k < 10; k++) {
+    const b = [st.x, st.y];
+    st = g.stalkerTick(st, [8, 30], 0, 0, {}, NONE, CNPC, g.mulberry32(1))[0];
+    hm.push([st.tick, st.x !== b[0] || st.y !== b[1]]);
+  }
+  ok(hm.every(([t, m]) => !m || t % 5 !== 4) && hm.filter(m => m[1]).length === 8, 'hunting moves 4 steps in 5');
+  ok(eq([[100, 0], [50, 0], [0, 0], [0, 100], [100, 24], [100, 25]].map(([c, t]) => g.stalkerSense(c, t)), [4, 6, 8, 12, 4, 5]),
+     'stalkerSense table');
+  caveGame(43, 33);
+  G.stalker = Object.assign(g.newStalker(30, 30), { mode: 'hunt' });
+  const snapSt = JSON.stringify(G.stalker);
+  for (let k = 0; k < 300; k++) g.update(1 / 60);
+  ok(JSON.stringify(G.stalker) === snapSt && G.lantern === 100, 'standing still: the stalker never moves, the lantern never drains');
+
+  // --- 9. PULSE ---
+  let pr = g.pulseApply(g.newStalker(10, 28), [10, 31], {}, NONE, CNPC);
+  ok(!pr[1] && pr[0].stun === 0, 'the PULSE reaches by path, not through rock');
+  pr = g.pulseApply(g.newStalker(12, 31), [10, 31], {}, NONE, CNPC);
+  const dd = g.caveDist([10, 31], {}, NONE, CNPC, true);
+  ok(pr[1] && pr[0].stun === PU.stun && dd.get(pr[0].x + ',' + pr[0].y) > dd.get('12,31'), 'a hit stuns and shoves it further off');
+  caveGame(20, 30);
+  G.stalker = Object.assign(g.newStalker(21, 30), { stun: 5 });
+  ok(stepTo(21, 30) === 'overworld' && G.player.tx === 21 && !G.battle, 'you walk straight past a stunned stalker');
+  caveGame(20, 30);
+  G.stalker = g.newStalker(30, 30);
+  const before0 = JSON.stringify([G.stalker, G.tension, G.pulses]);
+  G.mode = 'menu'; G.menu = { cursor: 4 };
+  g.confirmKey();
+  ok(JSON.stringify([G.stalker, G.tension, G.pulses]) === before0 && G.mode === 'menu' && G.toast.s.includes('No PULSE'),
+     'PULSE with 0 charges: a toast and no state change');
+  G.pulses = 2; G.tension = 40;
+  g.confirmKey();
+  ok(G.pulses === 1 && G.tension === 25 && G.mode === 'overworld' && G.toast.s.includes('nothing.'),
+     'a PULSE with nothing in reach is still spent');
+  ok(g.menuLabel('PULSE') === 'PULSE x1', 'the menu row reads PULSE x1');
+  caveGame(20, 30);
+  G.lantern = 0; G.tension = 100; G.pulses = 1; G.stalker = g.newStalker(22, 30);
+  ok(stepTo(21, 30) === 'overworld' && !G.battle && G.pulses === 0 && G.stalker.stun > 0,
+     'a lunge with a PULSE carried fires it by reflex');
+  caveGame(20, 30);
+  G.pulses = 1; G.stalker = g.newStalker(21, 30);
+  g.setScareCalm(false);
+  ok(stepTo(21, 30) === 'battle' && G.battle.hunt && G.pulses === 1 && G.player.tx === 20,
+     'bumping into it is a deliberate fight, and never spends a PULSE');
+
+  // --- 10. handoff ---
+  ok(G.battle.foe.id === g.HUNT.species && G.battle.foe.level === g.huntLevel([26]), 'the hunt is GLOOMSTALK at huntLevel(party)');
+  caveGame(20, 30);
+  G.lantern = 0; G.tension = 100; G.stalker = g.newStalker(22, 30);
+  let n = 0;
+  Math.random = () => { n++; return realRandom(); };
+  try { stepTo(21, 30); } finally { Math.random = realRandom; }
+  ok(G.mode === 'battle' && G.battle.hunt && !G.pendingEncounter, 'a lunge on dark grass starts the hunt and skips the wild roll');
+  finish('win');
+  ok(G.huntGone && !G.stalker && G.tension === 0 && G.mode === 'overworld', 'win: the stalker is gone, tension 0');
+  for (let k = 0; k < 100; k++) g.caveStep();
+  ok(!G.stalker, 'a beaten stalker stays gone');
+  g.healParty();
+  ok(!G.huntGone, '...until healParty');
+  caveGame(20, 30); G.stalker = g.newStalker(21, 30); stepTo(21, 30); finish('run');
+  ok(G.huntRest === HA.restRun && !G.stalker, 'run: it rests ' + HA.restRun + ' cave steps');
+  for (let k = 0; k < HA.restRun - 1; k++) g.caveStep();
+  const stillGone = !G.stalker;
+  g.caveStep();
+  const sp = g.stalkerSpawn([G.player.tx, G.player.ty], G.edits, G.picked, g.npcTiles());
+  ok(stillGone && G.stalker && G.stalker.x === sp[0] && G.stalker.y === sp[1], 'it returns, far away, when the rest runs out');
+  caveGame(20, 30); G.lastCentre = [12, 59]; G.lantern = 3; G.stalker = g.newStalker(21, 30); stepTo(21, 30); finish('lose');
+  ok(G.huntRest === HA.restLose && G.player.tx === 12 && G.player.ty === 59 && G.lantern === 100 && !G.stalker && !G.caveIn,
+     'lose: the normal whiteout, lantern refilled, the stalker rests ' + HA.restLose);
+  G.mode = 'overworld'; G.dialogue = null;
+  let seen2 = false, inCaveSteps = 0;
+  G.player.tx = 42; G.player.ty = 39;
+  for (const [x, y] of route.slice(1)) {
+    G.player.tx = x; G.player.ty = y; g.caveStep();
+    if (g.inCave(y)) inCaveSteps++;
+    seen2 = seen2 || !!G.stalker;
+  }
+  ok(!seen2 && G.huntRest === HA.restLose - inCaveSteps, 'walking back in, the whole trunk crossing is stalker-free');
+  caveGame(20, 30); G.stalker = g.newStalker(30, 30); G.tension = 50;
+  g.startBattle(g.makeMon('nocturn', 22), {});
+  finish('win');
+  ok(G.stalker.grace === HA.grace && G.tension === 40, 'a wild win in the cave: grace, tension -10');
+
+  // --- 11. save round-trip ---
+  caveGame(43, 33);
+  Object.assign(G, { lantern: 37, tension: 44, pulses: 2, huntRest: 12, huntGone: true });
+  ok(g.saveGame(), 'save with the cave counters');
+  const raw = JSON.parse(localStorage.getItem('monster-trail-save-v1'));
+  ok(eq(raw.cave, { lantern: 37, tension: 44, pulses: 2, rest: 12, gone: true }), 'the save carries cave=' + JSON.stringify(raw.cave));
+  caveGame(10, 100);
+  ok(g.loadGame() && eq([G.lantern, G.tension, G.pulses, G.huntRest, G.huntGone], [37, 44, 2, 12, true]) && !G.stalker,
+     'the cave counters round-trip');
+  for (const [caveRaw, want, label] of [[undefined, [100, 0, 0, 0, false], 'an old save'],
+                                        [[], [100, 0, 0, 0, false], 'a non-object cave'],
+                                        [{ lantern: 'abc', tension: -5, pulses: 99, rest: null, gone: 'yes' }, [100, 0, 3, 0, false], 'garbage'],
+                                        [{ lantern: 12.9, tension: '30', pulses: true, rest: 999, gone: true }, [12, 30, 0, 80, true], 'odd types']]) {
+    const r2 = Object.assign({}, raw);
+    if (caveRaw === undefined) delete r2.cave; else r2.cave = caveRaw;
+    localStorage.setItem('monster-trail-save-v1', JSON.stringify(r2));
+    ok(g.loadGame() && eq([G.lantern, G.tension, G.pulses, G.huntRest, G.huntGone], want), label + ' loads as ' + want);
+  }
+  localStorage.setItem('monster-trail-save-v1', JSON.stringify(Object.assign({}, raw, { cave: { lantern: 80, rest: 0 }, x: 43, y: 33 })));
+  g.loadGame();
+  const sp2 = g.stalkerSpawn([43, 33], G.edits, G.picked, g.npcTiles());
+  ok(G.stalker && G.stalker.x === sp2[0] && G.stalker.y === sp2[1] && G.caveIn, 'loading inside the cave spawns it at the farthest waypoint');
+  delete store['monster-trail-save-v1'];
+
+  // --- 12. shell: HUD / menu / craft layout (headless numbers) ---
+  const hitR = (a, b) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
+  const menuR = [640 - g.MENU_W - 16, g.MENU_Y, g.MENU_W, 26 * g.MENU_ITEMS.length + 24];
+  ok(![[8, 8, 150, 30], g.HUD_LEAD_RECT, g.HUD_MAT_RECT, menuR].some(r => hitR(r, g.HUD_CAVE_RECT)),
+     'the cave HUD overlaps no other HUD panel or the menu');
+  const rows = g.craftRows();
+  const [cx0, cy0, , ch0] = g.CRAFT_RECT;
+  ok(rows.length === 7 && cy0 + 92 + 6 * g.CRAFT_ROW_H - 6 + g.CRAFT_ROW_H - 2 <= cy0 + ch0 - 34, 'all 7 CRAFT rows fit above the message');
+  g.setScareCalm(null);
+  caveGame(43, 107);
+  G.mode = 'overworld';
+  console.log('  cave: lantern ' + L.rMin + '-' + L.rMax + ' tiles, ' + dom.length + '-tile domain, rest ' + HA.restRun + '/' +
+              HA.restLose + ', 300-tick traces deterministic');
+}
+
+section('CAVE FEEL — lantern mask, tension screen, stalker eyes, lunge, PULSE ring, HUD bars (headless)');
+{
+  // The HTML build's canvas drawing needs a browser (see browser-playtest); here
+  // the pure feel helpers and the CFX state machine are driven directly.
+  const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const L = g.LANTERN, TILE = 32;
+  function caveGame(x, y) {
+    G.party = [g.makeMon('pyrelash', 26)]; G.balls = 20;
+    G.flags = { starter: true, gym: false, huntBeaten: 0, pick: 0 };
+    G.materials = g.zeroMaterials(); G.edits = {}; G.picked = new Set();
+    g.loadCave(null);
+    G.mode = 'overworld'; G.battle = null; G.fade = 0; G.fadeDir = 0; G.fadeCb = null;
+    G.dialogue = null; G.pendingEncounter = null; G.toast = null; G.building = false;
+    const p = G.player;
+    p.tx = x; p.ty = y; p.px = x * 32; p.py = y * 32; p.moving = false; p.dir = 'up';
+    g.syncCave();
+    g.resetCaveFx(); g.resetWorldFx();
+  }
+  const frames = (n, dt) => { for (let i = 0; i < n; i++) g.updateCaveFx(dt || 1 / 60); };
+
+  // --- lantern mask ---
+  const holes = [];
+  for (let b = 0; b <= L.buckets; b++) {
+    const c = Math.floor(b * L.max / L.buckets);
+    const lit = Math.round(g.lanternRadius(c) * TILE), r = g.lampHoleRadius(c);
+    holes.push(r);
+    ok(r === Math.ceil(lit * g.LAMP_FEATHER[1]), 'bucket ' + b + ': hole radius ' + r + ' = lit ' + lit + ' x feather');
+    let clear = true, mono = true, prev = 0;
+    for (let d = 0; d <= L.corePx; d++) if (g.lampProfile(d, lit)[1] !== 0) clear = false;
+    for (let d = L.corePx + 1; d <= r; d++) { const a = g.lampProfile(d, lit)[1]; if (a + 1 < prev) mono = false; prev = a; }
+    ok(clear, 'bucket ' + b + ': the ' + L.corePx + ' px core is clear (4 neighbouring tiles lit)');
+    ok(mono && g.lampProfile(r, lit)[1] >= g.LAMP_DARK_ALPHA - 1, 'bucket ' + b + ': soft monotone falloff into the dark');
+    const warm = g.lampProfile(Math.floor((L.corePx + lit * g.LAMP_FEATHER[0]) / 2), lit)[0];
+    ok(warm[0] > warm[2] + 40, 'bucket ' + b + ': the lit ring is tinted warm ' + warm);
+  }
+  ok(holes.every((r, i) => i === 0 || r >= holes[i - 1]) && holes[0] < holes[L.buckets], 'hole radius grows with the bucket: ' + holes);
+  ok(g.lampFlickerAmp(10, false) > 0 && g.lampFlickerAmp(10, true) === 0 && g.lampFlickerAmp(25, false) === 0 &&
+     g.lampFlickerAmp(0, false) === 1, 'the flame gutters below 25% only, never with reduced motion');
+
+  // --- tension screen ---
+  ok(eq([0, 49, 50, 75, 100].map(g.vignetteAlpha), [0, 0, g.VIGNETTE_MIN, 75, g.VIGNETTE_MAX]), 'vignette alpha at t 0/49/50/75/100');
+  ok(g.heartHz(74) === 0 && g.heartHz(75) === g.HEART_HZ_MIN && g.heartHz(100) === g.HEART_HZ_MAX, 'heartbeat 1.2 -> 1.8 Hz from fear');
+  ok(g.heartEnv(0) === 1 && g.heartEnv(g.HEART_DUB) > 0.6 && g.heartEnv(0.9) < 0.01, 'lub-dub envelope');
+  for (const [t, calm] of [[74, false], [75, false], [100, true]]) {
+    const fx = g.tensionFx(t, calm), want = t >= 75 && !calm;
+    ok(fx.pulse === want && fx.grain === want && fx.tears === want && (fx.heart > 0) === (t >= 75),
+       'tensionFx(' + t + (calm ? ', reduced' : '') + '): pulse/grain/tears ' + want + ', heartbeat sound ' + (t >= 75));
+  }
+  for (const [t, calm, want] of [[60, false, false], [80, false, true], [100, true, false], [74, false, false]]) {
+    caveGame(43, 30);
+    g.setCaveCalm(calm);
+    G.lantern = 100; G.tension = t; G.stalker = null;
+    const grains = new Set(); let tears = 0;
+    const b0 = g.CFX.beats;
+    for (let i = 0; i < 300; i++) { g.updateCaveFx(1 / 60); grains.add(g.CFX.grainX + ',' + g.CFX.grainY); tears = Math.max(tears, g.tearsLive()); }
+    const tag = 'tension ' + t + (calm ? ' + reduced motion' : '');
+    ok((grains.size > 1) === want, tag + ': film grain ' + (want ? 'rolls' : 'never runs'));
+    ok((tears > 0) === want, tag + ': tear lines ' + (want ? 'appear' : 'never appear'));
+    const hz = g.heartHz(t), beats = g.CFX.beats - b0;
+    ok(hz ? Math.abs(beats - (1 + Math.floor(5 * hz))) <= 1 : beats === 0, tag + ': ' + beats + ' heartbeats in 5 s');
+  }
+  for (const [charge, calm, want] of [[10, false, true], [10, true, false], [60, false, false]]) {
+    caveGame(43, 30);
+    g.setCaveCalm(calm);
+    G.lantern = charge; G.tension = 0;
+    let peak = 0;
+    for (let i = 0; i < 120; i++) { g.updateCaveFx(1 / 60); peak = Math.max(peak, g.CFX.flicker * g.lampFlickerAmp(charge, calm)); }
+    ok((peak > 0.05) === want, 'lantern ' + charge + (calm ? ' + reduced motion' : '') + ': the flame ' + (want ? 'flickers' : 'holds steady'));
+  }
+  g.setCaveCalm(null);
+
+  // --- the stalker's eyes, glide and trail ---
+  const s0 = g.stalkerSense(100, 0);
+  ok(g.stalkerEyes(Object.assign(g.newStalker(38, 30), { mode: 'hunt' }), [43, 30], 0, 0) === 'hunt', 'eyes while hunting within sense');
+  ok(g.stalkerEyes(Object.assign(g.newStalker(43 - s0 - 2, 30), { mode: 'hunt' }), [43, 30], 100, 0) === null, 'no eyes hunting beyond sense');
+  ok(g.stalkerEyes(g.newStalker(38, 30), [43, 30], 0, 0) === null, 'no eyes while it patrols');
+  ok(g.stalkerEyes(Object.assign(g.newStalker(38, 30), { stun: 4 }), [43, 30], 0, 0) === 'stun', 'dimmed eyes while stunned');
+  caveGame(43, 30);
+  G.stalker = Object.assign(g.newStalker(38, 30), { mode: 'hunt' });
+  frames(1);
+  G.stalker = Object.assign({}, G.stalker, { x: 39 });
+  frames(1);
+  const mid = g.stalkerPx(G.stalker)[0];
+  ok(38 * TILE + 16 < mid && mid < 39 * TILE + 16 && g.CFX.trail.filter(t => t.t > 0).length === 1,
+     'a hunting step glides the body (' + mid.toFixed(1) + ') and leaves one eye ghost');
+  frames(30);
+  ok(g.stalkerPx(G.stalker)[0] === 39 * TILE + 16 && g.CFX.trail.every(t => t.t === 0), 'the glide settles and the trail fades');
+  g.setCaveCalm(true);
+  G.stalker = Object.assign({}, G.stalker, { x: 40 });
+  frames(1);
+  ok(g.stalkerPx(G.stalker)[0] === 40 * TILE + 16 && g.CFX.trail.every(t => t.t === 0), 'reduced motion: it snaps, no trail');
+  g.setCaveCalm(null);
+
+  // --- the lunge: one flare and a jolt, then the cut; a confirm is held, not lost ---
+  caveGame(43, 30);
+  G.lantern = 0; G.tension = 90;
+  G.stalker = Object.assign(g.newStalker(42, 30), { mode: 'hunt' });
+  g.beginHunt();
+  const b = G.battle;
+  ok(G.mode === 'battle' && b && b.hunt && b.scare === 'dark', 'the lunge hands off to the hunt battle (hard cut)');
+  ok(g.CFX.lungeAge === 0 && g.WFX.trauma >= g.LUNGE_TRAUMA, 'the lunge starts the flare and jolts the world');
+  g.updateBattle(1 / 60);
+  const first = b.step && b.step.s;
+  ok(first === 'Something was breathing right behind you...', 'the scare line waits under the flare: ' + first);
+  g.press('z'); g.release('z');
+  ok(g.CFX.pendingConfirm && b.step && b.step.s === first, 'a confirm during the flare is held, not spent on an unseen line');
+  const flares = [];
+  for (let i = 0; i < Math.ceil(g.LUNGE_TIME * 60) + 3; i++) { flares.push(g.lungeFlare(g.CFX.lungeAge)); g.updateCaveFx(1 / 60); }
+  let rises = 0;
+  [0].concat(flares).forEach((a, i, arr) => { if (i && a > arr[i - 1] + 1e-9) rises++; });
+  ok(rises === 1 && flares[0] === 1 && flares[flares.length - 1] === 0 && flares.every((a, i) => !i || a <= flares[i - 1]),
+     'the lunge flashes exactly once and only fades (no strobe)');
+  ok(g.CFX.lungeAge === null && !g.CFX.pendingConfirm && !(b.step && b.step.s === first), 'the held confirm is replayed once after the flare');
+  g.setCaveCalm(true);
+  g.resetCaveFx(); g.resetWorldFx();
+  g.worldFx('lunge', 42, 30, null, {});
+  ok(g.CFX.lungeAge === null && g.WFX.trauma === 0, 'reduced motion: no flare and no jolt');
+  g.setCaveCalm(null);
+
+  // --- the PULSE ring ---
+  for (const hit of [true, false]) {
+    caveGame(43, 30);
+    G.stalker = hit ? Object.assign(g.newStalker(41, 30), { stun: 10 }) : null;
+    g.worldFx('pulse', 43, 30, null, { hit, auto: false });
+    const r = g.CFX.ring, tag = 'pulse ' + (hit ? 'hit' : 'miss');
+    ok(r && r.tiles.length && r.tiles.every(([x, y, d]) => d <= g.PULSE.range && Math.abs(x - 43) + Math.abs(y - 30) <= d),
+       tag + ': every ring tile is within ' + g.PULSE.range + ' steps by path');
+    ok(r.tiles.every(([x, y]) => !g.tileBlocked(x, y, 'none', G.edits, G.picked, g.npcTiles())), tag + ': the ring never lights rock');
+    ok((g.liveDebris() > 0 && g.WFX.trauma > 0) === hit, tag + ': sparks and a jolt only on a hit');
+    let maxA = 0;
+    for (let i = 0; i < 60; i++) { if (g.CFX.ring) for (const [, , d] of g.CFX.ring.tiles) maxA = Math.max(maxA, g.ringAlpha(d)); frames(1); }
+    ok(maxA > 0 && maxA <= g.PULSE_RING_ALPHA && g.CFX.ring === null, tag + ': the wavefront peaks at ' + maxA + ' and is gone in 0.7 s');
+  }
+  const wallSide = (() => { for (let y = 27; y <= 36; y++) for (let x = 10; x < 80; x++)
+    if (!g.tileBlocked(x, y, 'none', {}, new Set(), g.npcTiles()) && g.tileBlocked(x + 1, y, 'none', {}, new Set(), g.npcTiles())) return [x, y]; })();
+  ok(g.pulseRing(g.caveDist(wallSide, {}, new Set(), g.npcTiles(), true)).length < 41, 'beside rock at ' + wallSide + ' the ring is cut short');
+
+  // --- HUD bars ---
+  const hitR = (a, c) => a[0] < c[0] + c[2] && c[0] < a[0] + a[2] && a[1] < c[1] + c[3] && c[1] < a[1] + a[3];
+  const inR = (a, c) => a[0] >= c[0] && a[1] >= c[1] && a[0] + a[2] <= c[0] + c[2] && a[1] + a[3] <= c[1] + c[3];
+  const others = [[8, 8, 150, 30], g.HUD_LEAD_RECT, g.HUD_MAT_RECT];
+  const bad = [];
+  for (const c of [0, 1, 19, 20, 50, 99, 100]) for (const t of [0, 24, 25, 74, 75, 100]) {
+    const hb = g.caveHudBars(c, t);
+    const rects = [hb.lamp].concat(hb.tension ? [hb.tension] : []);
+    if (hb.lampFill !== Math.round(g.HUD_CAVE_BAR_W * c / 100) || hb.low !== (c < g.HUD_LAMP_LOW)) bad.push(['lamp', c]);
+    if ((hb.tension === null) !== (t < g.HUD_TENSION_FROM) || hb.fear !== (t >= 75) || hb.label !== (t >= 75 ? 'FEAR!' : 'TENSION') ||
+        (hb.tension && hb.tensionFill !== Math.round(g.HUD_CAVE_BAR_W * t / 100))) bad.push(['tension', t]);
+    if (!rects.every(r => inR(r, g.HUD_CAVE_RECT)) || rects.some(r => others.some(o => hitR(r, o)))) bad.push(['layout', c, t]);
+  }
+  ok(!bad.length, 'caveHudBars: fills, FEAR! label, show-from-25 and layout hold for 42 states ' + JSON.stringify(bad.slice(0, 3)));
+
+  // --- none of it draws from Math.random or moves the stalker's trace ---
+  const realRandom = Math.random;
+  let calls = 0;
+  Math.random = () => { calls++; return realRandom(); };
+  try {
+    caveGame(43, 30);
+    G.lantern = 5; G.tension = 95; G.pulses = 2;
+    G.stalker = Object.assign(g.newStalker(41, 30), { mode: 'hunt' });
+    for (let i = 0; i < 600; i++) g.updateCaveFx(1 / 60);
+    g.worldFx('pulse', 43, 30, null, { hit: true }); g.worldFx('lunge', 41, 30, null, {});
+    for (let i = 0; i < 60; i++) g.updateCaveFx(1 / 60);
+    g.caveHudBars(5, 95); g.stalkerEyes(G.stalker, [43, 30], 5, 95); g.tensionFx(95, false);
+  } finally { Math.random = realRandom; }
+  ok(calls === 0, 'the cave feel never calls Math.random (' + calls + ' calls)');
+  const bfsPath = (src, dst) => {
+    const prev = new Map([[src + '', null]]);
+    let frontier = [src];
+    while (frontier.length) {
+      const nxt = [];
+      for (const [x, y] of frontier) {
+        if (x === dst[0] && y === dst[1]) {
+          const out = []; let cur = [x, y];
+          while (cur) { out.unshift(cur); cur = prev.get(cur + ''); }
+          return out;
+        }
+        for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+          const n = [x + dx, y + dy];
+          if (prev.has(n + '') || !g.inCave(n[1]) || g.tileBlocked(n[0], n[1], 'none', {}, new Set(), g.npcTiles())) continue;
+          prev.set(n + '', [x, y]); nxt.push(n);
+        }
+      }
+      frontier = nxt;
+    }
+    return [];
+  };
+  const walk = extraFx => {
+    caveGame(43, 30);
+    G.lantern = 8; G.tension = 70; G.pulses = 3; G.stalker = g.newStalker(38, 30);
+    G.caveRng = g.mulberry32(99);
+    G.wanderT = 0.35;                               // townsfolk wander on Math.random; start both walks alike
+    const rows = [];
+    let rc = 0;
+    Math.random = () => { rc++; return 0.99; };     // no wild encounters, and every engine draw is counted
+    try {
+      const there = bfsPath([43, 30], [7, 33]), back = bfsPath([7, 33], [43, 30]);
+      const route = there.slice(1).concat(back.slice(1));
+      for (const [x, y] of route) {
+        if (G.mode !== 'overworld') break;
+        const p = G.player, k = x < p.tx ? 'arrowleft' : x > p.tx ? 'arrowright' : y < p.ty ? 'arrowup' : 'arrowdown';
+        g.press(k); g.release(k);
+        g.update(1 / 60);
+        for (let i = 0; i < 60 && p.moving; i++) {
+          g.update(1 / 60);
+          if (extraFx) { for (let j = 0; j < 3; j++) g.updateCaveFx(1 / 60); g.fxRand(); }
+        }
+        const st = G.stalker;
+        rows.push([p.tx, p.ty, G.mode, G.lantern, G.tension, G.pulses, st && [st.x, st.y, st.mode, st.stun, st.tick]]);
+      }
+    } finally { Math.random = realRandom; }
+    return [rows, rc, G.caveRng()];
+  };
+  const [plain, rcPlain, nextPlain] = walk(false);
+  const [busy, rcBusy, nextBusy] = walk(true);
+  ok(plain.length > 10 && eq(plain, busy), 'a ' + plain.length + '-step cave walk leaves the same trace with extra feel frames running');
+  ok(rcPlain === rcBusy && nextPlain === nextBusy, 'Math.random draws (' + rcPlain + ' vs ' + rcBusy + ', next ' + nextPlain + ' vs ' + nextBusy + ') and the stalker mulberry32 are untouched by the feel layer');
+  ok(plain.some(r => r[5] < 3) || plain.some(r => r[2] !== 'overworld') || plain.some(r => r[6] && r[6][2] === 'hunt'),
+     'the walk exercised the hunt or the PULSE');
+
+  g.setCaveCalm(null);
+  g.resetCaveFx(); g.resetWorldFx();
+  caveGame(43, 107);
+  G.mode = 'overworld';
+  console.log('  cave feel: ' + (L.buckets + 1) + ' lantern buckets (hole ' + holes[0] + '-' + holes[L.buckets] +
+              ' px), vignette ' + g.VIGNETTE_MIN + '-' + g.VIGNETTE_MAX + ', heartbeat ' + g.HEART_HZ_MIN + '-' + g.HEART_HZ_MAX +
+              ' Hz, ' + plain.length + '-step walk unchanged by the feel layer');
+}
+
+/* --------------------------------------------------------------- RESULT */
+console.log('\n' + (fail === 0
+  ? pass + ' checks passed.'
+  : fail + ' FAILED, ' + pass + ' passed.'));
+process.exit(fail === 0 ? 0 : 1);

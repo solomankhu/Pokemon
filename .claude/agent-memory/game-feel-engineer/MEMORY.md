@@ -1,0 +1,9 @@
+- [Headless fullscreen screen size](headless-fullscreen-screen-size.md) — headless screen==viewport fools isFullscreen(); set `screen` in Playwright, private PW install path
+- [Webcam frame diff needs two stills](webcam-frame-diff-two-stills.md) — after a burst frame, two still frames before the next burst can register
+- [Edit tool strips stray CR](edit-tool-strips-stray-cr.md) — compare CR count/tail bytes vs backup; count CRs with tr, not grep -c (gives 0)
+- [Bash heredoc mangling](bash-heredoc-mangling.md) — long heredocs break in the Bash tool; Write patch scripts to scratchpad, assert unique matches
+- [three.js UUIDs call Math.random](threejs-uuid-math-random.md) — start Math.random spies after presenter enter()/createEffects
+- [Node test timer granularity](node-test-timer-granularity.md) — Windows wait(5) ~15 ms: polls miss short UI steps; log textContent writes instead
+- [MT_FRAME_DIR leaks into verify](mt-frame-dir-leaks-into-verify.md) — env makes combatpy fail; dump frames via py suite only, verify without it
+- [Webcam gesture fps + clip replay](webcam-gesture-fps-and-replay.md) — clips ~13 fps: use motion.recent not per-frame zones; replay = pause-style start, never learn:all
+- [Webcam throw vs punch](webcam-throw-vs-punch.md) — cross punch blob path mimics a throw; wind-up+follow-through+flow separate them; retract lags 1 frame

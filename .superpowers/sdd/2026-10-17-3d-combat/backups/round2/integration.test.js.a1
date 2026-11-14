@@ -1,0 +1,23 @@
+'use strict';
+const assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
+function load(){const store={};const c={console,MonsterCommands:require('./commands.js'),localStorage:{getItem:k=>store[k]||null,setItem:(k,v)=>store[k]=v}};c.globalThis=c;vm.runInNewContext(fs.readFileSync("claude's monsters.html",'utf8').match(/<script>([\s\S]*)<\/script>/)[1],c);return {g:c.__GAME__,c,store};}
+const {g,c}=load();let checks=0;const ok=(v,m)=>{assert.ok(v,m);checks++;};
+function rng(seed){let s=seed;return ()=>((s=Math.imul(s,1664525)+1013904223>>>0)/4294967296);}
+const atk=g.makeMon('emberling',20),def=g.makeMon('sprigling',20);
+for(let seed=0;seed<100;seed++){
+ let n1=0,n2=0,r1=rng(seed),r2=rng(seed);const a=g.damageCalc(atk,def,'ember',{}, {},()=>{n1++;return r1();});
+ const b=g.damageCalc(atk,def,'ember',{}, {},()=>{n2++;return r2();},1,0);
+ ok(JSON.stringify(a)===JSON.stringify(b)&&n1===n2,'default RNG/results identical '+seed);
+}
+const base=g.damageCalc(atk,def,'ember',{}, {},()=>.5),perfect=g.damageCalc(atk,def,'ember',{}, {},()=>.5,1.2,.05);
+ok(perfect.dmg===Math.floor(base.dmg*1.2),'timing modifies final damage');
+ok(g.damageCalc(atk,def,'ember',{}, {},()=>.5,999,999).dmg===perfect.dmg,'modifier caps');
+ok(g.damageCalc(atk,def,'ember',{}, {},()=>.5,NaN,NaN).dmg===base.dmg,'nonfinite modifiers baseline');
+ok(typeof g.qCommand==='function'&&typeof g.qAction==='function','queue exposes command/action steps');
+const G=g.G;G.party=[atk];G.settings={actionMode:'ON',quality:'STANDARD',basicMode:false,reducedMotion:false};g.startBattle(def);
+const b=G.battle;b.queue=[];b.step=null;b.phase='anim';
+let contacts=0;g.qAction(b,{actor:'mine',moveId:'ember',target:'foe',result:{dmg:10},duration:.8,contactAt:.4},()=>{contacts++;def.hp-=10;});
+g.pumpQueue(b,0);g.pumpQueue(b,.39);ok(contacts===0,'no damage before contact');g.pumpQueue(b,.02);ok(contacts===1,'damage on contact');g.pumpQueue(b,1);ok(contacts===1&&!b.step,'no duplicate contact after recovery');
+g.qCommand(b,'strike',r=>{b.judged=r;});g.pumpQueue(b,0);ok(b.command&&b.command.kind==='strike','command appears');g.commandInput(true,false,.65);g.pumpQueue(b,0);ok(b.judged.tier==='PERFECT','input reaches command queue');
+g.qCommand(b,'strike',r=>{b.judged=r;});g.pumpQueue(b,0);g.commandInput(true,false,.65);g.commandInput(false,true,.66);g.pumpQueue(b,0);ok(b.judged.tier==='PERFECT'&&!b.command,'one-frame press and release retains strike input');
+console.log(checks+' integration checks passed.');

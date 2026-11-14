@@ -1,0 +1,140 @@
+{
+  "ts": "2026-10-17T14:56:13.252Z",
+  "ok": true,
+  "allOk": true,
+  "ran": [
+    "py",
+    "js",
+    "gemini",
+    "campaign",
+    "combat",
+    "combatpy",
+    "hooks",
+    "tables"
+  ],
+  "results": [
+    {
+      "name": "py",
+      "label": "MONSTER TRAIL python suite (incl. RENDER + PARITY)",
+      "ok": true,
+      "code": 0,
+      "ms": 70185,
+      "summary": "4876 checks passed",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "js",
+      "label": "MONSTER TRAIL html suite",
+      "ok": true,
+      "code": 0,
+      "ms": 6185,
+      "summary": "3333 checks passed",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "gemini",
+      "label": "THE STATIC BELOW suite",
+      "ok": true,
+      "code": 0,
+      "ms": 1174,
+      "summary": "554 passed, 0 failed",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "campaign",
+      "label": "campaign handoff suite",
+      "ok": true,
+      "code": 0,
+      "ms": 179,
+      "summary": "8 campaign tests passed",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "combat",
+      "label": "combat/ JS suites (3D battle)",
+      "ok": true,
+      "code": 0,
+      "ms": 2093,
+      "summary": "ok",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "combatpy",
+      "label": "combat/ Python command tests",
+      "ok": true,
+      "code": 0,
+      "ms": 3359,
+      "summary": "Ran 18 tests",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "hooks",
+      "label": "harness hook tests",
+      "ok": true,
+      "code": 0,
+      "ms": 3686,
+      "summary": "70 hook checks passed",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "tables",
+      "label": "emit_tables parity (dry run)",
+      "ok": true,
+      "code": 0,
+      "ms": 412,
+      "summary": "ok",
+      "failures": [],
+      "tail": ""
+    }
+  ],
+  "checks": {
+    "py": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "4876 checks passed"
+    },
+    "js": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "3333 checks passed"
+    },
+    "gemini": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "554 passed, 0 failed"
+    },
+    "campaign": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "8 campaign tests passed"
+    },
+    "combat": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "ok"
+    },
+    "combatpy": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "Ran 18 tests"
+    },
+    "hooks": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "70 hook checks passed"
+    },
+    "tables": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "ok"
+    }
+  },
+  "inputsMtime": 1792248903067
+}

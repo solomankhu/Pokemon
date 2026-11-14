@@ -1,0 +1,22 @@
+{
+  "errors": [],
+  "state": {
+    "ready": true,
+    "isLocked": false,
+    "freePlay": false,
+    "overlayHidden": false,
+    "touchMode": false,
+    "stage": 2,
+    "status": "play",
+    "arrival": {
+      "arrived": false,
+      "handoff": null,
+      "consume": false
+    }
+  },
+  "screenshots": [
+    "underground-pulse.png",
+    "underground-station.png",
+    "underground-stage.png"
+  ]
+}

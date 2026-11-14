@@ -1,0 +1,2297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>THE STATIC BELOW</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --cyan: #7bf0ff; --cyan-dim: #5b9db5; --teal: #00ffcc; --red: #ff3344;
+    --amber: #ffb000; --panel: rgba(4, 10, 14, 0.74); --line: rgba(123, 240, 255, 0.22);
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  body {
+    font-family: 'Courier New', Courier, monospace; color: var(--cyan);
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    touch-action: none; overscroll-behavior: none; -webkit-tap-highlight-color: transparent;
+  }
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+  /* ---- TV static (intro, sanity loss, jammer texture, jumpscare) ---- */
+  #static {
+    position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none;
+    image-rendering: pixelated; opacity: 0; z-index: 8;
+  }
+  #static.top { z-index: 35; }
+
+  /* ---- boot / CDN error ---- */
+  #boot {
+    position: fixed; inset: 0; z-index: 30; background: #000; display: flex;
+    flex-direction: column; justify-content: center; align-items: center; text-align: center;
+    padding: 16px; box-sizing: border-box;
+  }
+  #boot.gone { display: none; }
+  #boot h1 { font-size: 30px; letter-spacing: 4px; margin: 0 0 14px; text-shadow: 0 0 10px var(--cyan); }
+  #boot .meter { width: 220px; height: 4px; background: rgba(123, 240, 255, 0.15); overflow: hidden; margin: 14px auto; }
+  #boot .meter i { display: block; width: 40%; height: 100%; background: var(--cyan); animation: bootbar 1.6s ease-in-out infinite; }
+  @keyframes bootbar { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
+  #boot p { margin: 4px 0; color: var(--cyan-dim); font-size: 14px; }
+  #boot .err { display: none; max-width: 520px; }
+  #boot.error .loading { display: none; }
+  #boot.error .err { display: block; }
+  #boot .err h2 { color: var(--red); letter-spacing: 3px; margin: 0 0 10px; }
+  #boot .err p { color: #cfe9f5; }
+  #boot .err small { display: block; margin-top: 10px; color: var(--cyan-dim); word-break: break-all; }
+
+  /* ---- HUD ---- */
+  #hud {
+    position: fixed; top: calc(12px + env(safe-area-inset-top)); left: calc(12px + env(safe-area-inset-left));
+    z-index: 10; pointer-events: none; width: 220px; padding: 9px 11px; box-sizing: border-box;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    font-size: 12px; font-weight: bold; text-shadow: 0 0 5px rgba(0, 255, 255, 0.4); display: none;
+  }
+  body.ready #hud { display: block; }
+  .hud-head { display: flex; justify-content: space-between; letter-spacing: 1px; margin-bottom: 4px; }
+  .bar { margin: 5px 0; }
+  .bar .lbl { display: flex; justify-content: space-between; font-size: 11px; letter-spacing: 1px; }
+  .bar .track { height: 6px; background: rgba(123, 240, 255, 0.12); border-radius: 3px; overflow: hidden; margin-top: 2px; }
+  .bar .fill { height: 100%; width: 100%; background: var(--c); transform-origin: 0 50%; }
+  .bar.low .lbl { color: var(--red); }
+  .bar.low .fill { animation: lowpulse 1.2s ease-in-out infinite; }
+  @keyframes lowpulse { 50% { opacity: 0.4; } }
+  .chips { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+  .chip { font-size: 11px; padding: 2px 6px; border: 1px solid rgba(123, 240, 255, 0.3); border-radius: 3px; color: var(--cyan-dim); }
+  .chip.on { color: #00140f; background: var(--teal); border-color: var(--teal); text-shadow: none; }
+  .chip.dead { color: var(--red); border-color: var(--red); }
+  body.touch .key { display: none; }
+
+  #crosshair {
+    position: fixed; top: 50%; left: 50%; width: 6px; height: 6px; border-radius: 50%;
+    background: rgba(123, 240, 255, 0.6); transform: translate(-50%, -50%); pointer-events: none; z-index: 10; display: none;
+  }
+  body.playing #crosshair { display: block; }
+
+  #toast {
+    position: fixed; top: calc(14px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
+    z-index: 12; padding: 7px 14px; background: var(--panel); border: 1px solid rgba(0, 255, 204, 0.45);
+    color: var(--teal); font-weight: bold; letter-spacing: 2px; font-size: 14px; white-space: nowrap;
+    opacity: 0; transition: opacity 0.25s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+  #toast.warn { color: var(--red); border-color: rgba(255, 51, 68, 0.6); }
+
+  /* ---- screen-space feedback (never strobing) ---- */
+  .fx { position: fixed; inset: 0; pointer-events: none; opacity: 0; }
+  #jammer-vignette {
+    z-index: 5; transition: opacity 0.25s;
+    box-shadow: inset 0 0 90px 18px rgba(0, 255, 204, 0.22);
+    background: repeating-linear-gradient(0deg, rgba(0, 255, 204, 0.045) 0 2px, transparent 2px 6px);
+    animation: scan 3s linear infinite;
+  }
+  @keyframes scan { to { background-position: 0 48px; } }
+  #hurt-vignette { z-index: 6; background: radial-gradient(ellipse at center, transparent 45%, rgba(255, 20, 40, 0.55) 100%); }
+  #scare-overlay { z-index: 15; background: radial-gradient(ellipse at center, rgba(255, 0, 0, 0.1) 0%, rgba(255, 0, 0, 0.25) 40%, rgba(110, 0, 0, 0.92) 100%); }
+
+  /* ---- overlay / menus ---- */
+  #overlay {
+    position: fixed; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center;
+    background: rgba(0, 0, 0, 0.93); color: var(--cyan); z-index: 20; cursor: pointer; text-align: center;
+    padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+    box-sizing: border-box; overflow-y: auto;
+  }
+  #overlay.hidden { display: none; }
+  #overlay.plan-open { justify-content: flex-start; cursor: default; background: rgba(0, 4, 8, 0.98); }
+  #overlay.plan-open .panel { max-width: 1000px; flex-shrink: 0; }
+  #overlay.plan-open #overlay-line, #overlay.plan-open #overlay-sub { display: none; }
+  .floor-plan-layout { display: flex; justify-content: center; align-items: flex-start; gap: 24px; margin-top: 12px; }
+  #floor-plan { width: min(45vw, 450px, 48vh); height: auto; max-width: 55%; object-fit: contain; background: #06141c; }
+  #floor-plan-legend { text-align: left; font-size: 14px; line-height: 1.6; max-width: 300px; }
+  #floor-plan-legend ol { padding-left: 24px; margin: 0 0 14px; }
+  #floor-plan-legend .current-room { color: #00ffcc; font-weight: bold; }
+  #floor-plan-legend p { font-size: 14px; }
+  @media (max-height: 500px) { #floor-plan { width: min(45vw, calc((100vh - 150px) * 0.75)); } .floor-plan-layout { margin-top: 4px; gap: 16px; } }
+  @media (max-width: 520px) { .floor-plan-layout { gap: 10px; } #floor-plan-legend { font-size: 12px; } #floor-plan-legend p { font-size: 12px; } }
+  #overlay .panel { max-width: 680px; width: 100%; transition: opacity 0.6s; }
+  #overlay.intro .panel { opacity: 0; }
+  #overlay.intro.reveal .panel { opacity: 1; }
+  #overlay h1 { font-size: 36px; margin: 0 0 10px; letter-spacing: 3px; color: var(--cyan); text-shadow: 0 0 10px currentColor; }
+  #overlay p { font-size: 16px; margin: 5px 0; color: #a0d8ef; }
+  #overlay-line { font-style: italic; color: #e2f6ff !important; font-size: 18px !important; min-height: 1.3em; margin: 12px 0 4px !important; }
+  #overlay-sub { font-size: 13px !important; color: var(--cyan-dim) !important; letter-spacing: 1px; }
+  .btns { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin: 18px 0 6px; }
+  .btn {
+    font: inherit; font-weight: bold; letter-spacing: 2px; font-size: 15px; color: var(--cyan);
+    background: rgba(123, 240, 255, 0.06); border: 1px solid rgba(123, 240, 255, 0.5);
+    padding: 12px 18px; min-height: 48px; min-width: 132px; border-radius: 4px; cursor: pointer;
+  }
+  .btn.primary { background: var(--cyan); color: #00121a; }
+  .btn:hover { filter: brightness(1.15); }
+  .btn:focus-visible, .set input:focus-visible, .set select:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  .help { font-size: 13px !important; color: var(--cyan-dim) !important; }
+  .help b { color: var(--cyan); }
+  .help.touchonly { display: none; }
+  body.touch .help.desk { display: none; }
+  body.touch .help.touchonly { display: block; }
+  .warnline { font-size: 12px !important; color: var(--red) !important; margin-top: 10px !important; }
+  #settings { display: none; text-align: left; max-width: 420px; margin: 0 auto; }
+  #overlay.settings-open .main { display: none; }
+  #overlay.settings-open #settings { display: block; }
+  #settings h2 { text-align: center; letter-spacing: 3px; margin: 0 0 12px; }
+  .set { display: grid; grid-template-columns: 1fr 170px 3.5em; align-items: center; gap: 12px; margin: 10px 0; font-size: 14px; color: #cfe9f5; min-height: 44px; }
+  .set input[type=checkbox], .set select { grid-column: 2 / 4; justify-self: end; }
+  .set input[type=range] { width: 170px; accent-color: var(--cyan); }
+  .set input[type=checkbox] { width: 24px; height: 24px; accent-color: var(--cyan); }
+  .set select { font: inherit; background: #031015; color: var(--cyan); border: 1px solid var(--line); padding: 8px; min-height: 40px; }
+  .set output { width: 3.5em; text-align: right; color: var(--cyan); }
+
+  /* ---- touch controls ---- */
+  #touch-ui { display: none; position: fixed; inset: 0; z-index: 11; pointer-events: none; }
+  body.touch.playing #touch-ui { display: block; }
+  #stick-zone { position: absolute; left: 0; bottom: 0; width: 45%; height: 72%; pointer-events: auto; touch-action: none; }
+  #look-zone { position: absolute; right: 0; top: 0; width: 55%; height: 100%; pointer-events: auto; touch-action: none; }
+  #stick-base {
+    position: absolute; width: 124px; height: 124px; margin: -62px 0 0 -62px; border-radius: 50%;
+    border: 2px solid rgba(123, 240, 255, 0.4); background: rgba(123, 240, 255, 0.07); opacity: 0.45;
+    left: calc(96px + env(safe-area-inset-left)); top: calc(100% - 96px - env(safe-area-inset-bottom));
+  }
+  #stick-base.active { opacity: 0.85; }
+  #stick-knob { position: absolute; left: 50%; top: 50%; width: 54px; height: 54px; margin: -27px; border-radius: 50%; background: rgba(123, 240, 255, 0.4); }
+  #touch-buttons {
+    position: absolute; right: calc(14px + env(safe-area-inset-right)); bottom: calc(14px + env(safe-area-inset-bottom));
+    display: grid; grid-template-columns: 68px 88px; grid-template-rows: 68px 88px; gap: 8px; pointer-events: none; place-items: center;
+  }
+  .tb {
+    pointer-events: auto; touch-action: none; font: inherit; font-weight: bold; font-size: 12px; letter-spacing: 1px;
+    color: var(--cyan); background: rgba(4, 16, 22, 0.45); border: 2px solid rgba(123, 240, 255, 0.5);
+    border-radius: 50%; width: 64px; height: 64px; padding: 0; opacity: 0.75;
+  }
+  .tb.down, .tb.on { background: rgba(0, 255, 204, 0.55); color: #00140f; opacity: 1; }
+  .tb.big { font-size: 14px; border-color: var(--teal); width: 84px; height: 84px; }
+  #tb-pause { position: absolute; top: calc(12px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); width: 52px; height: 52px; border-radius: 8px; }
+  #rotate-hint {
+    display: none; position: fixed; left: 0; right: 0; top: 34%; z-index: 40;
+    text-align: center; pointer-events: none;
+  }
+  #rotate-hint span { display: inline-block; padding: 8px 14px; background: var(--panel); border: 1px solid var(--line); color: var(--amber); font-weight: bold; letter-spacing: 1px; }
+  body.touch.portrait.playing #rotate-hint { display: block; }
+
+  /* compact phones in landscape */
+  @media (max-height: 500px) {
+    #overlay h1 { font-size: 26px; margin-bottom: 4px; }
+    #overlay p { font-size: 14px; }
+    #overlay-line { font-size: 15px !important; }
+    .btns { margin: 10px 0 4px; }
+    .help.desk, .warnline { display: none; }
+    body.touch #hud { transform: scale(0.82); transform-origin: 0 0; }
+  }
+  @media (max-width: 520px) { #overlay h1 { font-size: 26px; } }
+
+  /* reduced motion: the media query or the in-game setting (body.reduced) */
+  @media (prefers-reduced-motion: reduce) {
+    #boot .meter i { animation: none; width: 100%; opacity: 0.5; }
+  }
+  body.reduced .bar.low .fill, body.reduced #jammer-vignette { animation: none; }
+  body.reduced #overlay .panel { transition: none; }
+</style>
+</head>
+<body>
+
+<canvas id="static" width="160" height="100" aria-hidden="true"></canvas>
+<div id="jammer-vignette" class="fx"></div>
+<div id="hurt-vignette" class="fx"></div>
+<div id="scare-overlay" class="fx"></div>
+<div id="crosshair"></div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<div id="hud">
+  <div id="room-val" style="margin-bottom:8px;line-height:1.5"></div>
+  <div class="hud-head"><span>STAGE <span id="stage-val">1/3</span></span><span>NODES <span id="node-val">0/3</span></span></div>
+  <div class="bar" id="bar-oxy" style="--c:#4dff88"><div class="lbl"><span>OXYGEN</span><span><span id="oxy-val">100</span>%</span></div><div class="track"><div class="fill"></div></div></div>
+  <div class="bar" id="bar-san" style="--c:#4db8ff"><div class="lbl"><span>SANITY</span><span><span id="san-val">100</span>%</span></div><div class="track"><div class="fill"></div></div></div>
+  <div class="bar" id="bar-stam" style="--c:#e8f4ff"><div class="lbl"><span>STAMINA</span><span><span id="stam-val">100</span>%</span></div><div class="track"><div class="fill"></div></div></div>
+  <div class="bar" id="bar-bat" style="--c:#ffd24d"><div class="lbl"><span>BATTERY</span><span><span id="bat-val">100</span>%</span></div><div class="track"><div class="fill"></div></div></div>
+  <div class="chips">
+    <span class="chip" id="chip-jam">JAM <span id="jam-val">OFF</span> <span class="key">[SPACE]</span></span>
+    <span class="chip" id="chip-flash">LIGHT <span id="flash-val">ON</span> <span class="key">[F]</span></span>
+  </div>
+</div>
+
+<div id="overlay" class="hidden">
+  <div class="panel">
+    <div class="main">
+      <h1 id="overlay-title">THE STATIC BELOW</h1>
+      <p id="overlay-msg">Click anywhere to lock mouse &amp; enter stage 1</p>
+      <p id="overlay-line"></p>
+      <p id="overlay-sub"></p>
+      <div class="btns" id="overlay-btns"></div>
+      <div id="overlay-help">
+        <p class="help desk"><b>[W, A, S, D]</b> Walk &nbsp;|&nbsp; <b>[SHIFT]</b> Sprint &nbsp;|&nbsp; <b>[L-CLICK]</b> Fire Pulse Wave &nbsp;|&nbsp; <b>[SPACE]</b> Jammer &nbsp;|&nbsp; <b>[F]</b> Flashlight &nbsp;|&nbsp; <b>[ESC]</b> Pause</p>
+        <p class="help touchonly"><b>Left thumb</b> move &nbsp;|&nbsp; <b>Right side</b> drag to look &nbsp;|&nbsp; <b>PULSE / JAM / LIGHT / RUN</b> buttons</p>
+        <p class="help"><b>Red Spheres:</b> Resonators (drain sanity, the jammer blocks them) &nbsp;|&nbsp; <b>Purple Tetrahedrons:</b> Stalkers (drain oxygen, only the pulse stops them)</p>
+        <p class="warnline"><i>WARNING: Avoid letting enemies get too close!</i></p>
+      </div>
+    </div>
+    <div id="settings">
+      <h2>SETTINGS</h2>
+      <label class="set">Look sensitivity <input type="range" id="set-sens" min="0.25" max="3" step="0.05"><output id="out-sens"></output></label>
+      <label class="set">Look smoothing <input type="range" id="set-smooth" min="0" max="1" step="0.05"><output id="out-smooth"></output></label>
+      <label class="set">Invert look Y <input type="checkbox" id="set-invert"></label>
+      <label class="set">Motion &amp; flashes <select id="set-motion"><option value="auto">System default</option><option value="full">Full</option><option value="reduced">Reduced</option></select></label>
+      <label class="set">Volume <input type="range" id="set-volume" min="0" max="1" step="0.05"><output id="out-volume"></output></label>
+      <div class="btns"><button class="btn primary" id="settings-back" type="button">BACK</button></div>
+    </div>
+  </div>
+</div>
+
+<div id="touch-ui" aria-hidden="true">
+  <div id="stick-zone"><div id="stick-base"><div id="stick-knob"></div></div></div>
+  <div id="look-zone"></div>
+  <div id="touch-buttons">
+    <button class="tb" data-act="flashlight" type="button">LIGHT</button>
+    <button class="tb" data-act="sprint" type="button">RUN</button>
+    <button class="tb" data-act="jammer" type="button">JAM</button>
+    <button class="tb big" data-act="pulse" type="button">PULSE</button>
+  </div>
+  <button class="tb" id="tb-pause" data-act="pause" type="button" aria-label="Pause">II</button>
+</div>
+<div id="rotate-hint"><span>Rotate your device to landscape</span></div>
+
+<div id="boot">
+  <div class="loading">
+    <h1>THE STATIC BELOW</h1>
+    <div class="meter"><i></i></div>
+    <p id="boot-status">Establishing link to the facility...</p>
+  </div>
+  <div class="err" role="alert">
+    <h2 id="err-title">SIGNAL LOST</h2>
+    <p id="err-msg">The 3D engine (three.js) could not be downloaded.</p>
+    <p>The local 3D engine could not start. Retry, or return to MONSTER TRAIL. Network mirrors are available as a fallback.</p>
+    <div class="btns"><button class="btn primary" id="err-retry" type="button">RETRY</button></div>
+    <small id="err-detail"></small>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* =====================================================================
+ * THE STATIC BELOW - MONSTER TRAIL's epilogue chapter.
+ *
+ * Two layers, and the boundary is load-bearing (see gemini's code.test.js):
+ *   SIM   - pure data + per-tick logic. No THREE, no DOM. Runs under node.
+ *   SHELL - three.js rendering, WebAudio, DOM HUD/menus, input, the loop.
+ * The SIM advances in fixed 1/60 s ticks; every rate below is "per tick",
+ * i.e. exactly what it meant per frame on the original 60 Hz tuning.
+ * ===================================================================== */
+
+/* --------------------------------------------------------------- SIM: constants */
+const SIM_STEP = 1 / 60;          // seconds per simulation tick
+const SIM_MAX_FRAME = 0.25;       // frame clamp: no spiral of death after a tab switch
+const MAX_STAGES = 3;
+
+const WALK_SPEED = 0.1;           // units / tick  (6 u/s)
+const SPRINT_SPEED = 0.18;        // units / tick  (10.8 u/s)
+const STAMINA_DRAIN = 0.5;        // per tick while sprinting (empty in 3.3 s)
+const STAMINA_REGEN = 0.25;       // per tick otherwise
+const JAMMER_DRAIN = 0.35;        // battery per tick while jamming (4.8 s from full)
+const BATTERY_REGEN = 0.15;       // battery per tick while not jamming
+const PULSE_COST = 15;            // battery per pulse
+const PULSE_RANGE = 12;           // units
+const PULSE_COS = 0.5;            // cone: 60 degree half-angle
+const PULSE_STUN_TICKS = 120;     // 2 s
+const PULSE_KNOCKBACK = 8;        // total knockback distance, units
+const KNOCK_FRICTION = 0.85;      // knockback velocity kept per tick (sum of series = PULSE_KNOCKBACK)
+const PLAYER_RADIUS = 0.5;
+const ENEMY_RADIUS = 0.8;
+const ENEMY_SEPARATION = 1.8;     // enemies nudge apart inside this distance
+const AGGRO_RADIUS = 20;          // enemies wake when the player is this close
+const RESONATOR_RANGE = 6;        // sanity drain radius (psychic: ignores walls, blocked by the jammer)
+const STALKER_RANGE = 2.5;        // oxygen drain radius (needs a clear line, not through walls)
+const STALKER_OXY_DRAIN = 0.4;    // oxygen per tick
+const CONTACT_RANGE = 1.4;        // touch = jumpscare
+const STATION_RANGE = 3;
+const SANITY_REFILL = 0.4;        // per tick at a sanity station
+const OXY_REFILL = 0.5;           // per tick at an oxygen station
+const TERMINAL_RANGE = 2.5;
+const SCARE_TICKS = 72;           // 1.2 s from contact to the failure screen
+const SPIN_PER_TICK = 0.05;
+const EYE_HEIGHT = 1.6;
+const SPAWN = { x: 0, z: 35 };
+const BOUNDS = { minX: -29, maxX: 29, minZ: -39, maxZ: 39 };
+const LOW_OXY = 25, LOW_SANITY = 30, LOW_HYSTERESIS = 10;
+
+const NAV_CELL = 1;               // nav grid resolution, units
+const NAV_REPLAN_TICKS = 6;       // flow field / waypoint re-plan period (10 Hz)
+const WAYPOINT_LOOKAHEAD = 24;    // cells walked along the flow field when string-pulling
+
+/* --------------------------------------------------------------- SIM: content */
+// Stage content owns entities, difficulty, room plans and collision geometry.
+const stageConfigs = {
+  1: {
+    termCount: 3,
+    oxyDepletion: 0.015,
+    sanityDrain: 0.15,
+    enemies: [
+      { type: 'resonator', speed: 0.065, x: 0, z: -30 },
+      { type: 'stalker', speed: 0.08, x: -20, z: -10 }
+    ],
+    termPositions: [
+      { x: -20, z: -20 },
+      { x: 20, z: -20 },
+      { x: 0, z: 10 }
+    ],
+    sanityStations: [{ x: 0, z: 30 }],
+    oxygenStations: [{ x: 0, z: -35 }]
+  },
+  2: {
+    termCount: 5,
+    oxyDepletion: 0.022,
+    sanityDrain: 0.22,
+    enemies: [
+      { type: 'resonator', speed: 0.075, x: -15, z: -30 },
+      { type: 'resonator', speed: 0.075, x: 15, z: -30 },
+      { type: 'stalker', speed: 0.095, x: 0, z: -10 }
+    ],
+    termPositions: [
+      { x: -25, z: -35 },
+      { x: 25, z: -35 },
+      { x: 0, z: -10 },
+      { x: -25, z: 25 },
+      { x: 25, z: 25 }
+    ],
+    sanityStations: [{ x: -20, z: 0 }, { x: 20, z: 0 }],
+    oxygenStations: [{ x: -25, z: -15 }, { x: 25, z: -15 }]
+  },
+  3: {
+    termCount: 7,
+    // Tuned (was oxy 0.03, stalkers 0.11): at 0.03 a perfect route left only
+    // 1.33x oxygen, a cliff after stage 2's 2.2x; 0.027 gives 1.48x. 0.11
+    // (6.6 u/s) out-walked the player (6.0 u/s), so two stalkers forced a
+    // pulse every few seconds; 0.098 (5.9 u/s) keeps them relentless but
+    // escapable on foot. Now that walls stop them, they lose ground on corners.
+    oxyDepletion: 0.027,
+    sanityDrain: 0.3,
+    enemies: [
+      { type: 'resonator', speed: 0.09, x: -20, z: -35 },
+      { type: 'resonator', speed: 0.09, x: 20, z: -35 },
+      { type: 'stalker', speed: 0.098, x: -20, z: 10 },
+      { type: 'stalker', speed: 0.098, x: 20, z: 10 }
+    ],
+    termPositions: [
+      { x: -25, z: -35 },
+      { x: 25, z: -35 },
+      { x: -25, z: -10 },
+      { x: 25, z: -10 },
+      { x: 0, z: 10 },     // was (0, 0): embedded in the z=0..1 wall
+      { x: -25, z: 30 },
+      { x: 25, z: 30 }
+    ],
+    sanityStations: [{ x: 0, z: 30 }, { x: -25, z: -25 }],
+    oxygenStations: [{ x: 25, z: -25 }, { x: 0, z: -35 }]
+  }
+};
+
+// Retained as a pure collision regression fixture; runtime uses cfg.walls.
+const walls = [
+  { minX: -30, maxX: 30, minZ: -40, maxZ: -39 },
+  { minX: -30, maxX: 30, minZ: 40, maxZ: 41 },
+  { minX: -31, maxX: -30, minZ: -40, maxZ: 40 },
+  { minX: 30, maxX: 31, minZ: -40, maxZ: 40 },
+  { minX: -15, maxX: 15, minZ: -20, maxZ: -19 },
+  { minX: -15, maxX: 15, minZ: 0, maxZ: 1 },
+  { minX: -15, maxX: 15, minZ: 20, maxZ: 21 }
+];
+
+// Original authored plans. Door gaps and the perimeter galleries form two-way
+// loops; room bounds are also the source for signs, HUD and the pause plan.
+const room = (id, name, minX, maxX, minZ, maxZ, links) => ({id,name,minX,maxX,minZ,maxZ,links});
+for (let n = 1; n <= 3; n++) {
+  const c = stageConfigs[n];
+  c.name = ['','Intake','Archives','Signal Core'][n];
+  c.refuge = {minX:-4,maxX:4,minZ:32,maxZ:39};
+  c.exit = {x:0,z:-36,label:n === 3 ? 'SURFACE RETURN LIFT' : 'DESCENT LIFT'};
+  c.walls = walls.slice(0,4).map(w => ({...w}));
+  const horizontal=(z,left,right)=>({minX:left,maxX:right,minZ:z,maxZ:z+1});
+  const vertical=(x,near,far)=>({minX:x,maxX:x+1,minZ:near,maxZ:far});
+  if(n===1) c.walls.push(horizontal(0,-15,15),horizontal(-20,-15,-3),horizontal(-20,3,15),
+    horizontal(20,-15,-3),horizontal(20,3,15),vertical(-15,-19,-4),vertical(14,4,19));
+  if(n===2) c.walls.push(horizontal(-12,-17,-4),horizontal(-12,4,17),horizontal(12,-17,-4),horizontal(12,4,17),
+    vertical(-17,-30,-16),vertical(-17,-8,8),vertical(-17,16,27),vertical(16,-30,-16),vertical(16,-8,8),vertical(16,16,27));
+  if(n===3) c.walls.push(horizontal(-16,-10,-3),horizontal(-16,3,10),horizontal(17,-10,-3),horizontal(17,3,10),
+    vertical(-10,-16,-4),vertical(-10,4,17),vertical(9,-16,-4),vertical(9,4,17));
+  // Arrival vestibule: wide north doorway; no objective inside the refuge.
+  c.walls.push({minX:-5,maxX:-4,minZ:32,maxZ:39}, {minX:4,maxX:5,minZ:32,maxZ:39},
+    {minX:-5,maxX:-2,minZ:31,maxZ:32}, {minX:2,maxX:5,minZ:31,maxZ:32});
+  c.rooms = [room('arrival','ARRIVAL REFUGE',-4,4,32,39,['junction']),
+    room('junction',n===1?'INTAKE JUNCTION':n===2?'ARCHIVE HUB':'SERVICE RING',-29,29,21,32,['arrival','west','east','control']),
+    room('west',n===1?'PUMP ROOM':n===2?'WEST RECORDS':'WEST EQUIPMENT',-29,-16,-38,21,['junction','control']),
+    room('east',n===1?'MAINTENANCE':n===2?'EAST RELAY':'EAST EQUIPMENT',16,29,-38,21,['junction','control']),
+    room('control',n===1?'SIGNAL CONTROL':n===2?'MONITORING':'INNER CORE',-16,16,-38,21,['junction','west','east'])];
+}
+function roomAt(stageNum,x,z) {
+  return stageConfigs[stageNum].rooms.find(r => x>=r.minX && x<=r.maxX && z>=r.minZ && z<=r.maxZ) || null;
+}
+function inRefuge(stageNum,x,z,r=0) {
+  const a=stageConfigs[stageNum].refuge;
+  return x+r>=a.minX && x-r<=a.maxX && z+r>=a.minZ && z-r<=a.maxZ;
+}
+function excludeRefuge(sim,e) {
+  if (!inRefuge(sim.stage,e.x,e.z,ENEMY_RADIUS)) return;
+  const r=sim.cfg.refuge;
+  e.x=clamp(e.x,r.minX-ENEMY_RADIUS-0.01,r.maxX+ENEMY_RADIUS+0.01);
+  e.z=r.minZ-1-ENEMY_RADIUS-0.01; e.kvx=e.kvz=0;
+}
+
+/* --------------------------------------------------------------- SIM: math */
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const clamp01 = v => clamp(v, 0, 1);
+const lerp = (a, b, t) => a + (b - a) * t;
+function easeOutBack(t) { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); }
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+/* --------------------------------------------------------------- SIM: collision
+ * Bodies are axis-aligned squares of half-size r (the original's collider).
+ * moveBox resolves X then Z *using the new X*, pushing out to the wall face,
+ * so a diagonal move slides along a wall and can never end inside a corner. */
+const COLLIDE_EPS = 1e-6;
+function overlapsWall(x, z, r, list) {
+  for (let i = 0; i < list.length; i++) {
+    const w = list[i];
+    if (x + r > w.minX && x - r < w.maxX && z + r > w.minZ && z - r < w.maxZ) return true;
+  }
+  return false;
+}
+function moveBox(body, dx, dz, r, list) {
+  const span = Math.max(Math.abs(dx), Math.abs(dz));
+  const n = span > r * 0.9 ? Math.ceil(span / (r * 0.9)) : 1;
+  const sx = dx / n, sz = dz / n;
+  let hit = false;
+  for (let s = 0; s < n; s++) {
+    if (sx !== 0) {
+      let nx = body.x + sx;
+      for (let i = 0; i < list.length; i++) {
+        const w = list[i];
+        if (nx + r > w.minX && nx - r < w.maxX && body.z + r > w.minZ && body.z - r < w.maxZ) {
+          if (sx > 0 && body.x + r <= w.minX + COLLIDE_EPS) { nx = w.minX - r - COLLIDE_EPS; hit = true; }
+          else if (sx < 0 && body.x - r >= w.maxX - COLLIDE_EPS) { nx = w.maxX + r + COLLIDE_EPS; hit = true; }
+        }
+      }
+      body.x = nx;
+    }
+    if (sz !== 0) {
+      let nz = body.z + sz;
+      for (let i = 0; i < list.length; i++) {
+        const w = list[i];
+        if (body.x + r > w.minX && body.x - r < w.maxX && nz + r > w.minZ && nz - r < w.maxZ) {
+          if (sz > 0 && body.z + r <= w.minZ + COLLIDE_EPS) { nz = w.minZ - r - COLLIDE_EPS; hit = true; }
+          else if (sz < 0 && body.z - r >= w.maxZ - COLLIDE_EPS) { nz = w.maxZ + r + COLLIDE_EPS; hit = true; }
+        }
+      }
+      body.z = nz;
+    }
+  }
+  return hit;
+}
+// Is the segment a->b clear of every wall grown by r (Minkowski sum of the
+// square body)? Slab test, no allocation.
+function segmentClear(ax, az, bx, bz, r, list) {
+  const dx = bx - ax, dz = bz - az;
+  const g = r > 0 ? r - 1e-4 : 0;
+  for (let i = 0; i < list.length; i++) {
+    const w = list[i];
+    let t0 = 0, t1 = 1;
+    const minX = w.minX - g, maxX = w.maxX + g, minZ = w.minZ - g, maxZ = w.maxZ + g;
+    if (Math.abs(dx) < 1e-12) { if (ax <= minX || ax >= maxX) continue; }
+    else {
+      let ta = (minX - ax) / dx, tb = (maxX - ax) / dx;
+      if (ta > tb) { const t = ta; ta = tb; tb = t; }
+      if (ta > t0) t0 = ta; if (tb < t1) t1 = tb;
+      if (t0 >= t1) continue;
+    }
+    if (Math.abs(dz) < 1e-12) { if (az <= minZ || az >= maxZ) continue; }
+    else {
+      let ta = (minZ - az) / dz, tb = (maxZ - az) / dz;
+      if (ta > tb) { const t = ta; ta = tb; tb = t; }
+      if (ta > t0) t0 = ta; if (tb < t1) t1 = tb;
+      if (t0 >= t1) continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+/* --------------------------------------------------------------- SIM: navigation
+ * A coarse grid over the facility, built once. A cell is blocked when an
+ * enemy-sized square at its centre would overlap a wall. One Dijkstra flow
+ * field from the player's cell (8-connected, no corner cutting) is shared by
+ * every enemy and re-planned at NAV_REPLAN_TICKS; each enemy string-pulls the
+ * field into the furthest waypoint it can reach in a straight line. */
+const NAV_DC = [1, -1, 0, 0, 1, 1, -1, -1];
+const NAV_DR = [0, 0, 1, -1, 1, -1, 1, -1];
+const NAV_COST = [1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2];
+function buildNavGrid(list, clearance, cell) {
+  const minX = -30, maxX = 30, minZ = -40, maxZ = 40;
+  const cols = Math.round((maxX - minX) / cell), rows = Math.round((maxZ - minZ) / cell);
+  const n = cols * rows;
+  const blocked = new Uint8Array(n);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cx = minX + (c + 0.5) * cell, cz = minZ + (r + 0.5) * cell;
+      blocked[r * cols + c] = overlapsWall(cx, cz, clearance, list) ? 1 : 0;
+    }
+  }
+  return { minX, minZ, cols, rows, cell, clearance, n, blocked, walls: list,
+           heapK: new Float64Array(n * 8), heapV: new Int32Array(n * 8) };
+}
+const NAV = {};
+function getNav(stageNum=1) { return NAV[stageNum] || (NAV[stageNum] = buildNavGrid(stageConfigs[stageNum].walls, ENEMY_RADIUS, NAV_CELL)); }
+function cellOf(nav, x, z) {
+  const c = clamp(Math.floor((x - nav.minX) / nav.cell), 0, nav.cols - 1);
+  const r = clamp(Math.floor((z - nav.minZ) / nav.cell), 0, nav.rows - 1);
+  return r * nav.cols + c;
+}
+function cellX(nav, i) { return nav.minX + ((i % nav.cols) + 0.5) * nav.cell; }
+function cellZ(nav, i) { return nav.minZ + (Math.floor(i / nav.cols) + 0.5) * nav.cell; }
+function nearestFreeCell(nav, x, z) {
+  const i0 = cellOf(nav, x, z);
+  if (!nav.blocked[i0]) return i0;
+  const c0 = i0 % nav.cols, r0 = Math.floor(i0 / nav.cols);
+  let best = -1, bestD = Infinity;
+  for (let ring = 1; ring <= 3 && best < 0; ring++) {
+    for (let dr = -ring; dr <= ring; dr++) {
+      for (let dc = -ring; dc <= ring; dc++) {
+        if (Math.max(Math.abs(dr), Math.abs(dc)) !== ring) continue;
+        const c = c0 + dc, r = r0 + dr;
+        if (c < 0 || r < 0 || c >= nav.cols || r >= nav.rows) continue;
+        const i = r * nav.cols + c;
+        if (nav.blocked[i]) continue;
+        const d = Math.hypot(cellX(nav, i) - x, cellZ(nav, i) - z);
+        if (d < bestD) { bestD = d; best = i; }
+      }
+    }
+  }
+  return best;
+}
+// neighbour k of cell i, or -1 (out of bounds, blocked, or a cut corner)
+function navNeighbour(nav, i, k) {
+  const c = (i % nav.cols) + NAV_DC[k], r = Math.floor(i / nav.cols) + NAV_DR[k];
+  if (c < 0 || r < 0 || c >= nav.cols || r >= nav.rows) return -1;
+  const j = r * nav.cols + c;
+  if (nav.blocked[j]) return -1;
+  if (k >= 4) {
+    if (nav.blocked[(r - NAV_DR[k]) * nav.cols + c]) return -1;
+    if (nav.blocked[r * nav.cols + (c - NAV_DC[k])]) return -1;
+  }
+  return j;
+}
+function computeField(nav, target, dist) {
+  dist.fill(Infinity);
+  if (target < 0) return dist;
+  const K = nav.heapK, V = nav.heapV;
+  let size = 0;
+  const push = (k, v) => {
+    let i = size++;
+    while (i > 0) { const p = (i - 1) >> 1; if (K[p] <= k) break; K[i] = K[p]; V[i] = V[p]; i = p; }
+    K[i] = k; V[i] = v;
+  };
+  dist[target] = 0; push(0, target);
+  while (size > 0) {
+    const k = K[0], v = V[0];
+    size--;
+    if (size > 0) {
+      const lk = K[size], lv = V[size];
+      let i = 0;
+      for (;;) {
+        let m = 2 * i + 1; if (m >= size) break;
+        if (m + 1 < size && K[m + 1] < K[m]) m++;
+        if (K[m] >= lk) break;
+        K[i] = K[m]; V[i] = V[m]; i = m;
+      }
+      K[i] = lk; V[i] = lv;
+    }
+    if (k > dist[v]) continue;
+    for (let d = 0; d < 8; d++) {
+      const j = navNeighbour(nav, v, d);
+      if (j < 0) continue;
+      const nk = k + NAV_COST[d];
+      if (nk < dist[j] && size < K.length) { dist[j] = nk; push(nk, j); }
+    }
+  }
+  return dist;
+}
+function fieldNext(nav, dist, i) {
+  let best = -1, bestD = dist[i];
+  for (let d = 0; d < 8; d++) {
+    const j = navNeighbour(nav, i, d);
+    if (j >= 0 && dist[j] < bestD) { bestD = dist[j]; best = j; }
+  }
+  return best;
+}
+// Furthest point along the flow field that the body can reach in a straight line.
+function pickWaypoint(nav, dist, body, r, out) {
+  let c = nearestFreeCell(nav, body.x, body.z);
+  if (c < 0 || !isFinite(dist[c])) { out.x = body.x; out.z = body.z; return false; }
+  let found = false;
+  out.x = cellX(nav, c); out.z = cellZ(nav, c);
+  for (let k = 0; k < WAYPOINT_LOOKAHEAD; k++) {
+    const nx = fieldNext(nav, dist, c);
+    if (nx < 0) break;
+    const px = cellX(nav, nx), pz = cellZ(nav, nx);
+    if (!found) { out.x = px; out.z = pz; found = true; }
+    else if (segmentClear(body.x, body.z, px, pz, r, nav.walls)) { out.x = px; out.z = pz; }
+    else break;
+    c = nx;
+  }
+  return true;
+}
+
+/* --------------------------------------------------------------- SIM: aim + pulse cone */
+// Camera forward for rotation order YXZ: pitch about X, then yaw about Y.
+function aimFromYawPitch(yaw, pitch, out) {
+  const cp = Math.cos(pitch);
+  out.x = -Math.sin(yaw) * cp; out.y = Math.sin(pitch); out.z = -Math.cos(yaw) * cp;
+  return out;
+}
+// Local move (mx = strafe right, mz = back) rotated by yaw, as applyAxisAngle(Y, yaw).
+function rotateMove(mx, mz, yaw, out) {
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  out.x = mx * c + mz * s; out.z = -mx * s + mz * c;
+  return out;
+}
+// Indices of enemies inside the pulse cone with a clear line (walls block the wave).
+function pulseHits(enemies, ox, oy, oz, dx, dy, dz, list, out) {
+  out.length = 0;
+  for (let i = 0; i < enemies.length; i++) {
+    const e = enemies[i];
+    const vx = e.x - ox, vy = EYE_HEIGHT - oy, vz = e.z - oz;
+    const dist = Math.hypot(vx, vy, vz);
+    if (dist >= PULSE_RANGE) continue;
+    const dot = dist > 1e-6 ? (vx * dx + vy * dy + vz * dz) / dist : 1;
+    if (dot > PULSE_COS && segmentClear(ox, oz, e.x, e.z, 0, list)) out.push(i);
+  }
+  return out;
+}
+
+/* --------------------------------------------------------------- SIM: state machine */
+function createSim(stageNum, opts) {
+  const cfg = stageConfigs[stageNum];
+  if (!cfg) throw new Error('no stage ' + stageNum);
+  const nav = getNav(stageNum);
+  const flashlightOn = !(opts && opts.flashlightOn === false);
+  return {
+    stage: stageNum, cfg, nav, tick: 0, status: 'play', endMsg: '', scareTimer: 0, scareEnemy: -1,
+    player: {
+      x: SPAWN.x, z: SPAWN.z, px: SPAWN.x, pz: SPAWN.z, walked: 0, pwalked: 0,
+      oxy: 100, sanity: 100, stamina: 100, battery: 100,
+      jammer: false, flashlightOn, sprinting: false, moving: false,
+      draining: 0, stalked: 0, lowOxy: false, lowSan: false
+    },
+    enemies: cfg.enemies.map((e, i) => ({
+      type: e.type, speed: e.speed, x: e.x, z: e.z, px: e.x, pz: e.z,
+      stunnedTimer: 0, kvx: 0, kvz: 0, wpx: e.x, wpz: e.z, replan: i * 2,
+      spin: 0, pspin: 0, chasing: false, phase: i * 1.7
+    })),
+    terminals: cfg.termPositions.map(p => ({ x: p.x, z: p.z, active: false })),
+    sanityStations: cfg.sanityStations.map(p => ({ x: p.x, z: p.z, inside: false })),
+    oxygenStations: cfg.oxygenStations.map(p => ({ x: p.x, z: p.z, inside: false })),
+    activated: 0, total: cfg.termCount,
+    field: new Float64Array(nav.n), fieldCell: -2, fieldAge: NAV_REPLAN_TICKS,
+    events: [], _hits: [], _wp: { x: 0, z: 0 }, _mv: { x: 0, z: 0 }
+  };
+}
+function simEvent(sim, type, a, b) { sim.events.push({ type, a, b }); }
+function endSim(sim, won, msg) {
+  sim.status = won ? 'won' : 'dead';
+  sim.endMsg = msg;
+  simEvent(sim, 'end', won, msg);
+}
+function startScare(sim, enemyIndex, msg) {
+  if (sim.status !== 'play') return;
+  if (enemyIndex < 0) { endSim(sim, false, msg); return; }
+  sim.status = 'scare';
+  sim.scareTimer = SCARE_TICKS;
+  sim.scareEnemy = enemyIndex;
+  sim.endMsg = msg;
+  simEvent(sim, 'scare', enemyIndex, msg);
+}
+function nearestEnemy(sim, type) {
+  let best = -1, bestD = Infinity;
+  const p = sim.player;
+  sim.enemies.forEach((e, i) => {
+    if (type && e.type !== type) return;
+    const d = Math.hypot(e.x - p.x, e.z - p.z);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return best;
+}
+function updateField(sim) {
+  const nav = sim.nav, p = sim.player;
+  sim.fieldAge++;
+  if (sim.fieldAge < NAV_REPLAN_TICKS && sim.fieldCell !== -2) return;
+  const cell = nearestFreeCell(nav, p.x, p.z);
+  sim.fieldAge = 0;
+  if (cell === sim.fieldCell) return;
+  sim.fieldCell = cell;
+  computeField(nav, cell, sim.field);
+}
+function steerEnemy(sim, e) {
+  const p = sim.player, nav = sim.nav;
+  let tx, tz;
+  if (segmentClear(e.x, e.z, p.x, p.z, ENEMY_RADIUS, sim.cfg.walls)) {
+    tx = p.x; tz = p.z; e.replan = 0;               // in the open: chase directly, as the original did
+  } else {
+    if (--e.replan <= 0 || Math.hypot(e.wpx - e.x, e.wpz - e.z) < 0.3) {
+      pickWaypoint(nav, sim.field, e, ENEMY_RADIUS, sim._wp);
+      e.wpx = sim._wp.x; e.wpz = sim._wp.z;
+      e.replan = NAV_REPLAN_TICKS;
+    }
+    tx = e.wpx; tz = e.wpz;
+  }
+  const dx = tx - e.x, dz = tz - e.z, dl = Math.hypot(dx, dz);
+  if (dl > 1e-6) {
+    const st = Math.min(e.speed, dl);
+    moveBox(e, dx / dl * st, dz / dl * st, ENEMY_RADIUS, sim.cfg.walls);
+  }
+}
+
+// Input: { mx, mz, sprint, yaw }. mx = strafe right, mz = back (forward is -1).
+function stepSim(sim, input) {
+  const p = sim.player;
+  sim.tick++;
+  p.px = p.x; p.pz = p.z; p.pwalked = p.walked;
+  for (let i = 0; i < sim.enemies.length; i++) { const e = sim.enemies[i]; e.px = e.x; e.pz = e.z; e.pspin = e.spin; }
+
+  if (sim.status === 'scare') {
+    if (--sim.scareTimer <= 0) endSim(sim, false, sim.endMsg);
+    return;
+  }
+  if (sim.status !== 'play') return;
+  const cfg = sim.cfg;
+
+  // --- player
+  let mx = input.mx || 0, mz = input.mz || 0;
+  let len = Math.hypot(mx, mz);
+  if (len > 1) { mx /= len; mz /= len; len = 1; }
+  const moving = len > 0.05;
+  const activeSprint = !!input.sprint && moving && p.stamina > 0;
+  if (activeSprint) p.stamina = Math.max(0, p.stamina - STAMINA_DRAIN);
+  else p.stamina = Math.min(100, p.stamina + STAMINA_REGEN);
+  p.sprinting = activeSprint; p.moving = moving;
+
+  if (p.jammer) {
+    p.battery = Math.max(0, p.battery - JAMMER_DRAIN);
+    if (p.battery <= 0) { p.jammer = false; simEvent(sim, 'jammer_dead'); }
+  } else {
+    p.battery = Math.min(100, p.battery + BATTERY_REGEN);
+  }
+
+  if (moving) {
+    const speed = (activeSprint ? SPRINT_SPEED : WALK_SPEED) * len;
+    rotateMove(mx / len, mz / len, input.yaw || 0, sim._mv);
+    moveBox(p, sim._mv.x * speed, sim._mv.z * speed, PLAYER_RADIUS, sim.cfg.walls);
+    p.x = clamp(p.x, BOUNDS.minX, BOUNDS.maxX);
+    p.z = clamp(p.z, BOUNDS.minZ, BOUNDS.maxZ);
+    p.walked += Math.hypot(p.x - p.px, p.z - p.pz);
+  }
+
+  const protectedArrival = inRefuge(sim.stage,p.x,p.z);
+  if (!protectedArrival) p.oxy -= cfg.oxyDepletion;
+  if (p.oxy <= 0) { endSim(sim, false, 'OXYGEN DEPLETED IN THE DARK'); return; }
+
+  // --- enemies
+  updateField(sim);
+  p.draining = 0; p.stalked = 0;
+  for (let i = 0; i < sim.enemies.length; i++) {
+    const e = sim.enemies[i];
+    if (e.kvx !== 0 || e.kvz !== 0) {
+      moveBox(e, e.kvx, e.kvz, ENEMY_RADIUS, sim.cfg.walls);
+      e.kvx *= KNOCK_FRICTION; e.kvz *= KNOCK_FRICTION;
+      if (Math.abs(e.kvx) + Math.abs(e.kvz) < 1e-3) { e.kvx = 0; e.kvz = 0; }
+    }
+    excludeRefuge(sim,e);
+    if (e.stunnedTimer > 0) { e.stunnedTimer--; e.chasing = false; continue; }
+
+    const d = Math.hypot(e.x - p.x, e.z - p.z);
+    e.chasing = d < AGGRO_RADIUS;
+    if (e.chasing && !protectedArrival) { steerEnemy(sim, e); excludeRefuge(sim,e); e.spin += SPIN_PER_TICK; }
+    if (protectedArrival) { e.chasing=false; continue; }
+
+    if (e.type === 'resonator' && d < RESONATOR_RANGE && !p.jammer) {
+      p.sanity -= cfg.sanityDrain;
+      p.draining = Math.max(p.draining, 1 - d / RESONATOR_RANGE);
+    }
+    if (e.type === 'stalker' && d < STALKER_RANGE && segmentClear(e.x, e.z, p.x, p.z, 0, sim.cfg.walls)) {
+      p.oxy -= STALKER_OXY_DRAIN;
+      p.stalked = 1;
+    }
+    if (d < CONTACT_RANGE) {
+      startScare(sim, i, e.type === 'resonator' ? 'RESONATOR OVERWHELMED YOUR MIND!' : 'STALKER CORRODED YOUR SUIT!');
+      return;
+    }
+  }
+  // gentle separation so a pack doesn't merge into one blob
+  for (let i = 0; i < sim.enemies.length; i++) {
+    for (let j = i + 1; j < sim.enemies.length; j++) {
+      const a = sim.enemies[i], b = sim.enemies[j];
+      const dx = b.x - a.x, dz = b.z - a.z, d = Math.hypot(dx, dz);
+      if (d < ENEMY_SEPARATION && d > 1e-6) {
+        const push = (ENEMY_SEPARATION - d) * 0.25;
+        moveBox(a, -dx / d * push, -dz / d * push, ENEMY_RADIUS, sim.cfg.walls);
+        moveBox(b, dx / d * push, dz / d * push, ENEMY_RADIUS, sim.cfg.walls);
+      }
+    }
+  }
+
+  sim.enemies.forEach(e => excludeRefuge(sim,e));
+  // --- stations
+  for (const st of sim.sanityStations) {
+    const inside = Math.hypot(st.x - p.x, st.z - p.z) < STATION_RANGE;
+    if (inside) p.sanity = Math.min(100, p.sanity + SANITY_REFILL);
+    if (inside && !st.inside) simEvent(sim, 'station', 'sanity');
+    st.inside = inside;
+  }
+  for (const st of sim.oxygenStations) {
+    const inside = Math.hypot(st.x - p.x, st.z - p.z) < STATION_RANGE;
+    if (inside) p.oxy = Math.min(100, p.oxy + OXY_REFILL);
+    if (inside && !st.inside) simEvent(sim, 'station', 'oxygen');
+    st.inside = inside;
+  }
+
+  // --- low-resource warnings (with hysteresis so they don't chatter)
+  if (!p.lowOxy && p.oxy < LOW_OXY) { p.lowOxy = true; simEvent(sim, 'low', 'OXYGEN'); }
+  else if (p.lowOxy && p.oxy > LOW_OXY + LOW_HYSTERESIS) p.lowOxy = false;
+  if (!p.lowSan && p.sanity < LOW_SANITY) { p.lowSan = true; simEvent(sim, 'low', 'SANITY'); }
+  else if (p.lowSan && p.sanity > LOW_SANITY + LOW_HYSTERESIS) p.lowSan = false;
+
+  if (p.sanity <= 0) {
+    let who = nearestEnemy(sim, 'resonator');
+    if (who < 0) who = nearestEnemy(sim);
+    startScare(sim, who, 'SANITY COMPLETELY LOST!');
+    return;
+  }
+
+  // --- terminals
+  for (let i = 0; i < sim.terminals.length; i++) {
+    const t = sim.terminals[i];
+    if (!t.active && Math.hypot(t.x - p.x, t.z - p.z) < TERMINAL_RANGE) {
+      t.active = true;
+      sim.activated++;
+      simEvent(sim, 'terminal', i, sim.activated);
+      if (sim.activated === sim.total) {
+        if (sim.stage < MAX_STAGES) { sim.status = 'cleared'; simEvent(sim, 'cleared', sim.stage); }
+        else endSim(sim, true, 'FACILITY FULLY RESTORED & SECURED!');
+        return;
+      }
+    }
+  }
+}
+
+// One-shot actions. They return whether the action happened.
+function firePulse(sim, yaw, pitch) {
+  if (sim.status !== 'play') return false;
+  const p = sim.player;
+  if (p.battery < PULSE_COST) { simEvent(sim, 'fizzle', 'pulse'); return false; }
+  p.battery -= PULSE_COST;
+  const aim = aimFromYawPitch(yaw, pitch, { x: 0, y: 0, z: 0 });
+  const hits = pulseHits(sim.enemies, p.x, EYE_HEIGHT, p.z, aim.x, aim.y, aim.z, sim.cfg.walls, sim._hits);
+  const v0 = PULSE_KNOCKBACK * (1 - KNOCK_FRICTION);
+  for (const i of hits) {
+    const e = sim.enemies[i];
+    e.stunnedTimer = PULSE_STUN_TICKS;
+    let kx = e.x - p.x, kz = e.z - p.z, kl = Math.hypot(kx, kz);
+    if (kl < 1e-6) { kx = aim.x; kz = aim.z; kl = Math.hypot(kx, kz) || 1; }
+    e.kvx = kx / kl * v0; e.kvz = kz / kl * v0;
+  }
+  simEvent(sim, 'pulse', hits.length, hits.slice());
+  return true;
+}
+function toggleJammer(sim) {
+  if (sim.status !== 'play') return false;
+  const p = sim.player;
+  if (!p.jammer && p.battery <= 0) { simEvent(sim, 'fizzle', 'jammer'); return false; }
+  p.jammer = !p.jammer;
+  simEvent(sim, 'jammer', p.jammer);
+  return true;
+}
+function toggleFlashlight(sim) {
+  if (sim.status !== 'play') return false;
+  sim.player.flashlightOn = !sim.player.flashlightOn;
+  simEvent(sim, 'flashlight', sim.player.flashlightOn);
+  return true;
+}
+
+/* --------------------------------------------------------------- SIM: difficulty readout */
+// Greedy nearest-terminal tour from the spawn over the nav grid, against the
+// stage's oxygen budget. Used by the tests to keep the 3-stage curve honest.
+function stageRouteReport(stageNum) {
+  const cfg = stageConfigs[stageNum], nav = getNav(stageNum);
+  const dist = new Float64Array(nav.n);
+  let pos = { x: SPAWN.x, z: SPAWN.z }, route = 0;
+  const left = cfg.termPositions.slice();
+  while (left.length) {
+    computeField(nav, nearestFreeCell(nav, pos.x, pos.z), dist);
+    let bi = -1, bd = Infinity;
+    left.forEach((t, i) => { const d = dist[nearestFreeCell(nav, t.x, t.z)]; if (d < bd) { bd = d; bi = i; } });
+    if (bi < 0 || !isFinite(bd)) return { stage: stageNum, reachable: false };
+    route += Math.max(0, bd - TERMINAL_RANGE);
+    pos = left.splice(bi, 1)[0];
+  }
+  const walkSecs = route / (WALK_SPEED * 60);
+  const oxySecs = 100 / (cfg.oxyDepletion * 60);
+  const res = cfg.enemies.filter(e => e.type === 'resonator');
+  const sta = cfg.enemies.filter(e => e.type === 'stalker');
+  return {
+    stage: stageNum, reachable: true, route, walkSecs, oxySecs, margin: oxySecs / walkSecs,
+    sanitySecsInRange: 100 / (cfg.sanityDrain * 60),
+    maxResonatorSpeed: Math.max(0, ...res.map(e => e.speed * 60)),
+    maxStalkerSpeed: Math.max(0, ...sta.map(e => e.speed * 60)),
+    enemies: cfg.enemies.length, terminals: cfg.termCount
+  };
+}
+
+/* --------------------------------------------------------------- PURE: input helpers */
+const KEYMAP = {
+  KeyW: 'forward', ArrowUp: 'forward', KeyS: 'back', ArrowDown: 'back',
+  KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right',
+  ShiftLeft: 'sprint', ShiftRight: 'sprint', KeyF: 'flashlight', Space: 'jammer',
+  KeyR: 'restart', KeyP: 'pause', Escape: 'pause', Enter: 'confirm'
+};
+const HELD_ACTIONS = { forward: 1, back: 1, left: 1, right: 1, sprint: 1 };
+function actionForKey(code) { return Object.prototype.hasOwnProperty.call(KEYMAP, code) ? KEYMAP[code] : null; }
+// Keyboard held set -> local move vector, normalised like the original.
+function keyMove(held, out) {
+  let mx = (held.right ? 1 : 0) - (held.left ? 1 : 0);
+  let mz = (held.back ? 1 : 0) - (held.forward ? 1 : 0);
+  const l = Math.hypot(mx, mz);
+  if (l > 0) { mx /= l; mz /= l; }
+  out.x = mx; out.z = mz;
+  return out;
+}
+// Virtual stick: pixel offset -> analog vector with a rescaled dead zone.
+function stickVector(dx, dy, radius, dead, out) {
+  const l = Math.hypot(dx, dy);
+  let m = Math.min(1, l / radius);
+  if (m <= dead || l < 1e-6) { out.x = 0; out.y = 0; out.mag = 0; return out; }
+  m = (m - dead) / (1 - dead);
+  out.x = dx / l * m; out.y = dy / l * m; out.mag = m;
+  return out;
+}
+const PITCH_LIMIT = Math.PI / 3;
+const LOOK_MAX_DELTA = 250;       // px per event: drops pointer-lock's occasional huge first delta
+function lookStep(view, dx, dy, k, invertY) {
+  dx = clamp(dx, -LOOK_MAX_DELTA, LOOK_MAX_DELTA);
+  dy = clamp(dy, -LOOK_MAX_DELTA, LOOK_MAX_DELTA);
+  view.yaw -= dx * k;
+  view.pitch = clamp(view.pitch - dy * k * (invertY ? -1 : 1), -PITCH_LIMIT, PITCH_LIMIT);
+  return view;
+}
+// Exponential smoothing factor for this frame; smooth 0 = raw input.
+function smoothFactor(dt, smooth) {
+  if (!(smooth > 0)) return 1;
+  return 1 - Math.exp(-dt / (smooth * 0.06));
+}
+const SETTINGS_KEY = 'staticBelow.settings';
+const DEFAULT_SETTINGS = { sens: 1, smooth: 0, invertY: false, motion: 'auto', volume: 0.8 };
+function normalizeSettings(o) {
+  const s = Object.assign({}, DEFAULT_SETTINGS);
+  if (!o || typeof o !== 'object') return s;
+  const num = v => typeof v === 'number' && isFinite(v);
+  if (num(o.sens)) s.sens = clamp(o.sens, 0.25, 3);
+  if (num(o.smooth)) s.smooth = clamp(o.smooth, 0, 1);
+  if (typeof o.invertY === 'boolean') s.invertY = o.invertY;
+  if (o.motion === 'auto' || o.motion === 'full' || o.motion === 'reduced') s.motion = o.motion;
+  if (num(o.volume)) s.volume = clamp(o.volume, 0, 1);
+  return s;
+}
+
+/* --------------------------------------------------------------- PURE: MONSTER TRAIL handoff
+ * Contract: docs/finale-handoff-spec.md. localStorage["monsterTrail.handoff"]
+ *   { v:1, lead:{name,species,level}, party, dex, ts, consumed }
+ * plus ?from=trail on the URL. The record is untrusted text: it is cleaned
+ * here and only ever rendered with textContent. */
+const HANDOFF_KEY = 'monsterTrail.handoff';
+const HANDOFF_VERSION = 1;
+const HANDOFF_MAX_AGE_MS = 6 * 60 * 60 * 1000;   // without ?from=trail, a record older than this is stale
+const HANDOFF_NAME_MAX = 16;
+function hasTrailParam(search) {
+  if (typeof search !== 'string' || !search) return false;
+  try { return new URLSearchParams(search).get('from') === 'trail'; } catch (e) { return false; }
+}
+// control, zero-width and bidi-override characters (built from code points so the
+// source stays ASCII)
+const NAME_STRIP = new RegExp('[' + [[0x00, 0x1f], [0x7f, 0x9f], [0x200b, 0x200f], [0x2028, 0x202e], [0x2066, 0x2069]]
+  .map(r => String.fromCharCode(r[0]) + '-' + String.fromCharCode(r[1])).join('') + ']', 'g');
+function cleanName(s) {
+  if (typeof s !== 'string') return '';
+  return s.replace(NAME_STRIP, '')
+    .replace(/\s+/g, ' ').trim().slice(0, HANDOFF_NAME_MAX).toUpperCase();
+}
+function intIn(v, lo, hi) { return typeof v === 'number' && isFinite(v) && Math.floor(v) === v && v >= lo && v <= hi; }
+// -> { lead, party, dex, ts, consumed } or null if missing / garbage / wrong version.
+function parseHandoff(raw) {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 4096) return null;
+  let o;
+  try { o = JSON.parse(raw); } catch (e) { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  if (o.v !== HANDOFF_VERSION) return null;
+  const l = o.lead;
+  if (!l || typeof l !== 'object') return null;
+  const name = cleanName(l.name);
+  if (!name) return null;
+  return {
+    lead: {
+      name,
+      species: typeof l.species === 'string' ? l.species.slice(0, 32) : '',
+      level: intIn(l.level, 1, 100) ? l.level : null
+    },
+    party: intIn(o.party, 1, 6) ? o.party : null,
+    dex: intIn(o.dex, 0, 999) ? o.dex : null,
+    ts: typeof o.ts === 'number' && isFinite(o.ts) ? o.ts : null,
+    consumed: o.consumed === true
+  };
+}
+// -> { arrived, handoff, consume }. Arrival = ?from=trail, or a fresh unconsumed record.
+function resolveArrival(raw, search, now) {
+  const fromParam = hasTrailParam(search);
+  const rec = parseHandoff(raw);
+  let usable = !!rec && !rec.consumed;
+  if (usable && !fromParam) {
+    usable = rec.ts !== null && now - rec.ts <= HANDOFF_MAX_AGE_MS && rec.ts <= now + 5 * 60 * 1000;
+  }
+  return { arrived: fromParam || usable, handoff: usable ? rec : null, consume: usable };
+}
+// Rewrite the stored record as consumed, keeping every field it had.
+function consumeHandoff(raw, now) {
+  try {
+    const o = JSON.parse(raw);
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return raw;
+    o.consumed = true; o.consumedAt = now;
+    return JSON.stringify(o);
+  } catch (e) { return raw; }
+}
+function introLine(h) {
+  const who = h && h.lead && h.lead.name ? h.lead.name : 'whatever walked beside you';
+  return 'The signal that pulled you off the trail... ' + who + " isn't here to help you now.";
+}
+function dossierLine(h) {
+  if (!h) return '';
+  const bits = [];
+  if (h.lead.level) bits.push(h.lead.name + ' Lv ' + h.lead.level);
+  if (h.party) bits.push('party of ' + h.party);
+  if (h.dex !== null) bits.push(h.dex + ' logged');
+  return bits.length ? 'Last trail record: ' + bits.join(' / ') : '';
+}
+function victoryLine(h) {
+  if (!h) return '';
+  return 'The static clears. Somewhere above, ' + h.lead.name + ' is still waiting for you.';
+}
+
+/* --------------------------------------------------------------- SHELL: stage view (THREE)
+ * Shared geometry/materials are built once (makeAssets); only what a stage
+ * owns per entity (enemy and node-cap materials, lights) is created in
+ * buildStageView and disposed in disposeStageView, so restarts don't leak. */
+const RES_COLOR = 0xff1122, STALK_COLOR = 0xaa00ff;
+function makeAssets(T) {
+  return {
+    resGeo: new T.SphereGeometry(1.2, 16, 16),
+    stalkGeo: new T.TetrahedronGeometry(1.4),
+    termBaseGeo: new T.BoxGeometry(1, 2, 1),
+    termBaseMat: new T.MeshStandardMaterial({ color: 0x1a1a1a }),
+    termCapGeo: new T.BoxGeometry(0.8, 0.12, 0.8),
+    sanGeo: new T.CylinderGeometry(0.6, 0.6, 2, 16),
+    sanMat: new T.MeshStandardMaterial({ color: 0x003366 }),
+    oxyGeo: new T.CylinderGeometry(0.4, 0.7, 2.2, 12),
+    oxyMat: new T.MeshStandardMaterial({ color: 0x004d1a }),
+    ringGeo: new T.RingGeometry(STATION_RANGE - 0.12, STATION_RANGE, 48),
+    sanRingMat: new T.MeshBasicMaterial({ color: 0x00aaff, transparent: true, opacity: 0.22, side: T.DoubleSide, depthWrite: false }),
+    oxyRingMat: new T.MeshBasicMaterial({ color: 0x00ff44, transparent: true, opacity: 0.22, side: T.DoubleSide, depthWrite: false })
+  };
+}
+function buildStageView(sim, scene, T, A) {
+  const v = { enemies: [], terminals: [], objects: [], disposables: [], walls: [] };
+  const wallMat = new T.MeshStandardMaterial({color:[0,0x15303b,0x29243c,0x163831][sim.stage]});
+  v.disposables.push(wallMat);
+  sim.cfg.walls.forEach(w => {
+    const geo = new T.BoxGeometry(w.maxX-w.minX,4,w.maxZ-w.minZ);
+    const mesh = new T.Mesh(geo,wallMat);
+    mesh.position.set((w.minX+w.maxX)/2,2,(w.minZ+w.maxZ)/2);
+    v.walls.push({descriptor:w,mesh});
+    scene.add(mesh); v.objects.push(mesh); v.disposables.push(geo);
+  });
+  sim.cfg.rooms.forEach((r,i) => {
+    const geo = new T.BoxGeometry(i===0?3:1.5,0.08,i===0?4:1.5);
+    const mat = new T.MeshBasicMaterial({color:i===0?0x00ffcc:0x587b98});
+    const mesh = new T.Mesh(geo,mat);
+    mesh.position.set((r.minX+r.maxX)/2,0.05,(r.minZ+r.maxZ)/2);
+    scene.add(mesh); v.objects.push(mesh); v.disposables.push(geo,mat);
+    if(i>0) {
+      // Ceiling equipment is safely above the player's collider: pumps,
+      // archive cable trays, and angular core relays give each floor a shape.
+      const rigGeo=sim.stage===1?new T.CylinderGeometry(0.35,0.35,4,8):sim.stage===2?new T.BoxGeometry(4,0.45,1.6):new T.TetrahedronGeometry(0.65);
+      const rig=new T.Mesh(rigGeo,mat);rig.position.set((r.minX+r.maxX)/2,3.5,(r.minZ+r.maxZ)/2);
+      if(sim.stage===1)rig.rotation.z=Math.PI/2;
+      scene.add(rig);v.objects.push(rig);v.disposables.push(rigGeo);
+    }
+    if (typeof document !== 'undefined' && T.CanvasTexture) {
+      const cv=document.createElement('canvas'); cv.width=512;cv.height=96;
+      const cx=cv.getContext('2d');cx.fillStyle='#031017';cx.fillRect(0,0,512,96);
+      cx.fillStyle=i===0?'#00ffcc':'#e1f6ff';cx.font='bold 28px monospace';cx.textAlign='center';cx.fillText(r.name,256,57);
+      const tex=new T.CanvasTexture(cv), signMat=new T.MeshBasicMaterial({map:tex,side:T.DoubleSide});
+      const signGeo=new T.PlaneGeometry(7,1.3), sign=new T.Mesh(signGeo,signMat);
+      sign.position.set((r.minX+r.maxX)/2,3,(r.minZ+r.maxZ)/2);
+      scene.add(sign);v.objects.push(sign);v.disposables.push(tex,signMat,signGeo);
+    }
+  });
+  const exitGeo=new T.BoxGeometry(4,3.5,0.3), exitMat=new T.MeshBasicMaterial({color:0x00cdb0,wireframe:true});
+  const exitMesh=new T.Mesh(exitGeo,exitMat);exitMesh.position.set(sim.cfg.exit.x,1.75,sim.cfg.exit.z);
+  scene.add(exitMesh);v.objects.push(exitMesh);v.disposables.push(exitGeo,exitMat);
+  if(typeof document!=='undefined' && T.CanvasTexture) {
+    const cv=document.createElement('canvas');cv.width=512;cv.height=96;
+    const cx=cv.getContext('2d');cx.fillStyle='#031017';cx.fillRect(0,0,512,96);
+    cx.fillStyle='#00ffcc';cx.font='bold 28px monospace';cx.textAlign='center';cx.fillText(sim.cfg.exit.label,256,57);
+    const tex=new T.CanvasTexture(cv), mat=new T.MeshBasicMaterial({map:tex,side:T.DoubleSide});
+    const geo=new T.PlaneGeometry(7,1.3),sign=new T.Mesh(geo,mat);
+    sign.position.set(sim.cfg.exit.x,3,sim.cfg.exit.z+0.2);
+    scene.add(sign);v.objects.push(sign);v.disposables.push(tex,mat,geo);
+  }
+  sim.enemies.forEach(e => {
+    const mat = new T.MeshBasicMaterial({ color: e.type === 'resonator' ? RES_COLOR : STALK_COLOR, wireframe: true, transparent: true, opacity: 1 });
+    const mesh = new T.Mesh(e.type === 'resonator' ? A.resGeo : A.stalkGeo, mat);
+    mesh.position.set(e.x, EYE_HEIGHT, e.z);
+    scene.add(mesh);
+    v.objects.push(mesh); v.disposables.push(mat);
+    v.enemies.push({ mesh, mat, flash: 0, base: e.type === 'resonator' ? RES_COLOR : STALK_COLOR });
+  });
+  sim.terminals.forEach(t => {
+    const group = new T.Group();
+    const base = new T.Mesh(A.termBaseGeo, A.termBaseMat);
+    base.position.y = 1;
+    group.add(base);
+    const capMat = new T.MeshBasicMaterial({ color: 0xffaa00 });
+    const cap = new T.Mesh(A.termCapGeo, capMat);
+    cap.position.y = 2.06;
+    group.add(cap);
+    const light = new T.PointLight(0xffaa00, 2.0, 5);
+    light.position.set(0, 1.8, 0);
+    group.add(light);
+    group.position.set(t.x, 0, t.z);
+    scene.add(group);
+    v.objects.push(group); v.disposables.push(capMat, light);
+    v.terminals.push({ group, light, capMat, pop: 0 });
+  });
+  const station = (list, geo, mat, ringMat, color, h) => list.forEach(s => {
+    const group = new T.Group();
+    const base = new T.Mesh(geo, mat);
+    base.position.y = h / 2;
+    group.add(base);
+    const ring = new T.Mesh(A.ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2; ring.position.y = 0.02;
+    group.add(ring);
+    const light = new T.PointLight(color, 2.5, 6);
+    light.position.set(0, 1.8, 0);
+    group.add(light);
+    group.position.set(s.x, 0, s.z);
+    scene.add(group);
+    v.objects.push(group); v.disposables.push(light);
+  });
+  station(sim.sanityStations, A.sanGeo, A.sanMat, A.sanRingMat, 0x00aaff, 2);
+  station(sim.oxygenStations, A.oxyGeo, A.oxyMat, A.oxyRingMat, 0x00ff44, 2.2);
+  return v;
+}
+function disposeStageView(v, scene) {
+  if (!v) return;
+  v.objects.forEach(o => scene.remove(o));
+  v.disposables.forEach(d => { if (d && typeof d.dispose === 'function') d.dispose(); });
+  v.objects.length = 0; v.disposables.length = 0; v.enemies.length = 0; v.terminals.length = 0; v.walls.length=0;
+}
+
+/* ===================================================================== SHELL (browser only) */
+const HAS_DOM = typeof window !== 'undefined' && typeof document !== 'undefined';
+const embeddedQuery = HAS_DOM ? new URLSearchParams(location.search) : null;
+const embeddedSession = embeddedQuery && embeddedQuery.get('embedded')==='1' ? (embeddedQuery.get('session') || '') : '';
+let embeddedStarted=false, chapterReturned=false;
+function validChapterStart(event, expectedParent, origin, session) {
+  const d=event.data;
+  return event.source===expectedParent && (!/^https?:/.test(origin) || event.origin===origin) &&
+    d && d.namespace==='monsterTrail.chapter' && d.v===1 && d.session===session &&
+    d.type==='start' && Number.isInteger(d.stage) && d.stage>=1 && d.stage<=3;
+}
+function chapterSend(type,stage) {
+  if (!embeddedSession || chapterReturned) return;
+  const data={namespace:'monsterTrail.chapter',v:1,session:embeddedSession,type};
+  if(stage!==undefined)data.stage=stage;
+  parent.postMessage(data,/^https?:/.test(location.protocol)?location.origin:'*');
+}
+function returnToTrail() {
+  chapterSend('return');chapterReturned=true;clearHeld();freePlay=false;
+  if(document.exitPointerLock)document.exitPointerLock();
+  if(Sfx.ctx)Sfx.ctx.suspend().catch(()=>{});
+}
+function showFloorPlan() {
+  showOverlay({title:sim.cfg.name.toUpperCase()+' / FLOOR PLAN',
+    msg:'North is up. Squares: terminals. O: oxygen. S: sanity. No enemy tracking.',
+    sub:'Escape returns to the pause menu.',buttons:[{label:'BACK',primary:true,act:showPaused}]});
+  $('overlay').classList.add('plan-open');
+  const layout=document.createElement('div');layout.id='floor-plan-layout';layout.className='floor-plan-layout';
+  const cv=document.createElement('canvas');cv.width=600;cv.height=800;
+  cv.setAttribute('role','img');cv.setAttribute('aria-label',floorPlanDescription(sim));
+  const cx=cv.getContext('2d'), X=x=>(x+30)*10,Z=z=>(z+40)*10;
+  cx.fillStyle='#8296a6';sim.cfg.walls.forEach(w=>cx.fillRect(X(w.minX),Z(w.minZ),(w.maxX-w.minX)*10,(w.maxZ-w.minZ)*10));
+  cx.font='bold 28px monospace';cx.textAlign='center';
+  const legend=document.createElement('div');legend.id='floor-plan-legend';
+  const list=document.createElement('ol');
+  sim.cfg.rooms.forEach((r,i)=>{
+    const current=roomAt(sim.stage,sim.player.x,sim.player.z)===r;
+    cx.fillStyle=current?'#00ffcc':'#d2e0ee';cx.fillText(String(i+1),X((r.minX+r.maxX)/2),Z((r.minZ+r.maxZ)/2));
+    const item=document.createElement('li');item.textContent=r.name+(current?' (YOU)':'');if(current)item.className='current-room';list.appendChild(item);
+  });
+  legend.appendChild(list);const key=document.createElement('p');key.textContent='Squares: terminals. O: oxygen. S: sanity. '+sim.activated+'/'+sim.total+' nodes online.';legend.appendChild(key);
+  sim.terminals.forEach(t=>{cx.fillStyle=t.active?'#00ffcc':'#ffb000';cx.fillRect(X(t.x)-5,Z(t.z)-5,10,10);});
+  cx.font='bold 18px monospace';cx.fillStyle='#93dfff';sim.oxygenStations.forEach(t=>cx.fillText('O',X(t.x),Z(t.z)));sim.sanityStations.forEach(t=>cx.fillText('S',X(t.x),Z(t.z)));
+  cx.fillStyle='#fff';cx.fillText('YOU',X(sim.player.x),Z(sim.player.z));
+  cx.fillStyle='#00ffcc';cx.fillText(sim.cfg.exit.label,X(sim.cfg.exit.x),Z(sim.cfg.exit.z));
+  layout.append(cv,legend);$('overlay-btns').after(layout);cv.id='floor-plan';
+}
+function floorPlanDescription(sim) {
+  return sim.cfg.name+'. '+sim.cfg.rooms.map(r=>r.name+' connects to '+r.links.map(id=>sim.cfg.rooms.find(t=>t.id===id).name).join(', ')).join('. ')+
+    '. '+sim.activated+' of '+sim.total+' terminals active. '+sim.cfg.exit.label;
+}
+
+// --- feel tunables (render-time, seconds)
+const BASE_FOV = 75;
+const TRAUMA_DECAY = 1.6;            // trauma per second
+const SHAKE_MAX_ANGLE = 0.035;       // rad at trauma 1 (shake = trauma^2)
+const SHAKE_MAX_OFFSET = 0.06;       // units at trauma 1
+const STALKER_TRAUMA = 0.3;          // floor while a stalker is draining you
+const HEAD_BOB = 0.035, HEAD_BOB_SPRINT = 0.055;
+const STEP_LEN = 2.0, STEP_LEN_SPRINT = 2.6;   // units between footsteps
+const PULSE_FX_TIME = 0.45;
+const PULSE_FOV_KICK = 5;
+const HIT_FLASH_TIME = 0.14;
+// The monster lunges from SCARE_DIST_START to fill (and overflow) the frame at
+// SCARE_DIST_END. Closer than ~1.8 the camera ends up inside the wireframe.
+const SCARE_LUNGE_TIME = 0.18, SCARE_DIST_START = 7, SCARE_DIST_END = 2.1, SCARE_DIST_REDUCED = 3.0;
+const SCARE_SCALE = 1.45, SCARE_SCALE_REDUCED = 1.3;
+const SCARE_STATIC = 0.12, SCARE_STATIC_REDUCED = 0.08;
+const SCARE_FOV_PUNCH = -16;
+const INTRO_TIME = 2.8;              // static-to-clear on arrival from MONSTER TRAIL
+const STATIC_FPS = 18;
+const MOUSE_SENS = 0.002;            // rad per px (the original's value) x settings.sens
+const TOUCH_LOOK_SENS = 0.0055;      // rad per px
+const STICK_RADIUS = 56, STICK_DEADZONE = 0.12;
+const TOAST_TIME = 1.8;
+const THREE_SOURCES = [
+  'vendor/three-r128.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js',
+  'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js'
+];
+const THREE_TIMEOUT_MS = 10000;
+
+let scene, camera, renderer, flashlight, flashlightTarget, pulseLight, pulseRing, overheadLight;
+let ASSETS = null, view = null, sim = null;
+let currentStage = 1;
+let isLocked = false, freePlay = false, overlayHidden = false, ready = false;
+let touchMode = false, settings = normalizeSettings(null), arrival = { arrived: false, handoff: null };
+const held = { forward: false, back: false, left: false, right: false, sprint: false };
+let sprintLatch = false;
+const stick = { x: 0, y: 0, mag: 0 };
+const look = { yaw: 0, pitch: 0 };          // target (input) look
+const viewLook = { yaw: 0, pitch: 0 };      // displayed look (smoothed)
+const simInput = { mx: 0, mz: 0, sprint: false, yaw: 0 };
+const _km = { x: 0, z: 0 };
+let trauma = 0, fovKick = 0, lastFov = BASE_FOV, nextStepAt = STEP_LEN, renderTime = 0;
+const pulseFx = { active: false, t: 0, ox: 0, oy: 0, oz: 0, dx: 0, dy: 0, dz: 0 };
+let scareT = 0, introT = -1, introFull = '', introShown = -1, debugOverhead = false;
+let _v1 = null;
+let reducedMQ = null;
+
+function motionReduced() {
+  if (settings.motion === 'reduced') return true;
+  if (settings.motion === 'full') return false;
+  return !!(reducedMQ && reducedMQ.matches);
+}
+function $(id) { return document.getElementById(id); }
+
+/* --------------------------------------------------------------- SHELL: audio (WebAudio synth, no assets) */
+const Sfx = {
+  ctx: null, out: null, amb: null, noise: null, live: {}, last: {},
+  init() {
+    if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {}); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try {
+      const ctx = this.ctx = new AC();
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.ratio.value = 6;
+      comp.connect(ctx.destination);
+      this.out = ctx.createGain(); this.out.gain.value = settings.volume * 0.9; this.out.connect(comp);
+      this.amb = ctx.createGain(); this.amb.gain.value = 0; this.amb.connect(this.out);
+      const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      this.noise = buf;
+      this.buildLoops();
+    } catch (e) { this.ctx = null; }
+  },
+  loopNoise() { const s = this.ctx.createBufferSource(); s.buffer = this.noise; s.loop = true; s.start(); return s; },
+  buildLoops() {
+    const c = this.ctx, L = this.live;
+    // drone: two detuned saws + sub through a slowly breathing low-pass
+    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 180; lp.Q.value = 3;
+    const dg = c.createGain(); dg.gain.value = 0.06; lp.connect(dg); dg.connect(this.amb);
+    [55, 55.4].forEach(f => { const o = c.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.connect(lp); o.start(); });
+    const sub = c.createOscillator(); sub.frequency.value = 41.2; const sg = c.createGain(); sg.gain.value = 0.05; sub.connect(sg); sg.connect(this.amb); sub.start();
+    const lfo = c.createOscillator(); lfo.frequency.value = 0.06; const lg = c.createGain(); lg.gain.value = 70; lfo.connect(lg); lg.connect(lp.frequency); lfo.start();
+    // hiss: the static itself, louder as sanity slips
+    const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2600; bp.Q.value = 0.6;
+    L.hiss = c.createGain(); L.hiss.gain.value = 0.004; this.loopNoise().connect(bp); bp.connect(L.hiss); L.hiss.connect(this.amb);
+    // resonator whine: two close sines beating
+    L.whine = c.createGain(); L.whine.gain.value = 0;
+    [1320, 1327].forEach(f => { const o = c.createOscillator(); o.frequency.value = f; o.connect(L.whine); o.start(); });
+    L.whine.connect(this.amb);
+    // jammer hum: tremolo square
+    const hlp = c.createBiquadFilter(); hlp.type = 'lowpass'; hlp.frequency.value = 800;
+    const ho = c.createOscillator(); ho.type = 'square'; ho.frequency.value = 110; ho.connect(hlp); ho.start();
+    const am = c.createGain(); am.gain.value = 0.5; hlp.connect(am);
+    const tl = c.createOscillator(); tl.frequency.value = 7; const tg = c.createGain(); tg.gain.value = 0.5; tl.connect(tg); tg.connect(am.gain); tl.start();
+    L.hum = c.createGain(); L.hum.gain.value = 0; am.connect(L.hum); L.hum.connect(this.amb);
+    // stalker chitter: gated band-passed noise, panned toward the stalker
+    const cb = c.createBiquadFilter(); cb.type = 'bandpass'; cb.frequency.value = 1700; cb.Q.value = 6;
+    const cam = c.createGain(); cam.gain.value = 0.5; this.loopNoise().connect(cb); cb.connect(cam);
+    const cl = c.createOscillator(); cl.type = 'square'; cl.frequency.value = 19; const cg = c.createGain(); cg.gain.value = 0.5; cl.connect(cg); cg.connect(cam.gain); cl.start();
+    L.chit = c.createGain(); L.chit.gain.value = 0; cam.connect(L.chit);
+    if (c.createStereoPanner) { L.pan = c.createStereoPanner(); L.chit.connect(L.pan); L.pan.connect(this.amb); }
+    else L.chit.connect(this.amb);
+  },
+  set(param, key, v, tc) {
+    if (!this.ctx) return;
+    if (this.last[key] !== undefined && Math.abs(this.last[key] - v) < 0.0015) return;
+    this.last[key] = v;
+    param.setTargetAtTime(v, this.ctx.currentTime, tc || 0.08);
+  },
+  setVolume(v) { if (this.out) this.out.gain.setTargetAtTime(v * 0.9, this.ctx.currentTime, 0.05); },
+  update(s) {
+    if (!this.ctx) return;
+    const L = this.live;
+    this.set(this.amb.gain, 'amb', s.amb, 0.4);
+    this.set(L.hiss.gain, 'hiss', 0.004 + s.sanityLoss * 0.03 + s.res * 0.03 + (s.jammer ? 0.008 : 0));
+    this.set(L.whine.gain, 'whine', s.res * (s.jammer ? 0.004 : 0.022));
+    this.set(L.hum.gain, 'hum', s.jammer ? 0.03 : 0, 0.05);
+    this.set(L.chit.gain, 'chit', s.stalk * s.stalk * 0.09);
+    if (L.pan) this.set(L.pan.pan, 'pan', s.pan, 0.05);
+  },
+  jit() { return 1 + (Math.random() * 2 - 1) * 0.05; },
+  tone(type, f0, f1, dur, peak, delay) {
+    if (!this.ctx) return;
+    const c = this.ctx, t = c.currentTime + (delay || 0), j = this.jit();
+    const o = c.createOscillator(), g = c.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0 * j, t);
+    if (f1) o.frequency.exponentialRampToValueAtTime(f1 * j, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(peak, t + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(this.out); o.start(t); o.stop(t + dur + 0.05);
+  },
+  burst(dur, ftype, freq, q, peak, delay) {
+    if (!this.ctx) return;
+    const c = this.ctx, t = c.currentTime + (delay || 0);
+    const s = c.createBufferSource(); s.buffer = this.noise;
+    const f = c.createBiquadFilter(); f.type = ftype; f.frequency.value = freq * this.jit(); f.Q.value = q;
+    const g = c.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(peak, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); g.connect(this.out);
+    s.start(t, Math.random() * 1.5); s.stop(t + dur + 0.05);
+  },
+  footstep(sprint) { this.burst(0.07, 'lowpass', sprint ? 520 : 380, 0.8, sprint ? 0.22 : 0.15); this.tone('sine', 82, 50, 0.07, sprint ? 0.14 : 0.1); },
+  pulse() { this.burst(0.02, 'highpass', 3000, 0.7, 0.3); this.tone('sine', 160, 1500, 0.26, 0.22); this.burst(0.18, 'bandpass', 900, 1.2, 0.18, 0.02); },
+  pulseHit(n) { for (let i = 0; i < n; i++) this.tone('square', 880, 200, 0.16, 0.08, 0.05 + i * 0.04); },
+  fizzle() { this.tone('sawtooth', 150, 60, 0.22, 0.08); this.burst(0.1, 'bandpass', 400, 2, 0.06); },
+  jammer(on) { this.tone('square', on ? 520 : 820, on ? 860 : 480, 0.09, 0.07); this.tone('square', on ? 860 : 480, null, 0.06, 0.05, 0.09); },
+  flash() { this.burst(0.015, 'highpass', 2500, 0.7, 0.12); },
+  terminal() { this.tone('triangle', 660, null, 0.5, 0.16); this.tone('triangle', 990, null, 0.6, 0.12, 0.09); this.burst(0.03, 'highpass', 4000, 0.7, 0.1); },
+  station(kind) { this.tone('sine', kind === 'oxygen' ? 392 : 523, null, 0.35, 0.07); },
+  cleared() { [440, 554, 659, 880].forEach((f, i) => this.tone('triangle', f, null, 0.5, 0.12, i * 0.11)); },
+  warn() { this.tone('sine', 1000, null, 0.09, 0.08); this.tone('sine', 1000, null, 0.09, 0.08, 0.16); },
+  ui() { this.tone('square', 700, null, 0.04, 0.04); },
+  scare(reduced) {
+    const k = reduced ? 0.6 : 1;
+    this.burst(1.0, 'bandpass', 2200, 0.5, 0.55 * k);
+    [300, 317, 452].forEach((f, i) => this.tone('sawtooth', f, f * 3.6, 0.9, 0.12 * k, i * 0.01));
+    this.tone('sine', 55, 30, 0.6, 0.5 * k);
+  },
+  end(won) { if (won) this.cleared(); else this.tone('sawtooth', 220, 55, 1.4, 0.1); }
+};
+
+/* --------------------------------------------------------------- SHELL: TV static canvas */
+const StaticFx = {
+  cv: null, ctx: null, img: null, u32: null, seed: 0x9e3779b9, opacity: -1, last: 0,
+  init() {
+    this.cv = $('static');
+    this.ctx = this.cv.getContext('2d');
+    this.img = this.ctx.createImageData(this.cv.width, this.cv.height);
+    this.u32 = new Uint32Array(this.img.data.buffer);
+    this.draw();
+  },
+  draw() {
+    let s = this.seed;
+    const u = this.u32;
+    for (let i = 0; i < u.length; i++) {
+      s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+      const v = 30 + ((s >>> 0) % 170);
+      u[i] = 0xff000000 | (v << 16) | (v << 8) | v;
+    }
+    this.seed = s;
+    this.ctx.putImageData(this.img, 0, 0);
+  },
+  frame(now, opacity, animate) {
+    const o = Math.round(clamp01(opacity) * 1000) / 1000;
+    if (o !== this.opacity) { this.opacity = o; this.cv.style.opacity = String(o); }
+    if (o > 0.01 && animate && now - this.last > 1000 / STATIC_FPS) { this.last = now; this.draw(); }
+  }
+};
+
+/* --------------------------------------------------------------- SHELL: HUD (writes only on change) */
+const hud = { cache: {} };
+function hudText(id, text) {
+  if (hud.cache[id] === text) return;
+  hud.cache[id] = text;
+  $(id).textContent = text;
+}
+function hudBar(id, valId, v, low) {
+  const iv = Math.max(0, Math.floor(v));
+  const key = id + ':' + iv + (low ? 'L' : '');
+  if (hud.cache[id] === key) return;
+  hud.cache[id] = key;
+  const bar = $(id);
+  bar.querySelector('.fill').style.transform = 'scaleX(' + clamp01(iv / 100) + ')';
+  bar.classList.toggle('low', !!low);
+  $(valId).textContent = String(iv);
+}
+function updateHud() {
+  const p = sim.player;
+  const r=roomAt(sim.stage,p.x,p.z);
+  hudText('room-val',sim.cfg.name.toUpperCase()+' / '+(r?r.name:'CONNECTING GALLERY'));
+  hudText('stage-val', sim.stage + '/' + MAX_STAGES);
+  hudText('node-val', sim.activated + '/' + sim.total);
+  hudBar('bar-oxy', 'oxy-val', p.oxy, p.oxy < LOW_OXY);
+  hudBar('bar-san', 'san-val', p.sanity, p.sanity < LOW_SANITY);
+  hudBar('bar-stam', 'stam-val', p.stamina, false);
+  hudBar('bar-bat', 'bat-val', p.battery, p.battery < PULSE_COST);
+  hudText('jam-val', p.jammer ? 'ON' : 'OFF');
+  const flashState = p.flashlightOn && p.battery > 0 ? 'ON' : (p.battery <= 0 ? 'DEAD' : 'OFF');
+  hudText('flash-val', flashState);
+  const jc = p.jammer ? 'chip on' : 'chip', fc = flashState === 'ON' ? 'chip on' : flashState === 'DEAD' ? 'chip dead' : 'chip';
+  if (hud.cache.jc !== jc) { hud.cache.jc = jc; $('chip-jam').className = jc; }
+  if (hud.cache.fc !== fc) { hud.cache.fc = fc; $('chip-flash').className = fc; }
+  const tbJam = document.querySelector('.tb[data-act=jammer]'), tbLight = document.querySelector('.tb[data-act=flashlight]');
+  if (hud.cache.tj !== p.jammer) { hud.cache.tj = p.jammer; tbJam.classList.toggle('on', p.jammer); }
+  if (hud.cache.tl !== p.flashlightOn) { hud.cache.tl = p.flashlightOn; tbLight.classList.toggle('on', p.flashlightOn); }
+}
+let toastTimer = 0;
+function toast(text, warn) {
+  const el = $('toast');
+  el.textContent = text;
+  el.classList.toggle('warn', !!warn);
+  el.classList.add('show');
+  toastTimer = TOAST_TIME;
+}
+
+/* --------------------------------------------------------------- SHELL: overlay / menus */
+let overlayPrimary = null, overlayShownAt = 0;
+// A tap that opens the overlay (pause, stage clear) also emits a click a few ms
+// later, which would land on the overlay and resume. Ignore clicks that early.
+const OVERLAY_CLICK_GUARD_MS = 350;
+function overlayClickTooSoon() { return performance.now() - overlayShownAt < OVERLAY_CLICK_GUARD_MS; }
+function showOverlay(o) {
+  const previousPlan=$('floor-plan-layout');if(previousPlan)previousPlan.remove();
+  const ov = $('overlay');
+  ov.classList.remove('plan-open');
+  overlayShownAt = o.guard ? performance.now() : -1e9;
+  ov.classList.remove('hidden', 'settings-open', 'intro', 'reveal');
+  overlayHidden = false;
+  document.body.classList.remove('playing');
+  const title = $('overlay-title');
+  title.textContent = o.title;
+  title.style.color = o.color || '';
+  $('overlay-msg').textContent = o.msg || '';
+  $('overlay-line').textContent = o.line || '';
+  $('overlay-sub').textContent = o.sub || '';
+  $('overlay-help').style.display = o.help ? '' : 'none';
+  const box = $('overlay-btns');
+  box.textContent = '';
+  overlayPrimary = null;
+  if (embeddedSession && !(o.buttons||[]).some(b=>b.label==='RETURN TO TRAIL')) (o.buttons || (o.buttons=[])).push({label:'RETURN TO TRAIL',act:returnToTrail});
+  (o.buttons || []).forEach(b => {
+    const el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'btn' + (b.primary ? ' primary' : '');
+    el.textContent = b.label;
+    el.addEventListener('click', ev => { ev.stopPropagation(); if (overlayClickTooSoon()) return; Sfx.init(); Sfx.ui(); b.act(); });
+    box.appendChild(el);
+    if (b.primary) overlayPrimary = b.act;
+  });
+}
+function hideOverlay() {
+  $('overlay').classList.add('hidden');
+  overlayHidden = true;
+  introT = -1;
+  StaticFx.cv.classList.remove('top');
+  document.body.classList.add('playing');
+}
+function startMsg() { return touchMode ? 'Tap BEGIN to enter stage ' + currentStage : 'Click anywhere to lock mouse & enter stage ' + currentStage; }
+function showTitle() {
+  const h = arrival.handoff;
+  showOverlay({
+    title: 'THE STATIC BELOW', msg: startMsg(),
+    line: arrival.arrived ? introLine(h) : '', sub: arrival.arrived ? dossierLine(h) : '',
+    help: true,
+    buttons: [{ label: 'BEGIN', primary: true, act: beginPlay }, { label: 'SETTINGS', act: openSettings }]
+  });
+}
+function startIntro() {
+  // Fade in from static: the hand-off from MONSTER TRAIL never hard-cuts.
+  const ov = $('overlay');
+  ov.classList.add('intro');
+  introFull = $('overlay-line').textContent;
+  introShown = -1;
+  $('overlay-line').textContent = '';
+  StaticFx.cv.classList.add('top');
+  introT = 0;
+}
+function finishIntro() {
+  if (introT < 0) return;
+  introT = -1;
+  $('overlay').classList.add('reveal');
+  $('overlay-line').textContent = introFull;
+  StaticFx.cv.classList.remove('top');
+}
+function showPaused() {
+  showOverlay({
+    title: 'PAUSED', guard: true, msg: touchMode ? 'Tap RESUME to continue' : 'Click anywhere to resume', help: true,
+    buttons: [
+      { label: 'RESUME', primary: true, act: beginPlay },
+      { label: 'FLOOR PLAN', act: showFloorPlan },
+      { label: 'RESTART STAGE', act: () => { setupStage(currentStage); beginPlay(); } },
+      { label: 'SETTINGS', act: openSettings }
+    ]
+  });
+}
+function showCleared(stageDone) {
+  showOverlay({
+    title: 'STAGE ' + stageDone + ' CLEARED', color: '#00ffcc', guard: true,
+    msg: (touchMode ? 'Tap' : 'Click') + ' to enter Stage ' + currentStage + ' (Sub-Level ' + currentStage + ')',
+    sub: 'Oxygen and sanity drain faster below. More of them are awake.',
+    buttons: [{ label: 'DESCEND', primary: true, act: beginPlay }]
+  });
+}
+function showEnd(won, msg) {
+  if (won && sim.stage===3 && sim.status==='won') chapterSend('completed');
+  if (won) {
+    showOverlay({
+      title: 'VICTORY', color: '#00ffcc', guard: true, msg, line: victoryLine(arrival.handoff),
+      buttons: embeddedSession ? [{label:'RETURN TO TRAIL',primary:true,act:returnToTrail}] : [{ label: 'PLAY AGAIN', primary: true, act: () => { restartGame(1); beginPlay(); } }]
+    });
+  } else {
+    showOverlay({
+      title: 'SYSTEM FAILURE', color: '#ff3344', guard: true, msg,
+      sub: touchMode ? '' : '[R] restarts from stage 1',
+      buttons: [
+        { label: 'RETRY STAGE ' + currentStage, primary: true, act: () => { setupStage(currentStage); beginPlay(); } },
+        { label: 'RESTART FROM STAGE 1', act: () => { restartGame(1); beginPlay(); } }
+      ]
+    });
+  }
+}
+function openSettings() {
+  $('overlay').classList.add('settings-open');
+  syncSettingsUI();
+  $('settings-back').focus();
+}
+function syncSettingsUI() {
+  $('set-sens').value = settings.sens; $('out-sens').textContent = settings.sens.toFixed(2) + 'x';
+  $('set-smooth').value = settings.smooth; $('out-smooth').textContent = Math.round(settings.smooth * 100) + '%';
+  $('set-invert').checked = settings.invertY;
+  $('set-motion').value = settings.motion;
+  $('set-volume').value = settings.volume; $('out-volume').textContent = Math.round(settings.volume * 100) + '%';
+}
+function saveSettings() {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* private mode: keep in memory */ }
+}
+function loadSettings() {
+  try { return normalizeSettings(JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null')); } catch (e) { return normalizeSettings(null); }
+}
+function applySettings() {
+  document.body.classList.toggle('reduced', motionReduced());
+  Sfx.setVolume(settings.volume);
+}
+
+/* --------------------------------------------------------------- SHELL: stage lifecycle */
+function clearEntities() {
+  disposeStageView(view, scene);
+  view = null;
+}
+function setupStage(stageNum) {
+  clearEntities();
+  const keepFlash = sim ? sim.player.flashlightOn : true;
+  currentStage = stageNum;
+  sim = createSim(stageNum, { flashlightOn: keepFlash });
+  if (embeddedStarted) chapterSend('checkpoint',stageNum);
+  view = buildStageView(sim, scene, window.THREE, ASSETS);
+  look.yaw = look.pitch = viewLook.yaw = viewLook.pitch = 0;
+  trauma = 0; fovKick = 0; scareT = 0; nextStepAt = STEP_LEN;
+  pulseFx.active = false; pulseRing.visible = false; pulseLight.intensity = 0;
+  $('scare-overlay').style.opacity = '0';
+  hud.cache = {};
+  updateHud();
+  // Compile the new light count's shaders now, behind the overlay, instead
+  // of hitching the first frame of the stage (measured 366 ms before).
+  try { renderer.compile(scene, camera); } catch (e) { /* optional */ }
+}
+function restartGame(stage) {
+  setupStage(stage || 1);
+}
+function simRunning() {
+  if (!sim) return false;
+  if (sim.status === 'scare') return true;
+  return sim.status === 'play' && (isLocked || freePlay) && overlayHidden;
+}
+function canAct() { return simRunning() && sim.status === 'play'; }
+
+/* --------------------------------------------------------------- SHELL: play / pause / input */
+function beginPlay() {
+  if (embeddedSession && !embeddedStarted || chapterReturned) return;
+  Sfx.init();
+  if (sim.status === 'dead' || sim.status === 'won') return;
+  if (touchMode) {
+    freePlay = true;
+    hideOverlay();
+    resetSimClock();
+    try {
+      const de = document.documentElement;
+      if (!document.fullscreenElement && de.requestFullscreen) de.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+    } catch (e) { /* optional */ }
+    return;
+  }
+  try {
+    const r = document.body.requestPointerLock();
+    if (r && typeof r.catch === 'function') r.catch(() => lockRefused());
+  } catch (e) { lockRefused(); }
+}
+function lockRefused() {
+  if (overlayHidden) return;
+  $('overlay-msg').textContent = 'The browser refused mouse lock. Click again (right after ESC it needs a second).';
+}
+function pauseGame() {
+  if (!sim || sim.status !== 'play' || !overlayHidden) return;
+  freePlay = false;
+  clearHeld();
+  if (document.pointerLockElement) document.exitPointerLock();
+  showPaused();
+}
+function clearHeld() {
+  for (const k in held) held[k] = false;
+  stick.x = stick.y = stick.mag = 0;
+}
+function press(act) {
+  if (HELD_ACTIONS[act]) { held[act] = true; return; }
+  switch (act) {
+    case 'flashlight': if (canAct() && toggleFlashlight(sim)) Sfx.flash(); break;
+    case 'jammer': if (canAct()) toggleJammer(sim); break;
+    case 'pulse': if (canAct()) firePulse(sim, viewLook.yaw, viewLook.pitch); break;
+    case 'pause': if($('floor-plan'))showPaused();else pauseGame(); break;
+    case 'restart': if (sim && (sim.status === 'dead' || sim.status === 'won')) { restartGame(1); showTitle(); } break;
+    case 'confirm': if (!overlayHidden && introT < 0 && overlayPrimary && !$('overlay').classList.contains('settings-open')) overlayPrimary(); break;
+  }
+}
+function release(act) { if (HELD_ACTIONS[act]) held[act] = false; }
+function gatherInput() {
+  keyMove(held, _km);
+  let mx = _km.x, mz = _km.z;
+  if (stick.mag > 0) { mx = stick.x; mz = stick.y; }
+  simInput.mx = mx; simInput.mz = mz;
+  simInput.sprint = held.sprint || sprintLatch;
+  simInput.yaw = viewLook.yaw;
+  return simInput;
+}
+function applyLook(dx, dy, base) {
+  if (!sim || sim.status !== 'play') return;
+  lookStep(look, dx, dy, base * settings.sens, settings.invertY);
+}
+
+function setupControls() {
+  const overlay = $('overlay');
+  overlay.addEventListener('click', e => {
+    if (e.target.closest('button, input, select, label, #settings')) return;
+    if (overlayClickTooSoon()) return;
+    Sfx.init();
+    if (introT >= 0) { finishIntro(); return; }
+    if (overlayPrimary) overlayPrimary();
+  });
+  $('settings-back').addEventListener('click', e => { e.stopPropagation(); overlay.classList.remove('settings-open'); });
+  const bindRange = (id, key) => $(id).addEventListener('input', e => { settings[key] = parseFloat(e.target.value); settings = normalizeSettings(settings); syncSettingsUI(); saveSettings(); applySettings(); });
+  bindRange('set-sens', 'sens'); bindRange('set-smooth', 'smooth'); bindRange('set-volume', 'volume');
+  $('set-invert').addEventListener('change', e => { settings.invertY = e.target.checked; saveSettings(); });
+  $('set-motion').addEventListener('change', e => { settings.motion = e.target.value; settings = normalizeSettings(settings); saveSettings(); applySettings(); });
+  $('err-retry').addEventListener('click', () => location.reload());
+
+  document.addEventListener('pointerlockchange', () => {
+    isLocked = document.pointerLockElement === document.body;
+    resetSimClock();
+    if (isLocked) { freePlay = false; hideOverlay(); return; }
+    clearHeld();
+    if (sim && sim.status === 'play' && overlayHidden && !freePlay) showPaused();
+  });
+  document.addEventListener('pointerlockerror', lockRefused);
+
+  document.addEventListener('mousedown', e => {
+    if (e.button === 0 && isLocked) press('pulse');
+  });
+  document.addEventListener('mousemove', e => {
+    if (!isLocked) return;
+    applyLook(e.movementX || 0, e.movementY || 0, MOUSE_SENS);
+  });
+  window.addEventListener('keydown', e => {
+    const act = actionForKey(e.code);
+    if (!act) return;
+    if (overlayHidden && (e.code === 'Space' || e.code.indexOf('Arrow') === 0)) e.preventDefault();
+    if (e.repeat && !HELD_ACTIONS[act]) return;
+    if (act === 'pause' && e.code === 'Escape' && isLocked) return;   // the browser releases the lock itself
+    press(act);
+  });
+  window.addEventListener('keyup', e => { const act = actionForKey(e.code); if (act) release(act); });
+  window.addEventListener('blur', () => { clearHeld(); if (freePlay) pauseGame(); });
+  document.addEventListener('visibilitychange', () => { resetSimClock(); if (document.hidden && freePlay) pauseGame(); });
+  window.addEventListener('resize', onWindowResize);
+  window.addEventListener('orientationchange', onWindowResize);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', onWindowResize);
+
+  setupTouch();
+}
+
+function enableTouch() {
+  if (touchMode) return;
+  touchMode = true;
+  document.body.classList.add('touch');
+  if (!overlayHidden && sim && sim.status === 'play') $('overlay-msg').textContent = startMsg();
+}
+function setupTouch() {
+  window.addEventListener('touchstart', enableTouch, { passive: true });
+  const zone = $('stick-zone'), base = $('stick-base'), knob = $('stick-knob');
+  let stickId = null, ox = 0, oy = 0;
+  const restStick = () => {
+    base.style.left = ''; base.style.top = ''; base.classList.remove('active');
+    knob.style.transform = '';
+    stick.x = stick.y = stick.mag = 0;
+  };
+  zone.addEventListener('pointerdown', e => {
+    if (stickId !== null) return;
+    e.preventDefault();
+    stickId = e.pointerId; ox = e.clientX; oy = e.clientY;
+    try { zone.setPointerCapture(e.pointerId); } catch (err) { /* ok */ }
+    const zr = zone.getBoundingClientRect();
+    base.style.left = (ox - zr.left) + 'px'; base.style.top = (oy - zr.top) + 'px'; base.classList.add('active');
+  });
+  zone.addEventListener('pointermove', e => {
+    if (e.pointerId !== stickId) return;
+    e.preventDefault();
+    stickVector(e.clientX - ox, e.clientY - oy, STICK_RADIUS, STICK_DEADZONE, stick);
+    const l = Math.hypot(e.clientX - ox, e.clientY - oy), k = l > STICK_RADIUS ? STICK_RADIUS / l : 1;
+    knob.style.transform = 'translate(' + ((e.clientX - ox) * k) + 'px,' + ((e.clientY - oy) * k) + 'px)';
+  });
+  const endStick = e => { if (e.pointerId !== stickId) return; stickId = null; restStick(); };
+  zone.addEventListener('pointerup', endStick);
+  zone.addEventListener('pointercancel', endStick);
+
+  const lz = $('look-zone');
+  let lookId = null, lx = 0, ly = 0;
+  lz.addEventListener('pointerdown', e => {
+    if (lookId !== null) return;
+    e.preventDefault();
+    lookId = e.pointerId; lx = e.clientX; ly = e.clientY;
+    try { lz.setPointerCapture(e.pointerId); } catch (err) { /* ok */ }
+  });
+  lz.addEventListener('pointermove', e => {
+    if (e.pointerId !== lookId) return;
+    e.preventDefault();
+    applyLook(e.clientX - lx, e.clientY - ly, TOUCH_LOOK_SENS);
+    lx = e.clientX; ly = e.clientY;
+  });
+  const endLook = e => { if (e.pointerId === lookId) lookId = null; };
+  lz.addEventListener('pointerup', endLook);
+  lz.addEventListener('pointercancel', endLook);
+
+  document.querySelectorAll('#touch-ui .tb').forEach(btn => {
+    const act = btn.dataset.act;
+    btn.addEventListener('pointerdown', e => {
+      e.preventDefault(); e.stopPropagation();
+      Sfx.init();
+      btn.classList.add('down');
+      if (act === 'sprint') { sprintLatch = !sprintLatch; btn.classList.toggle('on', sprintLatch); }
+      else press(act);
+      if (navigator.vibrate && act === 'pulse') { try { navigator.vibrate(12); } catch (err) { /* ok */ } }
+    });
+    const up = () => btn.classList.remove('down');
+    btn.addEventListener('pointerup', up);
+    btn.addEventListener('pointercancel', up);
+    btn.addEventListener('pointerleave', up);
+  });
+}
+
+function onWindowResize() {
+  if (!renderer) return;
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h, false);
+  document.body.classList.toggle('portrait', h > w);
+}
+
+/* --------------------------------------------------------------- SHELL: sim events -> feedback */
+function handleEvents() {
+  if (!sim || sim.events.length === 0) return;
+  const evs = sim.events;
+  for (let i = 0; i < evs.length; i++) {
+    const ev = evs[i];
+    switch (ev.type) {
+      case 'terminal':
+        Sfx.terminal();
+        if (view.terminals[ev.a]) view.terminals[ev.a].pop = 1;
+        if (sim.activated < sim.total) toast('NODE ONLINE ' + sim.activated + '/' + sim.total);
+        break;
+      case 'pulse': {
+        Sfx.pulse();
+        if (ev.a > 0) Sfx.pulseHit(ev.a);
+        ev.b.forEach(idx => { if (view.enemies[idx]) view.enemies[idx].flash = HIT_FLASH_TIME; });
+        startPulseFx();
+        if (!motionReduced()) fovKick = PULSE_FOV_KICK;
+        break;
+      }
+      case 'fizzle': Sfx.fizzle(); toast(ev.a === 'pulse' ? 'BATTERY TOO LOW FOR PULSE' : 'BATTERY DEAD', true); break;
+      case 'jammer': Sfx.jammer(ev.a); break;
+      case 'jammer_dead': Sfx.jammer(false); toast('JAMMER: BATTERY DEAD', true); break;
+      case 'station': Sfx.station(ev.a); break;
+      case 'low': Sfx.warn(); toast(ev.a + ' LOW', true); break;
+      case 'scare':
+        scareT = 0;
+        trauma = 1;
+        if (!motionReduced()) fovKick = SCARE_FOV_PUNCH;
+        Sfx.scare(motionReduced());
+        break;
+      case 'cleared': {
+        Sfx.cleared();
+        const done = sim.stage;
+        freePlay = false; clearHeld();
+        if (document.pointerLockElement) document.exitPointerLock();
+        setupStage(done + 1);
+        showCleared(done);
+        return;   // the new sim has no events yet
+      }
+      case 'end': {
+        Sfx.end(ev.a);
+        freePlay = false; clearHeld();
+        if (document.pointerLockElement) document.exitPointerLock();
+        $('scare-overlay').style.opacity = '0';
+        showEnd(ev.a, ev.b);
+        break;
+      }
+    }
+  }
+  evs.length = 0;
+}
+function startPulseFx() {
+  const p = sim.player;
+  aimFromYawPitch(viewLook.yaw, viewLook.pitch, pulseFx);
+  pulseFx.dx = pulseFx.x; pulseFx.dy = pulseFx.y; pulseFx.dz = pulseFx.z;
+  pulseFx.ox = p.x; pulseFx.oy = EYE_HEIGHT; pulseFx.oz = p.z;
+  pulseFx.t = 0; pulseFx.active = true;
+  pulseRing.quaternion.copy(camera.quaternion);
+  pulseRing.visible = true;
+}
+
+/* --------------------------------------------------------------- SHELL: render */
+function noise1(t, seed) { return Math.sin(t * 13.1 + seed) * 0.6 + Math.sin(t * 27.3 + seed * 2.1) * 0.4; }
+function renderFrame(alpha, dt, now) {
+  renderTime += dt;
+  const p = sim.player, reduced = motionReduced();
+  const scaring = sim.status === 'scare';
+
+  // look: raw or smoothed toward the input target
+  const k = smoothFactor(dt, settings.smooth);
+  viewLook.yaw += (look.yaw - viewLook.yaw) * k;
+  viewLook.pitch += (look.pitch - viewLook.pitch) * k;
+
+  // interpolated player position between the last two ticks
+  const x = lerp(p.px, p.x, alpha), z = lerp(p.pz, p.z, alpha);
+  const walked = lerp(p.pwalked, p.walked, alpha);
+  const stride = p.sprinting ? STEP_LEN_SPRINT : STEP_LEN;
+  const bob = reduced || !p.moving ? 0 : -Math.abs(Math.sin(walked / stride * Math.PI)) * (p.sprinting ? HEAD_BOB_SPRINT : HEAD_BOB);
+
+  // trauma shake (shake = trauma^2), decays per second; never in reduced motion
+  if (p.stalked && !scaring) trauma = Math.max(trauma, STALKER_TRAUMA);
+  trauma = Math.max(0, trauma - TRAUMA_DECAY * dt);
+  const sh = reduced ? 0 : trauma * trauma;
+  const t = renderTime;
+
+  camera.position.set(x + noise1(t, 1) * SHAKE_MAX_OFFSET * sh, EYE_HEIGHT + bob + noise1(t, 4) * SHAKE_MAX_OFFSET * sh, z);
+  camera.rotation.set(viewLook.pitch + noise1(t, 7) * SHAKE_MAX_ANGLE * sh, viewLook.yaw + noise1(t, 9) * SHAKE_MAX_ANGLE * sh, noise1(t, 12) * SHAKE_MAX_ANGLE * 1.6 * sh);
+  if (debugOverhead) { camera.position.set(0, 72, 0); camera.rotation.set(-Math.PI / 2, 0, 0); }
+
+  // FOV kick eases back
+  fovKick += (0 - fovKick) * (1 - Math.exp(-dt * (scaring ? 2.5 : 9)));
+  const fov = BASE_FOV + fovKick;
+  if (Math.abs(fov - lastFov) > 0.01) { lastFov = fov; camera.fov = fov; camera.updateProjectionMatrix(); }
+  camera.updateMatrixWorld();
+
+  // enemies
+  const simT = (sim.tick + alpha) / 60;
+  for (let i = 0; i < sim.enemies.length; i++) {
+    const e = sim.enemies[i], ve = view.enemies[i];
+    if (!ve) continue;
+    ve.flash = Math.max(0, ve.flash - dt);
+    let r = (ve.base >> 16 & 255) / 255, g = (ve.base >> 8 & 255) / 255, b = (ve.base & 255) / 255, op = 1;
+    if (e.stunnedTimer > 0) {
+      const s = Math.min(1, e.stunnedTimer / 30);   // fades back to its colour over the last 0.5 s
+      r = lerp(r, 0.48, s); g = lerp(g, 0.94, s); b = lerp(b, 1, s); op = 0.75;
+    }
+    if (e.type === 'resonator' && p.jammer) { r *= 0.35; g *= 0.35; b *= 0.35; op = 0.45; }
+    if (ve.flash > 0) { r = g = b = 1; op = 1; }
+    ve.mat.color.setRGB(r, g, b);
+    ve.mat.opacity = op;
+    if (scaring && i === sim.scareEnemy) continue;
+    ve.mesh.position.set(lerp(e.px, e.x, alpha), EYE_HEIGHT + Math.sin(simT * 5 + e.phase) * 0.3, lerp(e.pz, e.z, alpha));
+    ve.mesh.rotation.y = lerp(e.pspin, e.spin, alpha);
+  }
+
+  // jumpscare: the monster lunges into your face
+  const scareEl = $('scare-overlay');
+  if (scaring && sim.scareEnemy >= 0) {
+    scareT += dt;
+    const ve = view.enemies[sim.scareEnemy];
+    _v1.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    const kk = reduced ? 1 : easeOutBack(clamp01(scareT / SCARE_LUNGE_TIME));
+    const dist = reduced ? SCARE_DIST_REDUCED : lerp(SCARE_DIST_START, SCARE_DIST_END, kk);
+    ve.mesh.position.copy(camera.position).addScaledVector(_v1, dist);
+    if (!reduced) { ve.mesh.position.x += noise1(t * 1.7, 3) * 0.1; ve.mesh.position.y += noise1(t * 1.7, 5) * 0.1; }
+    ve.mesh.scale.setScalar(reduced ? SCARE_SCALE_REDUCED : SCARE_SCALE * (0.8 + 0.2 * kk));
+    ve.mesh.rotation.x += (reduced ? 0.6 : 12) * dt;
+    ve.mesh.rotation.y += (reduced ? 0.6 : 12) * dt;
+    // one hard flash that decays (no strobe); reduced: a slow fade in
+    const o = reduced ? Math.min(0.5, scareT / 0.6 * 0.5) : (scareT < 0.06 ? 0.9 : 0.35 + 0.55 * Math.exp(-(scareT - 0.06) * 5));
+    scareEl.style.opacity = o.toFixed(3);
+    flashlight.intensity = reduced ? 8 : 15;
+  } else {
+    const on = p.flashlightOn && p.battery > 0;
+    const flicker = on && p.battery < PULSE_COST && !reduced ? 0.75 + 0.25 * Math.sin(t * 3) : 1;
+    flashlight.intensity = on ? 5 * flicker : 0;
+  }
+
+  // pulse wave: a ring that travels out along the aim and fades
+  if (pulseFx.active) {
+    pulseFx.t += dt;
+    const kp = clamp01(pulseFx.t / PULSE_FX_TIME);
+    const d = 0.6 + PULSE_RANGE * 0.9 * easeOutCubic(kp);
+    pulseRing.position.set(pulseFx.ox + pulseFx.dx * d, pulseFx.oy + pulseFx.dy * d, pulseFx.oz + pulseFx.dz * d);
+    pulseRing.scale.setScalar(0.3 + d * 0.55);
+    pulseRing.material.opacity = 0.55 * Math.pow(1 - kp, 1.5);
+    pulseLight.intensity = 10 * Math.max(0, 1 - pulseFx.t / 0.333);
+    if (kp >= 1) { pulseFx.active = false; pulseRing.visible = false; pulseLight.intensity = 0; }
+  }
+
+  // terminals: activation pop + colour
+  for (let i = 0; i < sim.terminals.length; i++) {
+    const vt = view.terminals[i];
+    if (!vt) continue;
+    vt.pop = Math.max(0, vt.pop - dt * 1.8);
+    const active = sim.terminals[i].active;
+    vt.light.color.setHex(active ? 0x00ffcc : 0xffaa00);
+    vt.capMat.color.setHex(active ? 0x00ffcc : 0xffaa00);
+    vt.light.intensity = 2 + 6 * easeOutCubic(vt.pop);
+  }
+
+  // screen-space feedback
+  const res = p.jammer ? 0 : p.draining;
+  const sanityLoss = 1 - clamp01(p.sanity / 100);
+  let staticO = Math.pow(sanityLoss, 1.5) * 0.28 + res * 0.12 + (p.jammer ? 0.035 : 0);
+  if (scaring) staticO = reduced ? SCARE_STATIC_REDUCED : SCARE_STATIC;
+  if (introT >= 0) {
+    introT += dt;
+    const ki = clamp01(introT / INTRO_TIME);
+    staticO = 1 - easeInOut(ki);
+    if (ki > 0.35) $('overlay').classList.add('reveal');
+    const chars = reduced ? introFull.length : Math.floor(introFull.length * clamp01((ki - 0.45) / 0.5));
+    if (chars !== introShown && ki > 0.35) { introShown = chars; $('overlay-line').textContent = introFull.slice(0, chars); }
+    if (ki >= 1) finishIntro();
+  }
+  StaticFx.frame(now, staticO, !reduced);
+  setOpacity('jammer-vignette', p.jammer && !scaring ? 1 : 0);
+  const hurt = scaring ? 0 : Math.max(p.stalked ? 0.85 : 0, p.oxy < LOW_OXY ? 0.25 + 0.2 * (1 - p.oxy / LOW_OXY) : 0);
+  setOpacity('hurt-vignette', hurt);
+  if (!scaring && scareEl.style.opacity !== '0' && sim.status !== 'dead') scareEl.style.opacity = '0';
+
+  if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) $('toast').classList.remove('show'); }
+
+  updateHud();
+  updateAudio(x, z, scaring);
+  renderer.render(scene, camera);
+}
+const _opCache = {};
+function setOpacity(id, v) {
+  const o = Math.round(v * 100) / 100;
+  if (_opCache[id] === o) return;
+  _opCache[id] = o;
+  $(id).style.opacity = String(o);
+}
+function updateAudio(x, z, scaring) {
+  if (!Sfx.ctx) return;
+  const p = sim.player;
+  let stalk = 0, pan = 0;
+  const rx = Math.cos(viewLook.yaw), rz = -Math.sin(viewLook.yaw);   // camera right vector
+  for (const e of sim.enemies) {
+    if (e.type !== 'stalker') continue;
+    const dx = e.x - x, dz = e.z - z, d = Math.hypot(dx, dz);
+    const prox = clamp01(1 - d / 12);
+    if (prox > stalk) { stalk = prox; pan = d > 1e-3 ? clamp((dx * rx + dz * rz) / d, -1, 1) : 0; }
+  }
+  const playing = simRunning();
+  Sfx.update({
+    amb: playing ? 1 : 0.35, res: playing ? p.draining : 0, stalk: playing ? stalk : 0, pan,
+    jammer: playing && p.jammer, sanityLoss: 1 - clamp01(p.sanity / 100)
+  });
+}
+
+/* --------------------------------------------------------------- SHELL: three.js setup */
+function initThree() {
+  const T = window.THREE;
+  scene = new T.Scene();
+  scene.background = new T.Color(0x000000);
+  scene.fog = new T.FogExp2(0x000000, 0.1);
+
+  camera = new T.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.1, 1000);
+  camera.rotation.order = 'YXZ';
+  camera.position.set(SPAWN.x, EYE_HEIGHT, SPAWN.z);
+
+  renderer = new T.WebGLRenderer({ antialias: !touchMode, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, touchMode ? 1.5 : 2));
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = T.PCFSoftShadowMap;
+  renderer.domElement.id = 'gl';
+  document.body.insertBefore(renderer.domElement, document.body.firstChild);
+
+  flashlight = new T.SpotLight(0xcdeeff, 5.0, 40, Math.PI / 7, 0.4, 1.5);
+  flashlight.castShadow = true;
+  flashlight.shadow.mapSize.width = touchMode ? 512 : 1024;
+  flashlight.shadow.mapSize.height = touchMode ? 512 : 1024;
+  camera.add(flashlight);
+  flashlight.position.set(0.3, -0.2, 0);
+  // The target rides on the camera, so the beam follows you as you walk
+  // (it used to be repositioned only on mouse-move and lag behind).
+  flashlightTarget = new T.Object3D();
+  flashlightTarget.position.set(0, 0, -10);
+  camera.add(flashlightTarget);
+  flashlight.target = flashlightTarget;
+  scene.add(camera);
+
+  pulseLight = new T.PointLight(0x00ffff, 0, 15);
+  camera.add(pulseLight);
+
+  const wallMat = new T.MeshStandardMaterial({ color: 0x11161b, roughness: 0.9, metalness: 0.2 });
+  const floorMat = new T.MeshStandardMaterial({ color: 0x0a0d10, roughness: 0.6, metalness: 0.3 });
+  const ceilMat = new T.MeshStandardMaterial({ color: 0x050709 });
+  const floorGeo = new T.PlaneGeometry(60, 80);
+  const floor = new T.Mesh(floorGeo, floorMat);
+  floor.rotation.x = -Math.PI / 2;
+  floor.receiveShadow = true;
+  scene.add(floor);
+  const ceiling = new T.Mesh(floorGeo, ceilMat);
+  ceiling.position.y = 4;
+  ceiling.rotation.x = Math.PI / 2;
+  scene.add(ceiling);
+
+  pulseRing = new T.Mesh(new T.RingGeometry(0.85, 1, 48),
+    new T.MeshBasicMaterial({ color: 0x7bf0ff, transparent: true, opacity: 0, side: T.DoubleSide, depthWrite: false, blending: T.AdditiveBlending, fog: false }));
+  pulseRing.visible = false;
+  scene.add(pulseRing);
+  overheadLight = new T.AmbientLight(0xffffff, 0);
+  scene.add(overheadLight);
+
+  _v1 = new T.Vector3();
+  ASSETS = makeAssets(T);
+  setupStage(currentStage);
+  onWindowResize();
+}
+
+/* --------------------------------------------------------------- SHELL: fixed-timestep loop
+ * Fiedler, "Fix Your Timestep!": accumulate real time, step the SIM at
+ * exactly SIM_STEP, render interpolated by alpha = simAcc / SIM_STEP. */
+let simAcc = 0;
+let simLast = 0;
+function resetSimClock() { simAcc = 0; simLast = performance.now(); }
+function animate(now) {
+  if (chapterReturned) return;
+  requestAnimationFrame(animate);
+  if (now === undefined) now = performance.now();
+  let frame = (now - simLast) / 1000;
+  simLast = now;
+  if (!(frame > 0)) frame = 0;
+  if (frame > SIM_MAX_FRAME) frame = SIM_MAX_FRAME;
+
+  if (!ready) { StaticFx.frame(now, arrival.arrived ? 1 : 0, !motionReduced()); return; }
+
+  const running = simRunning();
+  if (!running) simAcc = 0;
+  else {
+    simAcc += frame;
+    while (simAcc >= SIM_STEP) {
+      stepSim(sim, gatherInput());
+      simAcc -= SIM_STEP;
+      const p = sim.player;
+      if (p.walked >= nextStepAt) {
+        Sfx.footstep(p.sprinting);
+        nextStepAt = p.walked + (p.sprinting ? STEP_LEN_SPRINT : STEP_LEN);
+      }
+      // a stage clear or game end mid-burst pauses: drop the rest of the burst
+      if (sim.status !== 'play' && sim.status !== 'scare') { simAcc = 0; break; }
+    }
+  }
+  handleEvents();
+  // When paused, show the latest tick (alpha 1), not a step back in time.
+  renderFrame(simRunning() ? simAcc / SIM_STEP : 1, frame, now);
+}
+
+/* --------------------------------------------------------------- SHELL: boot, CDN loader, errors */
+function showError(title, msg, detail) {
+  const boot = $('boot');
+  boot.classList.remove('gone');
+  boot.classList.add('error');
+  $('err-title').textContent = title;
+  $('err-msg').textContent = msg;
+  $('err-detail').textContent = detail || '';
+  if (StaticFx.cv) { StaticFx.cv.classList.remove('top'); }
+  arrival.arrived = false;   // stop the boot static so the message is readable
+  if(embeddedSession && !$('error-return')) {
+    const button=document.createElement('button');button.id='error-return';button.className='btn';
+    button.textContent='RETURN TO TRAIL';button.addEventListener('click',returnToTrail);
+    $('err-retry').after(button);
+  }
+}
+function loadThree(i) {
+  if (window.THREE) { onThreeReady(); return; }
+  if (i >= THREE_SOURCES.length) {
+    showError('SIGNAL LOST', 'The local 3D engine and its network mirrors could not be loaded.', 'Tried: ' + THREE_SOURCES.join('  |  '));
+    return;
+  }
+  $('boot-status').textContent = i === 0 ? 'Establishing link to the facility...' : 'Primary link failed. Trying the backup relay...';
+  const s = document.createElement('script');
+  s.src = THREE_SOURCES[i];
+  s.async = true;
+  let done = false;
+  const next = () => { if (done) return; done = true; clearTimeout(timer); s.onload = s.onerror = null; loadThree(i + 1); };
+  const timer = setTimeout(next, THREE_TIMEOUT_MS);
+  s.onload = () => { if (done) return; if (window.THREE) { done = true; clearTimeout(timer); onThreeReady(); } else next(); };
+  s.onerror = next;
+  document.head.appendChild(s);
+}
+function onThreeReady() {
+  if (ready) return;
+  try {
+    initThree();
+  } catch (err) {
+    showError('SYSTEM FAILURE', 'The facility could not start: WebGL may be unavailable or disabled in this browser.', String(err && err.message || err));
+    return;
+  }
+  ready = true;
+  document.body.classList.add('ready');
+  $('boot').classList.add('gone');
+  showTitle();
+  if (arrival.arrived) startIntro();
+  resetSimClock();
+  if (embeddedSession) chapterSend('ready');
+}
+function readArrival() {
+  let raw = null, store = null;
+  try { store = window.localStorage; raw = store.getItem(HANDOFF_KEY); } catch (e) { store = null; }
+  const res = resolveArrival(raw, location.search, Date.now());
+  if (res.consume && store) { try { store.setItem(HANDOFF_KEY, consumeHandoff(raw, Date.now())); } catch (e) { /* ok */ } }
+  if (hasTrailParam(location.search)) {
+    // read once: a reload is a normal standalone start
+    try {
+      const q = new URLSearchParams(location.search);
+      q.delete('from');
+      const qs = q.toString();
+      history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+    } catch (e) { /* ok */ }
+  }
+  return res;
+}
+function boot() {
+  if (embeddedSession) window.addEventListener('message',event=>{
+    if(!ready || embeddedStarted || chapterReturned || !validChapterStart(event,parent,location.origin,embeddedSession))return;
+    embeddedStarted=true;
+    const lead=event.data.lead||{};
+    arrival={arrived:true,handoff:{dex:null,lead:{name:cleanName(lead.name),species:cleanName(lead.species),level:Math.max(1,Math.min(100,Number.isFinite(lead.level)?Math.floor(lead.level):1))}}};
+    setupStage(event.data.stage);showTitle();startIntro();
+  });
+  reducedMQ = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  if (reducedMQ && reducedMQ.addEventListener) reducedMQ.addEventListener('change', applySettings);
+  settings = loadSettings();
+  applySettings();
+  touchMode = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  if (touchMode) document.body.classList.add('touch');
+  document.body.classList.toggle('portrait', window.innerHeight > window.innerWidth);
+  StaticFx.init();
+  arrival = readArrival();
+  if (arrival.arrived) { StaticFx.cv.classList.add('top'); StaticFx.frame(performance.now(), 1, true); }
+  setupControls();
+  window.addEventListener('error', e => {
+    if (!ready) showError('SYSTEM FAILURE', 'The facility hit an error while starting.', String(e.message || ''));
+  });
+  resetSimClock();
+  requestAnimationFrame(animate);
+  loadThree(0);
+}
+
+/* --------------------------------------------------------------- exports (tests + playtests) */
+const __STATIC__ = {
+  SIM_STEP, SIM_MAX_FRAME, MAX_STAGES, WALK_SPEED, SPRINT_SPEED, STAMINA_DRAIN, STAMINA_REGEN,
+  JAMMER_DRAIN, BATTERY_REGEN, PULSE_COST, PULSE_RANGE, PULSE_COS, PULSE_STUN_TICKS, PULSE_KNOCKBACK,
+  KNOCK_FRICTION, PLAYER_RADIUS, ENEMY_RADIUS, AGGRO_RADIUS, RESONATOR_RANGE, STALKER_RANGE,
+  STALKER_OXY_DRAIN, CONTACT_RANGE, STATION_RANGE, SANITY_REFILL, OXY_REFILL, TERMINAL_RANGE,
+  SCARE_TICKS, EYE_HEIGHT, SPAWN, BOUNDS, NAV_CELL, NAV_REPLAN_TICKS, LOW_OXY, LOW_SANITY,
+  stageConfigs, walls, roomAt, inRefuge, clamp, lerp, easeOutBack,
+  overlapsWall, moveBox, segmentClear, buildNavGrid, getNav, cellOf, cellX, cellZ, nearestFreeCell,
+  computeField, fieldNext, pickWaypoint, aimFromYawPitch, rotateMove, pulseHits,
+  createSim, stepSim, firePulse, toggleJammer, toggleFlashlight, stageRouteReport,
+  KEYMAP, HELD_ACTIONS, actionForKey, keyMove, stickVector, lookStep, smoothFactor, PITCH_LIMIT, LOOK_MAX_DELTA,
+  SETTINGS_KEY, DEFAULT_SETTINGS, normalizeSettings,
+  HANDOFF_KEY, HANDOFF_VERSION, HANDOFF_MAX_AGE_MS, hasTrailParam, cleanName, parseHandoff, resolveArrival,
+  consumeHandoff, introLine, dossierLine, victoryLine,
+  makeAssets, buildStageView, disposeStageView, THREE_SOURCES, validChapterStart, floorPlanDescription
+};
+if (HAS_DOM) {
+  // Playtest seams (browser only): drive the game without pointer lock.
+  __STATIC__.debug = {
+    get sim() { return sim; },
+    get view() { return view; },
+    get renderer() { return renderer; },
+    get audio() { return Sfx.ctx ? Sfx.ctx.state : 'none'; },
+    get camera() { return camera; },
+    get state() { return { ready, isLocked, freePlay, overlayHidden, touchMode, stage: currentStage, status: sim && sim.status, arrival }; },
+    play() { Sfx.init(); freePlay = true; hideOverlay(); resetSimClock(); },
+    pause: () => pauseGame(),
+    setupStage: n => setupStage(n),
+    press, release, look,
+    overhead(on) { debugOverhead = !!on; overheadLight.intensity = on ? 1.2 : 0; scene.fog.density = on ? 0 : 0.1; }
+  };
+  globalThis.__STATIC__ = __STATIC__;
+  boot();
+} else {
+  globalThis.__STATIC__ = __STATIC__;
+}
+</script>
+</body>
+</html>

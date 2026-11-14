@@ -1,0 +1,21 @@
+# Python / tooling
+.venv/
+__pycache__/
+*.pyc
+
+# Local game saves
+monster-trail-save.json
+
+# Harness scratch state
+.claude/state/
+.claude/settings.local.json
+
+# Private: the user's own webcam recordings (CLAUDE.md: local only, never publish)
+combat/Webcam/
+combat/clips/*
+!combat/clips/README.md
+
+# Secrets
+.env*
+*.pem
+*.key

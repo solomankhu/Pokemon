@@ -1,0 +1,90 @@
+'use strict';
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict');
+const {pathToFileURL}=require('node:url');
+function findPlaywright(){
+ for(const candidate of [process.env.PLAYWRIGHT_MODULE,'playwright','@playwright/test'].filter(Boolean))try{return require(candidate);}catch(_){}
+ const cache=path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'npm-cache','_npx');
+ if(fs.existsSync(cache))for(const d of fs.readdirSync(cache))try{return require(path.join(cache,d,'node_modules','playwright'));}catch(_){}
+ throw Error('Install Playwright or set PLAYWRIGHT_MODULE to its installed package path.');
+}
+const {chromium}=findPlaywright(),root=path.join(__dirname,'..'),out=path.join(root,'.superpowers/sdd/2026-10-17-3d-combat/browser');
+function executable(){
+ if(process.env.BROWSER_EXECUTABLE)return process.env.BROWSER_EXECUTABLE;
+ if(fs.existsSync(chromium.executablePath()))return chromium.executablePath();
+ const cache=path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'ms-playwright');
+ if(fs.existsSync(cache))for(const d of fs.readdirSync(cache).filter(d=>/^chromium-/.test(d)).sort().reverse())for(const relative of ['chrome-win64/chrome.exe','chrome-linux/chrome','chrome-mac/Chromium.app/Contents/MacOS/Chromium']){const p=path.join(cache,d,relative);if(fs.existsSync(p))return p;}
+ throw Error('No installed Chromium found; set BROWSER_EXECUTABLE.');
+}
+fs.mkdirSync(out,{recursive:true});
+const gameUrl=process.env.GAME_URL||pathToFileURL(path.join(root,"claude's monsters.html")).href;
+const report={tests:[],errors:[],performance:[],screenshots:[]};let browser;
+async function test(name,fn){await fn();report.tests.push(name);console.log('PASS '+name);}
+async function shot(page,name){await page.screenshot({path:path.join(out,name+'.png')});report.screenshots.push(name+'.png');}
+async function seed(page,mine='emberling',foe='thornmane',arena='meadow'){
+ await page.evaluate(({mine,foe,arena})=>{const g=__GAME__,G=g.G;G.mode='overworld';G.flags={starter:true,gym:true};G.party=[g.makeMon(mine,25)];G.settings={actionMode:'ON',quality:'STANDARD',reducedMotion:false,basicMode:false};g.startBattle(g.makeMon(foe,25));const b=G.battle;b.queue=[];b.step=null;b.phase='menu';b.arena=arena;}, {mine,foe,arena});
+ await page.waitForFunction(()=>__GAME__.battleHost?.is3D(),{timeout:30000});
+}
+async function freezeMove(page,moveId,elapsed,actor='mine',result={missed:false,eff:1,crit:false,dmg:10}){
+ await page.evaluate(({moveId,elapsed,actor,result})=>{const g=__GAME__,b=g.G.battle,r=MonsterRecipes.recipeFor(moveId);b.queue=[];b.step={t:'msg',s:moveId.toUpperCase()+' - VISUAL CHECK'};b.action={id:Date.now()+Math.random(),actor,target:actor==='mine'?'foe':'mine',moveId,result,duration:r.duration,contactAt:r.contactAt,elapsed};g.battleHost.presenter.play(b.action);g.battleHost.presenter.sync(g.battleSnapshot());g.battleHost.presenter.update(0);g.battleHost.presenter.render();}, {moveId,elapsed,actor,result});
+}
+(async()=>{
+ browser=await chromium.launch({headless:true,executablePath:executable()});
+ try{
+  const page=await browser.newPage({viewport:{width:1280,height:900}});
+  page.on('pageerror',e=>report.errors.push(e.message));page.on('console',m=>{if(m.type()==='error')report.errors.push(m.text());});
+  await page.goto(gameUrl);await page.waitForFunction(()=>globalThis.__GAME__?.battleHost);
+  await test('live 3D arena with articulated fighters',async()=>{
+   await seed(page);assert.equal(await page.evaluate(()=>__GAME__.battleHost.presenter.diagnostics.models),2);await shot(page,'battle-3d-meadow');
+  });
+  await test('visible fire and wind moves in both directions',async()=>{
+   for(const [move,side] of [['flameburst','mine'],['gust','foe'],['metalclaw','mine'],['leafblade','mine'],['aquatail','foe'],['thunderbolt','mine'],['vinewhip','mine']]){
+    const elapsed=await page.evaluate(id=>{const r=MonsterRecipes.recipeFor(id);return r.windup+r.travel*.55;},move);await freezeMove(page,move,elapsed,side);await shot(page,'action-'+move+'-'+side);
+   }
+  });
+  await test('every move recipe renders in both directions without errors',async()=>{
+   const moves=await page.evaluate(()=>Object.keys(__GAME__.MOVES));
+   for(const move of moves)for(const actor of ['mine','foe']){
+    const elapsed=await page.evaluate(id=>MonsterRecipes.recipeFor(id).contactAt-.07,move);await freezeMove(page,move,elapsed,actor);
+   }
+   assert.equal(moves.length,47);
+  });
+  await test('every species builds in live 3D and has a reference frame',async()=>{
+   const ids=await page.evaluate(()=>Object.keys(__GAME__.SPECIES));
+   for(const id of ids){await page.evaluate(id=>{const g=__GAME__,b=g.G.battle;b.mine=g.makeMon(id,25);b.dispMine=b.mine.hp;b.action=null;b.step={t:'msg',s:id.toUpperCase()};g.battleHost.presenter.sync(g.battleSnapshot());},id);await shot(page,'species-'+id);}
+   assert.equal(ids.length,26);
+  });
+  await test('all five regional arenas and hunt presentation',async()=>{
+   for(const arena of ['meadow','shore','pass','ruins','cave']){await page.evaluate(a=>{const g=__GAME__;g.G.battle.arena=a;g.G.battle.hunt=a==='cave';},arena);await page.waitForFunction(a=>__GAME__.battleHost.presenter.diagnostics.arena===a,arena);await shot(page,'arena-'+arena);}
+   await page.evaluate(()=>__GAME__.G.battle.hunt=false);
+  });
+  await test('actual strike and hold/release command input',async()=>{
+   await page.evaluate(()=>{const g=__GAME__,b=g.G.battle;b.queue=[];b.step=null;b.action=null;g.qCommand(b,'strike',r=>{b.testResult=r;});});
+   await page.waitForFunction(()=>__GAME__.G.battle.command?.elapsed>=.6);await page.keyboard.press('z');
+   await page.waitForFunction(()=>__GAME__.G.battle.testResult);
+   assert.ok(await page.evaluate(()=>['GOOD','PERFECT'].includes(__GAME__.G.battle.testResult?.tier)));
+   await page.evaluate(()=>{const g=__GAME__,b=g.G.battle;b.testResult=null;b.queue=[];b.step=null;g.qCommand(b,'charge',r=>b.testResult=r);});
+   await page.waitForFunction(()=>__GAME__.G.battle.command?.kind==='charge');await page.keyboard.down('z');
+   await page.waitForFunction(()=>__GAME__.G.battle.command?.elapsed>=.78);await page.keyboard.up('z');await page.waitForFunction(()=>__GAME__.G.battle.testResult);
+   assert.ok(await page.evaluate(()=>['GOOD','PERFECT'].includes(__GAME__.G.battle.testResult.tier)));
+  });
+  await test('quality and accessibility settings rebuild safely',async()=>{
+   await page.getByRole('button',{name:'Battle settings',exact:true}).click();
+   await page.getByLabel('Action commands').selectOption('AUTO');await page.getByLabel('Effects quality').selectOption('LOW');
+   await page.getByLabel('Reduced motion').check();await page.getByRole('button',{name:'Apply settings',exact:true}).click();await page.getByRole('button',{name:'Close',exact:true}).click();
+   await page.waitForFunction(()=>__GAME__.battleHost.is3D());assert.equal(await page.evaluate(()=>__GAME__.G.settings.actionMode),'AUTO');
+   await shot(page,'battle-low-reduced-motion');
+  });
+  await test('twenty battles reuse one renderer and leave exploration clean',async()=>{
+   for(let i=0;i<20;i++){
+    await page.evaluate(()=>{__GAME__.G.mode='overworld';__GAME__.G.battle=null;});await page.waitForFunction(()=>!__GAME__.battleHost.diagnostics.active);
+    await seed(page,i%2?'dripling':'emberling',i%2?'galebeak':'thornmane',i%2?'shore':'meadow');
+    assert.equal(await page.evaluate(()=>__GAME__.battleHost.presenter.diagnostics.rendererCount),1);
+   }
+  });
+  await test('standard rendering performance sample',async()=>{
+   const stats=await page.evaluate(async()=>{const samples=[],cpu=[];let last=performance.now();for(let i=0;i<120;i++){await new Promise(requestAnimationFrame);const now=performance.now();samples.push(now-last);last=now;const start=performance.now();__GAME__.battleHost.presenter.render();cpu.push(performance.now()-start);}const percentile=(a,p)=>a.slice().sort((x,y)=>x-y)[Math.floor((a.length-1)*p)];return {userAgent:navigator.userAgent,viewport:[innerWidth,innerHeight],frameMedian:percentile(samples,.5),frameP95:percentile(samples,.95),cpuMedian:percentile(cpu,.5),cpuP95:percentile(cpu,.95),slowFrames:samples.filter(n=>n>33.4).length};});report.performance.push(stats);console.log('PERFORMANCE '+JSON.stringify(stats));
+  });
+  await page.close();
+ }finally{if(browser)await browser.close();fs.writeFileSync(path.join(out,'combat-browser-results.json'),JSON.stringify(report,null,2));}
+ assert.deepEqual(report.errors,[],'browser has no unexpected errors');console.log(report.tests.length+' 3D browser scenarios passed.');
+})().catch(e=>{console.error(e);process.exitCode=1;});

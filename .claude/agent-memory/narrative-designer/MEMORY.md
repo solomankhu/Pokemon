@@ -1,0 +1,1 @@
+- [Story slots and constraints](project_story_slots.md) — box budget, flag-keyed slots, Python has no chapter, story.md is the bible

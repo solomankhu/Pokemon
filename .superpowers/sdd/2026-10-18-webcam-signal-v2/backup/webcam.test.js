@@ -1,0 +1,138 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs');
+assert.ok(fs.existsSync(__dirname+'/webcam.js'),'webcam module must exist');
+const realRandom=Math.random;let randomCalls=0;Math.random=()=>{randomCalls++;return realRandom();};
+const W=require('./webcam.js');let checks=0;
+const ok=(v,m)=>{assert.ok(v,m);checks++;};
+const near=(a,b,e,m)=>ok(Math.abs(a-b)<=e,m+' ('+a+' vs '+b+')');
+const N=W.FRAME_W*W.FRAME_H;
+function frame(v=0){return new Uint8Array(N).fill(v);}
+// Zone c,r covers x in [c*80/3, (c+1)*80/3) and y in [r*20, r*20+20): cols 0..26, 27..53, 54..79.
+const COLS=[[0,26],[27,53],[54,79]];
+function paint(f,zone,v){const c=zone%3,r=Math.floor(zone/3);for(let y=r*20;y<r*20+20;y++)for(let x=COLS[c][0];x<=COLS[c][1];x++)f[y*W.FRAME_W+x]=v;return f;}
+
+// --- classifyMotion ---
+{const r=W.classifyMotion(frame(),frame(),{});ok(r.event===null&&r.total===0,'still scene: no event');ok(r.centroidX===null&&r.centroidY===null,'still scene: null centroid');ok(r.zones.length===9,'nine zones');}
+{const r=W.classifyMotion(frame(),paint(frame(),4,255),{});ok(r.event==='burst','centre burst');near(r.zones[4],1,1e-9,'centre full');ok(r.zones.every((v,i)=>i===4||v===0),'only centre moves');near(r.centroidX,.5,.02,'centroid x mid');near(r.centroidY,.5,.03,'centroid y mid');}
+{const r=W.classifyMotion(frame(),frame(255),{});ok(r.event==='noisy','full-frame motion is noisy');near(r.total,1,1e-9,'total 1');}
+{const f=paint(paint(frame(),0,255),2,255);const r=W.classifyMotion(frame(),f,{});ok(r.event===null,'corners only: no burst');ok(r.zones[0]>.99&&r.zones[2]>.99,'corner zones full');}
+{const r=W.classifyMotion(frame(),paint(frame(),4,20),{threshold:W.THRESHOLDS.MED});ok(r.zones[4]===0,'diff 20 below MED threshold');}
+{const r=W.classifyMotion(frame(),paint(frame(),4,20),{threshold:W.THRESHOLDS.HIGH});near(r.zones[4],1,1e-9,'diff 20 above HIGH threshold');}
+{const floor=[0,0,0,0,.5,0,0,0,0];const r=W.classifyMotion(frame(),paint(frame(),4,255),{noiseFloor:floor});near(r.zones[4],.5,1e-9,'per-zone noise floor subtracted');}
+{const floor=[0,0,0,0,2,0,0,0,0];const r=W.classifyMotion(frame(),paint(frame(),4,255),{noiseFloor:floor});ok(r.zones[4]===0&&r.event===null,'floor never goes negative');}
+{const f=paint(frame(),3,255);const plain=W.classifyMotion(frame(),f,{}),mir=W.classifyMotion(frame(),f,{mirror:true});ok(plain.centroidX<.4&&plain.zones[3]>.99,'left zone unmirrored');ok(mir.centroidX>.6&&mir.zones[5]>.99,'mirror flips x');}
+{const a=frame(),b=paint(frame(),4,255),t0=process.hrtime.bigint();for(let i=0;i<1000;i++)W.classifyMotion(i%2?a:b,i%2?b:a,{});const ms=Number(process.hrtime.bigint()-t0)/1e6;ok(ms<1000,'1000 classifications under 1 s ('+ms.toFixed(0)+' ms)');}
+
+// --- tracker ---
+function M(z4=0,extra={}){const zones=[0,0,0,0,z4,0,0,0,0];if(extra.corners){zones[0]=extra.corners;zones[2]=extra.corners;}return {zones,total:extra.total??(z4>0||extra.corners?.2:0),centroidX:extra.cx??(z4>0||extra.corners?.5:null),centroidY:extra.cy??(z4>0||extra.corners?.5:null),event:extra.event??(z4>=W.BURST_MIN?'burst':null)};}
+function run(steps,cmd){let t=W.createTracker();const out=[];for(const [ms,motion,c] of steps){const r=W.stepTracker(t,{motion,command:c===undefined?cmd:c},ms);t=r.tracker;out.push(...r.intents.map(i=>({...i,ms})));}return {t,out};}
+const strike={kind:'strike',ready:true,waitingRelease:false,held:false};
+// burst mapping, row by row
+{const {out}=run([[0,M(.5)]],{kind:'strike',ready:false,waitingRelease:false,held:false});ok(out.length===1&&out[0].type==='arm','not ready: arm');}
+{const {out}=run([[0,M(.5)]],{kind:'strike',ready:true,waitingRelease:true,held:false});ok(out.length===0,'waitingRelease: nothing');}
+{const {out}=run([[0,M(.5)]],strike);ok(out.length===1&&out[0].type==='press'&&out[0].lagged,'strike: lagged press');}
+{const {out}=run([[0,M(.5)]],{kind:'guard',ready:true,waitingRelease:false,held:false});ok(out[0].type==='press','guard: press');}
+{const {t,out}=run([[0,M(.5)]],{kind:'charge',ready:true,waitingRelease:false,held:false});ok(out[0].type==='press'&&t.status==='holding','charge not held: press, holding');}
+{const {t,out}=run([[0,M(.5)]],{kind:'catch',ready:true,waitingRelease:false,held:true});ok(out[0].type==='release'&&out[0].lagged&&t.status==='idle','held: release (keyboard press, webcam release)');}
+{const {t,out}=run([[0,M(.5),{kind:'charge',ready:true,waitingRelease:false,held:false}],[100,M(0),{kind:'charge',ready:true,waitingRelease:false,held:true}],[200,M(0),null]]);ok(out.length===1&&t.status==='idle','abandoned charge: idle, nothing emitted');}
+// hysteresis and cooldown
+{const {out}=run([[0,M(.5)],[300,M(.5)],[350,M(.05)],[400,M(.5)]],strike);ok(out.length===2&&out[1].ms===400,'re-fire only after falling below half');}
+{const {out}=run([[0,M(.5)],[50,M(.05)],[100,M(.5)]],strike);ok(out.length===1,'cooldown blocks a quick second onset');}
+{const {out}=run([[0,M(.5)],[100,M(.12)],[300,M(.5)]],strike);ok(out.length===1,'dip to .12 is not below half: no re-fire');}
+// noisy
+{const {t,out}=run([[0,M(.9,{event:'noisy'})]],strike);ok(out.length===0&&t.status==='noisy','noisy blocks intents');}
+{const {out}=run([[0,M(.9,{event:'noisy'})],[100,M(.05)],[400,M(.5)]],strike);ok(out.length===1&&out[0].ms===400,'recovers after noise');}
+// menus: delayed confirm, sweeps, cancel
+{const {out}=run([[0,M(.5)],[100,M(0)],[2000,M(0)]],null);ok(out.length===0,'one stray burst never confirms a menu');}
+{const {out}=run([[0,M(.5)],[100,M(0)],[400,M(.5)]],null);ok(out.length===1&&out[0].type==='key'&&out[0].key==='z'&&out[0].ms===400,'double burst confirms');}
+{const {out}=run([[0,M(.5)],[100,M(0)],[1200,M(.5)]],null);ok(out.length===0,'bursts too far apart do not confirm');}
+{const {out}=run([[0,M(.5)],[100,M(0)],[1200,M(.5)],[1300,M(0)],[1600,M(.5)]],null);ok(out.length===1&&out[0].ms===1600,'a late burst starts a new pair');}
+{const {out}=run([[0,M(.05,{cx:.1,total:.1})],[100,M(.5,{cx:.4,total:.2})],[200,M(.05,{cx:.7,total:.1})],[700,M(0)]],null);ok(out.length===1&&out[0].key==='arrowright','sweep right, burst suppressed');}
+{const {out}=run([[0,M(.05,{cx:.9,total:.1})],[200,M(.05,{cx:.3,total:.1})]],null);ok(out.length===1&&out[0].key==='arrowleft','sweep left');}
+{const {out}=run([[0,M(.05,{cy:.1,total:.1})],[200,M(.05,{cy:.8,total:.1})]],null);ok(out[0].key==='arrowdown','sweep down');}
+{const {out}=run([[0,M(.05,{cy:.9,total:.1})],[200,M(.05,{cy:.2,total:.1})]],null);ok(out[0].key==='arrowup','sweep up');}
+{const {out}=run([[0,M(.05,{cx:.1,total:.1})],[500,M(.05,{cx:.9,total:.1})]],null);ok(out.length===0,'too slow is not a sweep');}
+{const {out}=run([[0,M(.05,{cx:.1,total:.1})],[200,M(.05,{cx:.9,total:.1})]],strike);ok(out.length===0,'no sweeps during a command');}
+{const s=[];for(let ms=0;ms<=1600;ms+=100)s.push([ms,M(0,{corners:.5})]);const {out}=run(s,null);ok(out.length===1&&out[0].key==='x'&&out[0].ms===1500,'two-hand hold cancels once at 1500 ms');}
+{const s=[];for(let ms=0;ms<=1400;ms+=100)s.push([ms,M(0,{corners:.5})]);s.push([1450,M(0)]);for(let ms=1500;ms<=2900;ms+=100)s.push([ms,M(0,{corners:.5})]);const {out}=run(s,null);ok(out.length===0,'cancel needs a continuous hold');}
+{const s=[];for(let ms=0;ms<=1600;ms+=100)s.push([ms,M(0,{corners:.5})]);const {out}=run(s,strike);ok(out.length===0,'no cancel during a command');}
+{const t=W.createTracker(),copy=JSON.stringify(t);W.stepTracker(t,{motion:M(.5),command:strike},0);ok(JSON.stringify(t)===copy,'stepTracker does not mutate its input');}
+
+// --- helpers ---
+ok(W.computeLag([1100,2650,4120],[1000,2500,4000])===120,'median lag');
+ok(W.computeLag([900,2400,3900],[1000,2500,4000])===0,'early punches clamp to 0');
+ok(W.computeLag([1500,3000,4500],[1000,2500,4000])===300,'clamp to 300');
+ok(W.computeLag([],[])===null,'no samples: null');
+ok(W.computeLag([1100,2600],[1000,2500,4000])===100,'pairs only as many as both have');
+{const g=W.toGray(new Uint8ClampedArray([255,255,255,255,0,0,0,255,255,0,0,255]),new Uint8Array(3));ok(g[0]===255&&g[1]===0&&g[2]===76,'rgba to gray (BT.601 integer)');}
+near(W.lagToCommandTime(.5,200),.5-.2*.55,1e-12,'lag converted to command time');
+ok(W.lagToCommandTime(.05,300)===0,'never before the window opened');
+ok(W.lagToCommandTime(.5,NaN)===.5,'bad lag means no correction');
+// --- controller (stubbed browser) ---
+let imageFn=()=>new Uint8ClampedArray(N*4);
+class El{constructor(tag){this.tagName=tag;this.style={};this.children=[];this.attributes={};}appendChild(e){this.children.push(e);e.parentNode=this;return e;}removeChild(e){this.children.splice(this.children.indexOf(e),1);e.parentNode=null;}setAttribute(k,v){this.attributes[k]=v;}getContext(){return {drawImage(){},getImageData:()=>({data:imageFn()})};}play(){return Promise.resolve();}}
+function env(opts={}){
+ const body=new El('body'),timers=new Map();let id=0,clock=0;const calls={gum:0,press:[],release:[],input:[],settings:[],status:[]};const tracks=[],hooks={};let settings=Object.assign({webcam:'ON',webcamSensitivity:'MED',webcamMirror:true,webcamLagMs:120},opts.settings);
+ const gum=opts.gum||(()=>{calls.gum++;const tr={stopped:false,on:{},stop(){this.stopped=true;},addEventListener(k,f){this.on[k]=f;}};tracks.push(tr);return Promise.resolve({getTracks:()=>[tr]});});
+ const g={navigator:opts.noMedia?{}:{mediaDevices:{getUserMedia:(...a)=>{if(opts.gum)calls.gum++;return gum(...a);}}}};
+ let gen=0,inputOpen=true,command=opts.command||null,clockVal=.5;
+ const docStub={body,createElement:t=>new El(t),hidden:false};
+ const c=W.createWebcamController({global:g,doc:docStub,now:()=>clock,setTimeout:(f,ms)=>{timers.set(++id,f);return id;},clearTimeout:i=>timers.delete(i),
+  getSettings:()=>settings,setSettings:s=>{settings=s;calls.settings.push(s);},getCommand:()=>command,commandClock:()=>clockVal,pauseGeneration:()=>gen,isInputOpen:()=>inputOpen,
+  press:k=>{calls.press.push(k);if(hooks.press)hooks.press(k);},release:k=>calls.release.push(k),commandInput:(p,r,at)=>calls.input.push([p,r,at]),onStatus:s=>{calls.status.push(s);if(hooks.status)hooks.status(s);}});
+ return {c,body,timers,calls,tracks,hooks,set docHidden(v){docStub.hidden=v;},set clock(v){clock=v;},get clock(){return clock;},bumpGen(){gen++;},set inputOpen(v){inputOpen=v;},set command(v){command=v;},set clockVal(v){clockVal=v;},get settings(){return settings;}};
+}
+const flush=()=>new Promise(r=>setImmediate(r));
+// drive warm-up to live with still frames: first frame discarded, floor measured over WARMUP_MS
+function warm(e){e.c.processFrame(frame(),0);for(let t=33;t<=W.SETTLE_MS+W.WARMUP_MS+33;t+=33)e.c.processFrame(frame(),t);}
+async function controllerTests(){
+ {const e=env({noMedia:true});ok(!e.c.supported(),'unsupported without mediaDevices');ok(await e.c.start()==='unavailable','start reports unavailable');ok(e.settings.webcam==='OFF','unavailable turns the setting OFF');}
+ {const e=env();ok(e.c.supported(),'supported');e.c.sync(true);e.c.sync(true);ok(e.calls.gum===1,'one getUserMedia while starting');await flush();ok(e.c.state==='warmup','warm-up after the stream opens');ok(e.body.children.length===1&&e.body.children[0].tagName==='video','hidden video attached');ok(e.body.children[0].muted===true,'video muted');ok(e.timers.size===1,'one sample timer');
+  e.c.sync(false);ok(e.tracks[0].stopped,'track stopped on sync(false)');ok(e.body.children.length===0&&e.timers.size===0,'video and timer removed');ok(e.c.state==='off','off');}
+ {const e=env();for(let i=0;i<10;i++){e.c.sync(true);await flush();e.c.sync(false);}ok(e.calls.gum===10&&e.tracks.every(t=>t.stopped),'10 cycles stop every track');ok(e.body.children.length===0&&e.timers.size===0,'10 cycles leave nothing behind');}
+ {const e=env({gum:()=>Promise.reject(Object.assign(Error('no'),{name:'NotAllowedError'}))});e.c.sync(true);await flush();ok(e.c.state==='denied'&&e.settings.webcam==='OFF','denied turns OFF');ok(e.calls.status.includes('denied'),'denied reported');e.c.sync(true);await flush();ok(e.calls.gum===1,'no re-prompt until sync(false)');}
+ {let resolve;const e=env({gum:()=>new Promise(r=>resolve=r)});e.c.sync(true);e.c.sync(false);const tr={stopped:false,stop(){this.stopped=true;},addEventListener(){}};resolve({getTracks:()=>[tr]});await flush();ok(tr.stopped&&e.body.children.length===0,'stream arriving after stop is closed at once');}
+ {const e=env();e.c.sync(true);await flush();e.tracks[0].on.ended();ok(e.c.state==='ended'&&e.tracks[0].stopped,'track ended stops the controller');ok(e.settings.webcam==='OFF'&&e.calls.status.includes('ended'),'ended turns OFF and reports');}
+ // pipeline
+ {const e=env({command:strike});e.c.sync(true);await flush();e.c.processFrame(frame(),0);e.c.processFrame(paint(frame(),4,255),33);ok(e.calls.input.length===0,'first frames are warm-up: nothing dispatched');}
+ {const e=env({command:strike});e.c.sync(true);await flush();warm(e);ok(e.c.state==='live','live after warm-up');ok(e.c.noiseFloor.every(v=>v===0),'still room: zero floor');
+  e.c.processFrame(paint(frame(),4,255),2000);ok(e.calls.input.length===1,'burst dispatched');const [p,r,at]=e.calls.input[0];ok(p===true&&r===false,'as a press');near(at,.5-.12*.55,1e-9,'lag-corrected command time');}
+ {const e=env({command:strike});e.c.sync(true);await flush();warm(e);e.clockVal=.02;e.c.processFrame(paint(frame(),4,255),2000);ok(e.calls.input[0][2]===0,'at clamps to 0');}
+ {const e=env({command:{kind:'strike',ready:false,waitingRelease:false,held:false}});e.c.sync(true);await flush();warm(e);e.c.processFrame(paint(frame(),4,255),2000);ok(e.calls.input.length===2&&e.calls.input[0][0]===true&&e.calls.input[1][1]===true&&e.calls.input.every(x=>x[2]===undefined),'arm is press+release with no timestamp');}
+ {const e=env({command:strike});e.c.sync(true);await flush();warm(e);e.bumpGen();e.c.processFrame(paint(frame(),4,255),2000);ok(e.calls.input.length===0,'pause during the lag window drops the press');}
+ {const e=env({command:strike});e.c.sync(true);await flush();warm(e);e.inputOpen=false;e.c.processFrame(paint(frame(),4,255),2000);ok(e.calls.input.length===0,'closed input drops the press');}
+ {const e=env();e.c.sync(true);await flush();warm(e);e.c.processFrame(paint(frame(),4,255),2000);e.c.processFrame(frame(),2100);e.c.processFrame(frame(),2133);ok(e.calls.press.length===0,'single menu burst does nothing');e.c.processFrame(paint(frame(),4,255),2400);ok(e.calls.press.join()==='z','double burst presses confirm');e.c.processFrame(frame(),2433);ok(e.calls.release.join()==='z','released on the next sample');}
+ {const e=env({command:strike});e.c.sync(true);await flush();warm(e);e.c.processFrame(frame(255),2000);ok(e.c.state==='noisy'&&e.calls.input.length===0,'noisy scene: no input');}
+ {const e=env({command:strike});e.c.sync(true);await flush();const noisy=frame();for(let i=0;i<N;i+=7)noisy[i]=255;e.c.processFrame(frame(),0);for(let t=33;t<=W.SETTLE_MS+W.WARMUP_MS+33;t+=33)e.c.processFrame(t%66?noisy:frame(),t);ok(e.c.noiseFloor.some(v=>v>0),'busy room: floor measured per zone');ok(e.c.noiseFloor.every(v=>v<=W.BURST_MIN/2),'floor capped at half a burst');}
+ {const e=env({command:strike});e.c.sync(true);await flush();e.c.processFrame(frame(),0);for(let t=33;t<W.SETTLE_MS;t+=33)e.c.processFrame(t%66?frame(255):frame(),t);for(let t=W.SETTLE_MS;t<=W.SETTLE_MS+W.WARMUP_MS+33;t+=33)e.c.processFrame(frame(),t);ok(e.c.noiseFloor.every(v=>v===0),'settle frames (exposure flicker) are not measured');}
+ {const e=env();e.c.sync(true);await flush();warm(e);e.c.processFrame(paint(frame(),4,255),2000);e.c.processFrame(frame(),2300);e.c.processFrame(frame(),2333);e.c.processFrame(paint(frame(),4,255),2400);ok(e.calls.press.join()==='z','pending key');e.c.sync(false);ok(e.calls.release.join()==='z','stopping releases the pending key');}
+ {const e=env();e.c.sync(true);await flush();const [id,f]=[...e.timers][0];e.timers.delete(id);e.docHidden=true;f();ok(e.c.state==='off'&&e.tracks[0].stopped,'hidden tab: sampler stops the camera itself');}
+ {let resolve;const e=env({gum:()=>new Promise(r=>resolve=r)});e.c.sync(true);e.c.sync(false);e.c.sync(true);const tr={stopped:false,stop(){this.stopped=true;},addEventListener(){}};resolve({getTracks:()=>[tr]});await flush();ok(e.calls.gum===1&&!tr.stopped&&e.c.state==='warmup','a blur during the permission prompt does not abort or re-prompt');}
+ {const e=env({command:strike});e.c.sync(true);await flush();warm(e);ok(e.calls.input.length===0,'no dispatch during warm-up');e.c.processFrame(paint(frame(),4,255),3000);ok(e.calls.input.length===1,'first burst after warm-up is not mistaken for a pause');}
+ {const e=env();e.c.sync(true);await flush();warm(e);const seen=[];e.c.setCalibrationListener((m,t)=>seen.push([m.event,t]));e.inputOpen=false;e.c.processFrame(paint(frame(),4,255),2000);ok(seen.length===1&&seen[0][0]==='burst','calibration listener sees motion while input is closed');e.c.setCalibrationListener(null);}
+ {const e=env();e.c.sync(true);await flush();warm(e);e.c.measureFloor(2000);ok(e.c.state==='warmup','measureFloor restarts warm-up');}
+ {const e=env();e.c.sync(true);await flush();e.c.dispose();ok(e.tracks[0].stopped&&e.timers.size===0,'dispose stops everything');e.c.sync(true);ok(e.calls.gum===1,'disposed controller never restarts');}
+ // --- review fixes ---
+ // re-entrancy: a callback that stops the controller ends processFrame at once
+ {const e=env({command:strike});e.c.sync(true);await flush();warm(e);e.c.setCalibrationListener(()=>e.c.stop());e.c.processFrame(paint(frame(),4,255),2000);ok(e.c.state==='off','listener stop: state stays off');ok(e.calls.input.length===0,'listener stop: no command input after halt');}
+ {const e=env({command:strike});e.c.sync(true);await flush();warm(e);e.c.processFrame(frame(255),2000);e.hooks.status=s=>{if(s==='live')e.c.stop();};e.c.processFrame(frame(255),2033);ok(e.c.state==='off','onStatus stop: state stays off');ok(e.calls.input.length===0,'onStatus stop: nothing dispatched');}
+ {const e=env();e.c.sync(true);await flush();warm(e);e.hooks.press=()=>e.c.stop();e.c.processFrame(paint(frame(),4,255),2000);e.c.processFrame(frame(),2100);e.c.processFrame(frame(),2133);e.c.processFrame(paint(frame(),4,255),2400);ok(e.c.state==='off'&&e.calls.press.join()==='z','press stop: one press, state off');ok(e.calls.release.join()==='z','press stop: the key is released, never stuck');}
+ // status handlers already see the setting OFF
+ {let seen=null;const e=env({gum:()=>Promise.reject(Object.assign(Error('no'),{name:'NotAllowedError'}))});e.hooks.status=s=>{if(s==='denied')seen=e.settings.webcam;};e.c.sync(true);await flush();ok(seen==='OFF','onStatus(denied) sees webcam OFF');}
+ // a camera that never delivers frames fails after READY_TIMEOUT_MS
+ ok(W.READY_TIMEOUT_MS===3000,'READY_TIMEOUT_MS exported');
+ {const e=env({command:strike});e.c.sync(true);await flush();e.c.video.readyState=0;e.c.processFrame(frame(),0);for(let t=33;t<=3000;t+=33)e.c.processFrame(frame(),t);ok(e.c.state==='warmup','still waiting before the timeout');e.c.processFrame(frame(),3100);ok(e.c.state==='unavailable'&&e.tracks[0].stopped,'readyState<2 for 3 s: unavailable, camera stopped');ok(e.settings.webcam==='OFF','ready timeout turns the setting OFF');}
+ {const e=env({command:strike});e.c.sync(true);await flush();e.c.video.readyState=0;e.c.processFrame(frame(),0);for(let t=33;t<=2000;t+=33)e.c.processFrame(frame(),t);e.c.video.readyState=4;for(let t=2033;t<=2000+W.SETTLE_MS+W.WARMUP_MS+66;t+=33)e.c.processFrame(frame(),t);ok(e.c.state==='live','a slow camera that becomes ready goes live');}
+ // transient errors keep the setting and retry next battle; permission errors turn it off
+ {const e=env({gum:()=>Promise.reject(Object.assign(Error('busy'),{name:'NotReadableError'}))});e.c.sync(true);await flush();ok(e.c.state==='unavailable'&&e.settings.webcam==='ON','busy camera: unavailable, setting kept');e.c.sync(true);await flush();ok(e.calls.gum===1,'busy camera: no retry within the battle');e.c.sync(false);e.c.sync(true);await flush();ok(e.calls.gum===2,'busy camera: retried next battle');}
+ {const e=env({gum:()=>Promise.reject(Object.assign(Error('no'),{name:'SecurityError'}))});e.c.sync(true);await flush();ok(e.c.state==='denied'&&e.settings.webcam==='OFF','SecurityError: denied, setting OFF');}
+ // the sampler: frames from ticks never alias the previous frame
+ {const e=env({command:strike});e.c.sync(true);await flush();const white=new Uint8ClampedArray(N*4);for(let i=0;i<N;i++){const y=Math.floor(i/W.FRAME_W),x=i%W.FRAME_W;if(y>=20&&y<40&&x>=27&&x<=53)white[i*4]=white[i*4+1]=white[i*4+2]=255;}
+  const tickAt=ms=>{e.clock=ms;const [id,f]=[...e.timers][0];e.timers.delete(id);f();};imageFn=()=>new Uint8ClampedArray(N*4);for(let ms=0;ms<=W.SETTLE_MS+W.WARMUP_MS+66;ms+=33)tickAt(ms);ok(e.c.state==='live','ticks drive warm-up to live');
+  imageFn=()=>white;tickAt(2000);imageFn=()=>new Uint8ClampedArray(N*4);ok(e.calls.input.length===1,'a burst seen through ticks is dispatched (buffers do not alias)');e.c.stop();}
+}
+controllerTests().then(()=>{
+ ok(randomCalls===0,'webcam module never calls Math.random');
+ ok(!/Math\.random|Date\.now/.test(fs.readFileSync(__dirname+'/webcam.js','utf8').split('function createWebcamController')[0]),'pure layers never read Math.random/Date.now');
+ console.log('webcam: '+checks+' checks passed');
+}).catch(e=>{console.error(e);process.exitCode=1;});

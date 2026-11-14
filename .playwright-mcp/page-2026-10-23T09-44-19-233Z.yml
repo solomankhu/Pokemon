@@ -1,0 +1,50 @@
+- generic [ref=f1e1]:
+  - button "Battle settings" [ref=f1e4] [cursor=pointer]: ⚙ SETTINGS
+  - dialog "Battle settings" [ref=f1e5]:
+    - generic [ref=f1e6]:
+      - heading "Battle settings" [level=2] [ref=f1e7]
+      - paragraph
+      - generic [ref=f1e8]:
+        - text: Action commands
+        - combobox "Action commands" [active] [ref=f1e9]:
+          - option "ON" [selected]
+          - option "ASSIST"
+          - option "AUTO"
+      - generic [ref=f1e10]:
+        - text: Effects quality
+        - combobox "Effects quality" [ref=f1e11]:
+          - option "HIGH"
+          - option "STANDARD" [selected]
+          - option "LOW"
+      - generic [ref=f1e12]:
+        - checkbox "Reduced motion" [ref=f1e13]
+        - text: Reduced motion
+      - generic [ref=f1e14]:
+        - checkbox "Basic presentation (2D)" [ref=f1e15]
+        - text: Basic presentation (2D)
+      - generic [ref=f1e16]:
+        - text: Webcam control
+        - combobox "Webcam control" [ref=f1e17]:
+          - option "OFF" [selected]
+          - option "ON"
+      - generic [ref=f1e18]:
+        - text: Webcam gain
+        - slider "Webcam gain, 1 calm to 9 sensitive" [ref=f1e19]: "5"
+        - text: "5"
+      - generic [ref=f1e20]:
+        - text: Punch zone
+        - combobox "Punch zone" [ref=f1e21]:
+          - option "CENTER" [selected]
+          - option "LEFT"
+          - option "RIGHT"
+      - generic [ref=f1e22]:
+        - checkbox "Mirror webcam" [checked] [ref=f1e23]
+        - text: Mirror webcam
+      - generic [ref=f1e24]:
+        - checkbox "Show webcam overlay in battle" [ref=f1e25]
+        - text: Show webcam overlay in battle
+      - button "Calibrate webcam" [disabled] [ref=f1e26]
+      - button "Test gestures" [disabled] [ref=f1e27]
+      - paragraph [ref=f1e28]: Calibrate or test during a battle with the webcam ON.
+      - button "Apply settings" [ref=f1e29]
+      - button "Close" [ref=f1e30]

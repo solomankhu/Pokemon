@@ -1,0 +1,6 @@
+'use strict';
+const assert=require('assert'),T=require('../vendor/three-r128.min.js'),A=require('./arenas.js');let checks=0;
+const ok=(v,m)=>{assert(v,m);checks++;};
+for(const [input,want] of [[{region:'DARK CAVE'},'cave'],[{region:'SEASIDE'},'shore'],[{region:'SPIRE RUINS'},'ruins'],[{region:'ROCKY PASS'},'pass'],[{region:'DEEPWOOD'},'meadow'],[{y:30},'cave'],[{y:15},'ruins'],[{y:44},'pass'],[{y:70},'shore'],[{fishing:true},'shore'],[{hunt:true,region:'DARK CAVE'},'cave']])ok(A.arenaKindFor(input)===want,JSON.stringify(input));
+for(const kind of ['meadow','shore','pass','ruins','cave'])for(const q of ['LOW','STANDARD','HIGH']){const a=A.buildArena(T,kind,q);ok(a.root instanceof T.Group,kind);let meshes=0,lights=0;a.root.traverse(o=>{if(o.isMesh){meshes++;ok(o.position.toArray().every(Number.isFinite),'finite');}if(o.isLight)lights++;});ok(meshes>15,'detailed arena');ok(lights>=2,'lit');ok(a.root.getObjectByName('contact-mine')&&a.root.getObjectByName('contact-foe'),'ground contacts');ok(a.shadows.mine===a.root.getObjectByName('contact-mine')&&a.shadows.foe.userData.base.length===2,'shadows exposed for tracking');let disposed=0;a.root.traverse(o=>{if(o.geometry)o.geometry.addEventListener('dispose',()=>disposed++);});a.dispose();ok(disposed>0,'resources released');a.dispose();}
+console.log('Arenas: '+checks+' checks passed');

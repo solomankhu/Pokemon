@@ -1,0 +1,234 @@
+{
+  "pass": true,
+  "parentContexts": [
+    "2b659b86-8472-4815-9555-be7ba27d32aa"
+  ],
+  "cycles": [
+    {
+      "method": "parent-bar",
+      "audioBeforeReturn": "running",
+      "childIds": [
+        "2e20db6e-f59f-420e-a692-af2f2edd1537"
+      ],
+      "survivingChildIds": [],
+      "parentStatesAfterReturn": [
+        {
+          "contextId": "2b659b86-8472-4815-9555-be7ba27d32aa",
+          "state": "running"
+        }
+      ],
+      "destroyed": [],
+      "closed": [
+        "2e20db6e-f59f-420e-a692-af2f2edd1537"
+      ],
+      "remainingContexts": [
+        {
+          "contextId": "2b659b86-8472-4815-9555-be7ba27d32aa",
+          "contextType": "realtime",
+          "contextState": "running",
+          "callbackBufferSize": 480,
+          "maxOutputChannelCount": 2,
+          "sampleRate": 48000
+        },
+        {
+          "contextId": "2e20db6e-f59f-420e-a692-af2f2edd1537",
+          "contextType": "realtime",
+          "contextState": "closed",
+          "callbackBufferSize": 480,
+          "maxOutputChannelCount": 2,
+          "sampleRate": 48000
+        }
+      ]
+    },
+    {
+      "method": "child-pause",
+      "audioBeforeReturn": "running",
+      "childIds": [
+        "1dad2c5a-fbf9-4d67-9120-396007925046"
+      ],
+      "survivingChildIds": [],
+      "parentStatesAfterReturn": [
+        {
+          "contextId": "2b659b86-8472-4815-9555-be7ba27d32aa",
+          "state": "running"
+        }
+      ],
+      "destroyed": [],
+      "closed": [
+        "1dad2c5a-fbf9-4d67-9120-396007925046"
+      ],
+      "remainingContexts": [
+        {
+          "contextId": "2b659b86-8472-4815-9555-be7ba27d32aa",
+          "contextType": "realtime",
+          "contextState": "running",
+          "callbackBufferSize": 480,
+          "maxOutputChannelCount": 2,
+          "sampleRate": 48000
+        },
+        {
+          "contextId": "2e20db6e-f59f-420e-a692-af2f2edd1537",
+          "contextType": "realtime",
+          "contextState": "closed",
+          "callbackBufferSize": 480,
+          "maxOutputChannelCount": 2,
+          "sampleRate": 48000
+        },
+        {
+          "contextId": "1dad2c5a-fbf9-4d67-9120-396007925046",
+          "contextType": "realtime",
+          "contextState": "closed",
+          "callbackBufferSize": 480,
+          "maxOutputChannelCount": 2,
+          "sampleRate": 48000
+        }
+      ]
+    }
+  ],
+  "pageerrors": [],
+  "events": [
+    {
+      "event": "contextCreated",
+      "context": {
+        "contextId": "2b659b86-8472-4815-9555-be7ba27d32aa",
+        "contextType": "realtime",
+        "contextState": "suspended",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextChanged",
+      "context": {
+        "contextId": "2b659b86-8472-4815-9555-be7ba27d32aa",
+        "contextType": "realtime",
+        "contextState": "running",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextChanged",
+      "context": {
+        "contextId": "2b659b86-8472-4815-9555-be7ba27d32aa",
+        "contextType": "realtime",
+        "contextState": "suspended",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextCreated",
+      "context": {
+        "contextId": "2e20db6e-f59f-420e-a692-af2f2edd1537",
+        "contextType": "realtime",
+        "contextState": "suspended",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextChanged",
+      "context": {
+        "contextId": "2e20db6e-f59f-420e-a692-af2f2edd1537",
+        "contextType": "realtime",
+        "contextState": "running",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextChanged",
+      "context": {
+        "contextId": "2e20db6e-f59f-420e-a692-af2f2edd1537",
+        "contextType": "realtime",
+        "contextState": "closed",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextChanged",
+      "context": {
+        "contextId": "2b659b86-8472-4815-9555-be7ba27d32aa",
+        "contextType": "realtime",
+        "contextState": "running",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextChanged",
+      "context": {
+        "contextId": "2b659b86-8472-4815-9555-be7ba27d32aa",
+        "contextType": "realtime",
+        "contextState": "suspended",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextCreated",
+      "context": {
+        "contextId": "1dad2c5a-fbf9-4d67-9120-396007925046",
+        "contextType": "realtime",
+        "contextState": "suspended",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextChanged",
+      "context": {
+        "contextId": "1dad2c5a-fbf9-4d67-9120-396007925046",
+        "contextType": "realtime",
+        "contextState": "running",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextChanged",
+      "context": {
+        "contextId": "1dad2c5a-fbf9-4d67-9120-396007925046",
+        "contextType": "realtime",
+        "contextState": "suspended",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextChanged",
+      "context": {
+        "contextId": "1dad2c5a-fbf9-4d67-9120-396007925046",
+        "contextType": "realtime",
+        "contextState": "closed",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    },
+    {
+      "event": "contextChanged",
+      "context": {
+        "contextId": "2b659b86-8472-4815-9555-be7ba27d32aa",
+        "contextType": "realtime",
+        "contextState": "running",
+        "callbackBufferSize": 480,
+        "maxOutputChannelCount": 2,
+        "sampleRate": 48000
+      }
+    }
+  ]
+}

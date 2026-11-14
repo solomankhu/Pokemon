@@ -1,0 +1,118 @@
+{
+  "ts": "2026-10-17T15:46:25.393Z",
+  "ok": true,
+  "allOk": true,
+  "ran": [
+    "py",
+    "js",
+    "campaign",
+    "combat",
+    "combatpy",
+    "tables"
+  ],
+  "results": [
+    {
+      "name": "py",
+      "label": "MONSTER TRAIL python suite (incl. RENDER + PARITY)",
+      "ok": true,
+      "code": 0,
+      "ms": 67759,
+      "summary": "4874 checks passed",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "js",
+      "label": "MONSTER TRAIL html suite",
+      "ok": true,
+      "code": 0,
+      "ms": 5683,
+      "summary": "3331 checks passed",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "campaign",
+      "label": "campaign handoff suite",
+      "ok": true,
+      "code": 0,
+      "ms": 121,
+      "summary": "8 campaign tests passed",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "combat",
+      "label": "combat/ JS suites (3D battle)",
+      "ok": true,
+      "code": 0,
+      "ms": 1896,
+      "summary": "ok",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "combatpy",
+      "label": "combat/ Python command tests",
+      "ok": true,
+      "code": 0,
+      "ms": 4388,
+      "summary": "Ran 19 tests",
+      "failures": [],
+      "tail": ""
+    },
+    {
+      "name": "tables",
+      "label": "emit_tables parity (dry run)",
+      "ok": true,
+      "code": 0,
+      "ms": 1725,
+      "summary": "ok",
+      "failures": [],
+      "tail": ""
+    }
+  ],
+  "checks": {
+    "py": {
+      "ok": true,
+      "startedAt": 1792251917634,
+      "summary": "4874 checks passed"
+    },
+    "js": {
+      "ok": true,
+      "startedAt": 1792251917634,
+      "summary": "3331 checks passed"
+    },
+    "gemini": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "554 passed, 0 failed"
+    },
+    "campaign": {
+      "ok": true,
+      "startedAt": 1792251917634,
+      "summary": "8 campaign tests passed"
+    },
+    "combat": {
+      "ok": true,
+      "startedAt": 1792251917634,
+      "summary": "ok"
+    },
+    "combatpy": {
+      "ok": true,
+      "startedAt": 1792251917634,
+      "summary": "Ran 19 tests"
+    },
+    "hooks": {
+      "ok": true,
+      "startedAt": 1792248903067,
+      "summary": "70 hook checks passed"
+    },
+    "tables": {
+      "ok": true,
+      "startedAt": 1792251917634,
+      "summary": "ok"
+    }
+  },
+  "inputsMtime": 1792248903067
+}

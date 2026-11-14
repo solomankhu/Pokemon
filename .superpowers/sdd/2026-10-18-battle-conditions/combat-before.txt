@@ -1,0 +1,15 @@
+Arenas: 896 checks passed
+130 command checks passed.
+effects burst: 3444 checks
+effects: 47 moves, 6 quality/motion profiles, lifetime/miss/immunity and visible capture ball verified
+3900 prechange engine output/RNG comparisons passed.
+Host: 18 checks passed
+122 integration checks passed.
+Models: 52959 checks passed
+Pickajoo: starter, immediate Thunder, red cheeks, ear tips and lightning tail verified
+presenter: repeated entries, suspension, renderer reuse, context loss/failure disposal
+presenter juice: 207 checks (contact shake/flash/hold/punch, burst placement, shadow, anticipation, faint, both reduced-motion paths, no Math.random)
+recipes: all 47 move timelines covered
+webcam host: 46 checks passed
+webcam integration: 26 checks passed
+webcam: 121 checks passed

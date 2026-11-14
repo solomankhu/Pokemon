@@ -1,0 +1,76 @@
+{
+  "method": "Seeded mirrored-species level-20 engine duels; random damaging learned moves, random first side per turn, no stat moves/items. Measures the approved command modifiers, not complete encounter win rates.",
+  "results": [
+    {
+      "mode": "no-input",
+      "modifiers": {
+        "tier": "OK",
+        "attack": 1,
+        "crit": 0,
+        "guard": 1,
+        "throwScale": 1
+      },
+      "cohort": 1000,
+      "wins": 492,
+      "draws": 0,
+      "winRate": 0.492,
+      "meanTurns": 5.222
+    },
+    {
+      "mode": "AUTO",
+      "modifiers": {
+        "tier": "AUTO",
+        "attack": 1,
+        "crit": 0,
+        "guard": 1,
+        "throwScale": 1
+      },
+      "cohort": 1000,
+      "wins": 492,
+      "draws": 0,
+      "winRate": 0.492,
+      "meanTurns": 5.222
+    },
+    {
+      "mode": "perfect",
+      "modifiers": {
+        "tier": "PERFECT",
+        "attack": 1.2,
+        "crit": 0.05,
+        "guard": 0.65,
+        "throwScale": 1.85
+      },
+      "cohort": 1000,
+      "wins": 970,
+      "draws": 0,
+      "winRate": 0.97,
+      "meanTurns": 4.96
+    }
+  ],
+  "catchRates": [
+    {
+      "throwScale": 1,
+      "caught": 860,
+      "cohort": 5000,
+      "rate": 0.172
+    },
+    {
+      "throwScale": 1.15,
+      "caught": 993,
+      "cohort": 5000,
+      "rate": 0.1986
+    },
+    {
+      "throwScale": 1.5,
+      "caught": 1309,
+      "cohort": 5000,
+      "rate": 0.2618
+    },
+    {
+      "throwScale": 1.85,
+      "caught": 1619,
+      "cohort": 5000,
+      "rate": 0.3238
+    }
+  ]
+}
