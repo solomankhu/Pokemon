@@ -890,6 +890,42 @@ const ICONS = {
     '..........kk....',
     '................',
   ],
+  club: [
+    '................',
+    '..........kkk...',
+    '.........kyyWk..',
+    '........kyWwWWk.',
+    '........kWWWwWk.',
+    '.......kyWwWWWk.',
+    '.......kWWWWwk..',
+    '......kyWWWWk...',
+    '.....kyWWkkk....',
+    '....kyWk........',
+    '...kyWk.........',
+    '..kyWk..........',
+    '.kWwk...........',
+    '.kwk............',
+    '..k.............',
+    '................',
+  ],
+  spear: [
+    '................',
+    '.............kk.',
+    '............kigk',
+    '...........kiSgk',
+    '..........kgSsk.',
+    '.........kkssk..',
+    '........kyWkk...',
+    '.......kyWk.....',
+    '......kyWk......',
+    '.....kyWk.......',
+    '....kuUk........',
+    '...kuUk.........',
+    '..kyWk..........',
+    '.kyWk...........',
+    '.kWk............',
+    '..k.............',
+  ],
   lantern: [
     '................',
     '......kkkk......',
@@ -1416,7 +1452,7 @@ const SEAM = 'K';                // a cracked seam; authored in MAP, IRON PICK o
 const TREE = 'T';                // a thick tree; authored in MAP, AXE only
 const MATERIALS = ['stone', 'ore', 'wall'];
 const MATERIAL_LABEL = { stone: 'STONE', ore: 'ORE', wall: 'WALL', balls: 'BALL', iron_pick: 'IRON PICK',
-                         lantern: 'LAMP OIL', pulse: 'PULSE', axe: 'AXE' };
+                         lantern: 'LAMP OIL', pulse: 'PULSE', axe: 'AXE', club: 'WOOD CLUB', spear: 'IRON SPEAR' };
 const BLOCKS = {
   '#': { name: 'BOULDER', drops: { stone: 1 }, oreOneIn: 4, leaves: '.', tier: 1, tool: 'pick' },
   'W': { name: 'STONE WALL', drops: { stone: 2 }, oreOneIn: 0, leaves: '.', tier: 1, tool: 'pick' },
@@ -1435,7 +1471,13 @@ const RECIPES = [
   { id: 'potion', out: 'potion', count: 1, needs: { leaf: 2, dewdrop: 1 } },
   { id: 'greatball', out: 'greatball', count: 1, needs: { flint: 2, copperwire: 1 } },
   { id: 'smoke', out: 'smoke', count: 1, needs: { emberdust: 1, shadowsilk: 1 } },
+  { id: 'club', out: 'club', count: 1, needs: { twig: 3 }, setsGear: 'club' },
+  { id: 'spear', out: 'spear', count: 1, needs: { ore: 1, flint: 1, stone: 2, twig: 1 }, setsGear: 'spear' },
 ];
+const GEAR = {
+  club: { name: 'WOOD CLUB', tier: 1, pct: 15, dur: 6, verb: 'swing', snap: 'The WOOD CLUB splinters apart!' },
+  spear: { name: 'IRON SPEAR', tier: 2, pct: 25, dur: 8, verb: 'thrust', snap: 'The IRON SPEAR\'s shaft snaps!' },
+};
 const INTERACTIVE = new Set(['S', 'o', 'H', 'D', 'G']);   // no wall right beside these
 const GRASS = [',', ';'];        // tall grass and dark grass both hide wild monsters
 const PICK_MAX = 2;              // G.flags.pick: 0 none, 1 PICK, 2 IRON PICK
@@ -1890,21 +1932,50 @@ function gladeMasked(x, y, edits) {
 
 // A new materials object with the recipe applied, or null if short.
 // Exactly the needs come out and exactly count goes in; nothing else moves.
-// A tool recipe (setsTier: the PICK, setsTool: the AXE) puts nothing into
-// materials - the caller records the tool - and is refused once the tool is
+// A tool recipe (setsTier: the PICK, setsTool: the AXE, setsGear: the player's
+// weapon) puts nothing into materials - the caller records the tool - and is refused once the tool is
 // that good.
-function craft(materials, recipe, tier = 0, axe = 0) {
+function craft(materials, recipe, tier = 0, axe = 0, gear = null) {
   if (recipe.setsTier && pickTier(tier) >= recipe.setsTier) return null;
   if (recipe.setsTool && axeTier(axe) >= recipe.setsTool[1]) return null;
+  if (recipe.setsGear && gearBlocks(gear, recipe.setsGear)) return null;
   if ('cap' in recipe && (materials[recipe.out] || 0) >= recipe.cap) return null;   // already full
   for (const k in recipe.needs) if ((materials[k] || 0) < recipe.needs[k]) return null;
   const out = Object.assign({}, materials);
   for (const k in recipe.needs) out[k] -= recipe.needs[k];
-  if (!(recipe.setsTier || recipe.setsTool)) {
+  if (!(recipe.setsTier || recipe.setsTool || recipe.setsGear)) {
     out[recipe.out] = (out[recipe.out] || 0) + recipe.count;
     if ('cap' in recipe) out[recipe.out] = Math.min(recipe.cap, out[recipe.out]);
   }
   return out;
+}
+
+// The player's gear (crafted weapons); ported line for line from the Python build.
+function gearHit(maxhp, hp, gid) {
+  if (hp <= 1) return 0;
+  return Math.min(hp - 1, Math.max(1, Math.floor((maxhp * GEAR[gid].pct + 99) / 100)));
+}
+function gearWear(gear) {
+  const dur = gear.dur - 1;
+  return dur > 0 ? { id: gear.id, dur } : null;
+}
+function gearBlocks(gear, gid) {
+  if (!gear) return false;
+  if (gear.id === gid) return gear.dur >= GEAR[gid].dur;
+  return GEAR[gear.id].tier > GEAR[gid].tier;
+}
+function gearRefusal(gear, trainer, gym, foeHp) {
+  if (!gear) return 'none';
+  if (trainer) return gym ? 'gym' : 'trainer';
+  if (foeHp <= 1) return 'floor';
+  return null;
+}
+function cleanGear(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const { id, dur } = raw;
+  if (typeof id !== 'string' || !Object.prototype.hasOwnProperty.call(GEAR, id)) return null;
+  if (typeof dur !== 'number' || !Number.isInteger(dur) || dur <= 0) return null;
+  return { id, dur: Math.min(dur, GEAR[id].dur) };
 }
 
 // The display name of a recipe need or output: a material/tool label or a GOODS name.
@@ -2402,6 +2473,7 @@ const G = {
   battles: 0,              // every startBattle; feeds lootSeed
   flags: { starter: false, gym: false, huntBeaten: 0, gymBonus: false, axe: 0 },
   picked: new Set(),       // item-ball tiles already collected, as 'x,y'
+  gear: null,              // the player's weapon: null or { id: GEAR id, dur: n }
   edits: {},               // sandbox overlay { 'x,y': glyph }; MAP is never mutated
   materials: zeroMaterials(),
   building: false,         // overworld sub-state: confirm places a WALL
@@ -3245,8 +3317,23 @@ const CRAFT_BLURB = { wall: 'A block to build with.', ball: 'Catches wild monste
   iron_pick: 'Cracks seams.', oil: 'Fills the lamp (now %d%%).',
   pulse: 'Stuns the stalker. Have %d/%d.', axe: 'Cuts thin trees.',
   potion: 'Restores 20 HP.', greatball: 'A sturdier BALL.',
-  smoke: 'Escape any wild battle.', build: 'Place WALLs in ROCKY PASS.' };
+  smoke: 'Escape any wild battle.', club: 'Softens a wild foe.',
+  spear: 'Hits harder. Lasts longer.', build: 'Place WALLs in ROCKY PASS.' };
 const CRAFT_MSG = { hidden: 'Find its ingredients first.', nowall: 'No WALLs yet. Craft some first.' };
+const GEAR_TEXT = {
+  trainer: "The trail code: no hands on a trainer's monster!",
+  gym: 'LEADER VOLT: Put that down. Up here we fight through our team.',
+  floor: 'It can barely stand. Your team has to finish it.',
+  swing: 'You %s the %s!',
+  soften: "%s staggers, but you can't finish it alone.",
+  hunt_hit: 'It flinches from the SPEAR. It knows that shape.',
+  hunt_break: 'The spear snaps. It is still watching you.',
+  craft_new: 'Crafted the %s.',
+  craft_repair: 'Your %s is good as new.',
+  craft_replace: 'Crafted the %s. Your old %s is left behind.',
+  craft_full: "Your %s doesn't need mending.",
+  craft_weaker: "You'd rather keep your %s.",
+};
 
 // The ICONS key for a recipe out/need, BAG row id or shop id.
 function iconId(item) { return item === 'ball' ? 'balls' : item; }
@@ -3260,6 +3347,7 @@ function noteFound() {
   const conds = [[G.balls > 0, 'balls'], [tier >= 1, 'pick'], [tier >= 2, 'iron_pick'],
                  [axeTier(G.flags.axe) >= 1, 'axe'], [G.lantern > 0, 'lantern'], [G.pulses > 0, 'pulse']];
   for (const [cond, k] of conds) if (cond) f.add(k);
+  if (G.gear) f.add(G.gear.id);
 }
 
 // A saved found list: known ICONS ids only; anything else is empty.
@@ -3272,6 +3360,7 @@ function cleanFound(raw) {
 function recipeOwned(r) {
   if (r.setsTier) return pickTier(G.flags.pick) >= r.setsTier;
   if (r.setsTool) return axeTier(G.flags[r.setsTool[0]]) >= r.setsTool[1];
+  if (r.setsGear) return gearBlocks(G.gear, r.setsGear);
   return false;
 }
 
@@ -3283,12 +3372,12 @@ function craftCells() {
   const cells = [];
   RECIPES.forEach((r, i) => {
     const owned = recipeOwned(r);
-    const loot = Object.keys(r.needs).every(k => isGood(k));
+    const loot = Object.keys(r.needs).some(k => isGood(k));
     const hidden = loot && !owned && !G.found.has(r.out) && !Object.keys(r.needs).some(k => G.found.has(k));
     let state;
     if (hidden) state = 'hidden';
     else if (owned) state = 'owned';
-    else if (craft(have, r, tier, axe) !== null && bagRoom(r)) state = 'ready';
+    else if (craft(have, r, tier, axe, G.gear) !== null && bagRoom(r)) state = 'ready';
     else state = 'locked';
     let blurb = CRAFT_BLURB[r.id];
     if (r.id === 'oil') blurb = fmtMsg(blurb, G.lantern).replace('%%', '%');
@@ -3508,6 +3597,11 @@ function craftRecipe(i) {
     G.craftMsg = 'You already have the ' + craftLabel(r.out) + '.';
     return false;
   }
+  if (r.setsGear && gearBlocks(G.gear, r.setsGear)) {
+    sfx('cancel');
+    G.craftMsg = fmtMsg(GEAR_TEXT[G.gear.id === r.setsGear ? 'craft_full' : 'craft_weaker'], GEAR[G.gear.id].name);
+    return false;
+  }
   if (!bagRoom(r)) {
     sfx('cancel');
     G.craftMsg = 'Your BAG is full of ' + craftLabel(r.out) + '.';
@@ -3520,7 +3614,7 @@ function craftRecipe(i) {
                                      : 'You can carry only ' + r.cap + ' ' + craftLabel(r.out) + '.';
     return false;
   }
-  const after = craft(have, r, tier, axe);
+  const after = craft(have, r, tier, axe, G.gear);
   if (!after) {
     sfx('cancel');
     G.craftMsg = 'Need ' + Object.keys(r.needs).map(k => r.needs[k] + ' ' + craftLabel(k)).join(', ') + '.';
@@ -3546,6 +3640,12 @@ function craftRecipe(i) {
   } else if (r.setsTool) {
     G.flags[r.setsTool[0]] = r.setsTool[1];
     G.craftMsg = 'Crafted the ' + craftLabel(r.out) + '. Thin trees give way now.';
+  } else if (r.setsGear) {
+    const gid = r.setsGear, old = G.gear;
+    G.gear = { id: gid, dur: GEAR[gid].dur };
+    if (old && old.id === gid) G.craftMsg = fmtMsg(GEAR_TEXT.craft_repair, GEAR[gid].name);
+    else if (old) G.craftMsg = fmtMsg(GEAR_TEXT.craft_replace, GEAR[gid].name, GEAR[old.id].name);
+    else G.craftMsg = fmtMsg(GEAR_TEXT.craft_new, GEAR[gid].name);
   } else G.craftMsg = 'Crafted ' + r.count + ' ' + craftLabel(r.out) + '.';
   juiceCraft(i, before);
   return true;
@@ -3654,7 +3754,7 @@ function saveGame() {
       party: G.party, balls: G.balls, bag: Object.assign({}, G.bag), coins: G.coins, battles: G.battles, flags: G.flags, beaten: G.beaten, chapter: chapterState(), settings:G.settings,
       picked: [...G.picked].sort(), found: [...G.found].sort(), centre: G.lastCentre.slice(),
       edits: Object.fromEntries(Object.keys(G.edits).sort().map(k => [k, G.edits[k]])),
-      materials: Object.assign({}, G.materials),
+      materials: Object.assign({}, G.materials), gear: G.gear,
       cave: { lantern: G.lantern, tension: G.tension, pulses: G.pulses, rest: G.huntRest, gone: G.huntGone },
       x: G.player.tx, y: G.player.ty, dir: G.player.dir, steps: G.steps
     };
@@ -3708,6 +3808,7 @@ function loadGame() {
     G.player.px = d.x * 32; G.player.py = d.y * 32;
     G.player.moving = false;
     syncCave();                      // loaded inside the cave: it spawns far away
+    G.gear = cleanGear(d.gear);       // always assigned: an old save means no gear
     G.found = cleanFound(d.found); noteFound();
     return true;
   } catch (e) { return false; }
@@ -7199,6 +7300,7 @@ function confirmKey() {
     G.chapter = Campaign ? Campaign.normalizeChapter(null, false) : null;
     G.beaten = {}; G.steps = 0; G.picked = new Set();
     G.edits = {}; G.materials = zeroMaterials(); G.building = false;
+    G.gear = null;
     loadCave(null);
     G.lastCentre = START_TILE.slice();
     G.player.tx = START_TILE[0]; G.player.ty = START_TILE[1];
@@ -7860,6 +7962,8 @@ if (typeof globalThis !== 'undefined') {
     inSandbox, tileHash, canMine, mineDrop, withEdit, craft, tileBlocked, reachable, placementOk,
     loadEdits, zeroMaterials, tileHere, npcTiles, quarryTalk, mine, craftRecipe, placeWall,
     SEAM, GRASS, PICK_MAX, GEODE, MOSS_HOLLOW, OLD_GROVE, GATED_REGIONS, GLADES, GLADE_GATES, gladeMasked, BACKSTOP_ORE, ORE_DEPOSITS, pickTier, oreDeposits, quarryBackstop, TREE, AXE_MAX, axeTier, craftLabel, craftHave, bagRoom,
+    GEAR, GEAR_TEXT, gearHit, gearWear, gearBlocks, gearRefusal, cleanGear,
+    giveGear: (id, dur) => { G.gear = cleanGear({ id, dur }); },   // test-only seam
     tryEncounter, CRAFT_RECT, pickedGround, pickedText, PICKED_TEXT,
     // the CRAFT grid, its animation and the shared wrap rule (shell; read by the suites)
     CRAFT_GRID_X, CRAFT_GRID_Y, CRAFT_SLOT, CRAFT_GAP, CRAFT_GRID_ROWS, CRAFT_CUE_X, CRAFT_FLY_T,

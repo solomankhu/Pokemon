@@ -1,7 +1,7 @@
 """Re-emit MONSTER TRAIL's data tables from the Python build into the HTML build.
 
 The .py file is the source of truth for MOVES, SPECIES, STARTERS, MAP and
-ZONES, plus the sandbox tables MATERIALS, BLOCKS and RECIPES, and
+ZONES, plus the sandbox tables MATERIALS, BLOCKS, RECIPES and GEAR, and
 CONDITIONS and REGION_CONDITIONS (battle weather), and the loot tables GOODS,
 LOOT_AREA and LOOT_TYPE, and the item icons ICON_PALETTE, ICON_SHADOW and ICONS. This script imports it (layers 1-3 are import-safe, no window opens),
 renders each table in the exact house style of the .html build, and either
@@ -24,6 +24,7 @@ Translation rules (the two builds spell things differently):
     sets_tier       -> setsTier         (sandbox RECIPES, only emitted when set)
     sets_tool       -> setsTool         (sandbox RECIPES, [flag, level], only emitted when set)
     cap             -> cap              (sandbox RECIPES, only emitted when present)
+    sets_gear       -> setsGear         (sandbox RECIPES, only emitted when set)
     {k: n} dicts    -> { k: n }
     REGION_CONDITIONS tuples -> [id, weight] arrays
     LOOT_AREA tuples         -> [id, weight] arrays
@@ -155,11 +156,22 @@ def emit_recipes():
         extra = ", setsTier: %d" % r["sets_tier"] if r.get("sets_tier") else ""
         if r.get("sets_tool"):
             extra += ", setsTool: %s" % js(list(r["sets_tool"]))
+        if r.get("sets_gear"):
+            extra += ", setsGear: %s" % js(r["sets_gear"])
         if "cap" in r:
             extra += ", cap: %d" % r["cap"]
         out.append("  { id: %s, out: %s, count: %d, needs: %s%s }," % (
             js(r["id"]), js(r["out"]), r["count"], obj(r["needs"]), extra))
     out.append("];")
+    return out
+
+
+def emit_gear():
+    out = ["const GEAR = {"]
+    for k, g in mt.GEAR.items():
+        out.append("  %s: { name: %s, tier: %d, pct: %d, dur: %d, verb: %s, snap: %s }," % (
+            k, js(g["name"]), g["tier"], g["pct"], g["dur"], js(g["verb"]), js(g["snap"])))
+    out.append("};")
     return out
 
 
@@ -234,6 +246,7 @@ BLOCKS = [("const MOVES = {", "};", emit_moves),
           ("const MATERIALS = ", None, emit_materials),
           ("const BLOCKS = {", "};", emit_blocks),
           ("const RECIPES = [", "];", emit_recipes),
+          ("const GEAR = {", "};", emit_gear),
           ("const CONDITIONS = {", "};", emit_conditions),
           ("const REGION_CONDITIONS = {", "};", emit_region_conditions),
           ("const GOODS = {", "};", emit_goods),

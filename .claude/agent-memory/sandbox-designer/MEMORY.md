@@ -1,2 +1,3 @@
-- [Recipe loops in tests](recipe-loops-in-tests.md) — new RECIPES rows break the generic all-recipes conservation loop; extend its inventory
+- [Recipe loops in tests](recipe-loops-in-tests.md) — new RECIPES rows break two generic loops and the exact recipe-order list in test.py
 - [New glyph needs sprite same chunk](new-glyph-needs-sprite-same-chunk.md) — a glyph in MAP fails RENDER "own art" until draw_tile draws it
+- [PARITY diff truncates](parity-diff-truncates.md) — PARITY lines show 4 diffs; scratch-copy recipe for the full list

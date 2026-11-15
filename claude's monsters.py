@@ -595,7 +595,7 @@ TREE = "T"                       # a thick tree; authored in MAP, AXE only
 MATERIALS = ["stone", "ore", "wall"]
 MATERIAL_LABEL = {"stone": "STONE", "ore": "ORE", "wall": "WALL", "balls": "BALL",
                   "iron_pick": "IRON PICK", "lantern": "LAMP OIL", "pulse": "PULSE",
-                  "axe": "AXE"}
+                  "axe": "AXE", "club": "WOOD CLUB", "spear": "IRON SPEAR"}
 BLOCKS = {                       # what a tool can break, and what falls out
     # tool: which of the player's tools breaks it, and whose level is
     # compared against tier ("pick" -> flags["pick"], "axe" -> flags["axe"]).
@@ -624,9 +624,36 @@ RECIPES = [                      # shapeless; "balls" is the existing pouch coun
     dict(id="potion", out="potion", count=1, needs={"leaf": 2, "dewdrop": 1}),
     dict(id="greatball", out="greatball", count=1, needs={"flint": 2, "copperwire": 1}),
     dict(id="smoke", out="smoke", count=1, needs={"emberdust": 1, "shadowsilk": 1}),
+    # sets_gear: the player's weapon; the caller stores it in Game.gear (never in materials).
+    dict(id="club", out="club", count=1, needs={"twig": 3}, sets_gear="club"),
+    dict(id="spear", out="spear", count=1, needs={"ore": 1, "flint": 1, "stone": 2, "twig": 1},
+         sets_gear="spear"),
 ]
 PICK_MAX = 2                     # flags["pick"]: 0 none, 1 PICK, 2 IRON PICK
 AXE_MAX = 1                      # flags["axe"]: 0 none, 1 AXE
+# The player's own gear (crafted weapons): struck from the battle BAG in wild
+# battles and hunts, refused by trainers.  pct is a share of the foe's max HP,
+# rounded up; a strike never takes the foe below 1 HP (spec 2026-11-14).
+GEAR = {
+    "club":  dict(name="WOOD CLUB", tier=1, pct=15, dur=6, verb="swing",
+                  snap="The WOOD CLUB splinters apart!"),
+    "spear": dict(name="IRON SPEAR", tier=2, pct=25, dur=8, verb="thrust",
+                  snap="The IRON SPEAR's shaft snaps!"),
+}
+GEAR_TEXT = {
+    "trainer": "The trail code: no hands on a trainer's monster!",
+    "gym": "LEADER VOLT: Put that down. Up here we fight through our team.",
+    "floor": "It can barely stand. Your team has to finish it.",
+    "swing": "You %s the %s!",
+    "soften": "%s staggers, but you can't finish it alone.",
+    "hunt_hit": "It flinches from the SPEAR. It knows that shape.",
+    "hunt_break": "The spear snaps. It is still watching you.",
+    "craft_new": "Crafted the %s.",
+    "craft_repair": "Your %s is good as new.",
+    "craft_replace": "Crafted the %s. Your old %s is left behind.",
+    "craft_full": "Your %s doesn't need mending.",
+    "craft_weaker": "You'd rather keep your %s.",
+}
 GEODE = (65, 30, 75, 34)         # x1, y1, x2, y2: the pocket behind the seam, entrance row included
 # Every bounded pocket that only an authored_only gate (K seam, T tree) opens.
 # The suite's gated-reachability rule proves breaking every gate opens exactly
@@ -848,6 +875,42 @@ ICONS = {                        # id -> 16 rows of 16 pixels; recipe/BAG/shop i
         ".........kWwk...",
         "..........kk....",
         "................",
+    ],
+    "club": [                    # a knotted WOOD CLUB on the diagonal
+        "................",
+        "..........kkk...",
+        ".........kyyWk..",
+        "........kyWwWWk.",
+        "........kWWWwWk.",
+        ".......kyWwWWWk.",
+        ".......kWWWWwk..",
+        "......kyWWWWk...",
+        ".....kyWWkkk....",
+        "....kyWk........",
+        "...kyWk.........",
+        "..kyWk..........",
+        ".kWwk...........",
+        ".kwk............",
+        "..k.............",
+        "................",
+    ],
+    "spear": [                   # an ash shaft, an iron tip, dark tape at the grip
+        "................",
+        ".............kk.",
+        "............kigk",
+        "...........kiSgk",
+        "..........kgSsk.",
+        ".........kkssk..",
+        "........kyWkk...",
+        ".......kyWk.....",
+        "......kyWk......",
+        ".....kyWk.......",
+        "....kuUk........",
+        "...kuUk.........",
+        "..kyWk..........",
+        ".kyWk...........",
+        ".kWk............",
+        "..k.............",
     ],
     "lantern": [
         "................",
@@ -1712,6 +1775,57 @@ def axe_tier(v):
     return clamp(v, 0, AXE_MAX)
 
 
+def gear_hit(maxhp, hp, gid):
+    """HP a GEAR strike takes: pct of max HP rounded up, at least 1, but never
+    below 1 HP left (a strike can't KO).  Integer only, no rng (PARITY)."""
+    if hp <= 1:
+        return 0
+    return min(hp - 1, max(1, (maxhp * GEAR[gid]["pct"] + 99) // 100))
+
+
+def gear_wear(gear):
+    """The gear after one landed strike: dur - 1, or None once it breaks."""
+    dur = gear["dur"] - 1
+    return dict(id=gear["id"], dur=dur) if dur > 0 else None
+
+
+def gear_blocks(gear, gid):
+    """True when crafting GEAR[gid] would waste materials: the same gear at full
+    durability, or a higher tier already held (no downgrades)."""
+    if not gear:
+        return False
+    if gear["id"] == gid:
+        return gear["dur"] >= GEAR[gid]["dur"]
+    return GEAR[gear["id"]]["tier"] > GEAR[gid]["tier"]
+
+
+def gear_refusal(gear, trainer, gym, foe_hp):
+    """Why a strike is refused before the turn starts, or None: 'none' (no
+    gear), 'gym', 'trainer' (the trail code), 'floor' (foe already at 1 HP)."""
+    if not gear:
+        return "none"
+    if trainer:
+        return "gym" if gym else "trainer"
+    if foe_hp <= 1:
+        return "floor"
+    return None
+
+
+def clean_gear(raw):
+    """A saved gear record, or None: a known id and an int (not bool) dur,
+    clamped to 1..max.  Missing, junk or broken records load as no gear."""
+    if not isinstance(raw, dict):
+        return None
+    gid, dur = raw.get("id"), raw.get("dur")
+    if not isinstance(gid, str) or gid not in GEAR:
+        return None
+    if isinstance(dur, float) and dur.is_integer():
+        dur = int(dur)                 # JS can't tell 2.0 from 2; agree with it
+    if isinstance(dur, bool) or not isinstance(dur, int) or dur <= 0:
+        return None
+    return dict(id=gid, dur=min(dur, GEAR[gid]["dur"]))
+
+
 def can_mine(tile, x, y, tier, axe=0):
     """The player's tools can break tile at (x, y).  A block's tool picks
     which level counts: the PICK tier, or the AXE.  Ordinary blocks break
@@ -1772,14 +1886,17 @@ def glade_masked(x, y, edits):
     return False
 
 
-def craft(materials, recipe, tier=0, axe=0):
+def craft(materials, recipe, tier=0, axe=0, gear=None):
     """A new have-dict with the recipe applied, or None if short.
     Exactly the needs come out and exactly count goes in; nothing else moves.
-    A tool recipe (sets_tier: the PICK, sets_tool: the AXE) puts nothing in -
-    the caller records the tool - and is refused once the tool is that good."""
+    A tool recipe (sets_tier: the PICK, sets_tool: the AXE, sets_gear: the
+    player's weapon) puts nothing in - the caller records the tool - and is
+    refused once the tool is that good (gear: see gear_blocks)."""
     if recipe.get("sets_tier") and pick_tier(tier) >= recipe["sets_tier"]:
         return None
     if recipe.get("sets_tool") and axe_tier(axe) >= recipe["sets_tool"][1]:
+        return None
+    if recipe.get("sets_gear") and gear_blocks(gear, recipe["sets_gear"]):
         return None
     if "cap" in recipe and materials.get(recipe["out"], 0) >= recipe["cap"]:
         return None                  # already full: never spend for nothing
@@ -1788,7 +1905,7 @@ def craft(materials, recipe, tier=0, axe=0):
     out = dict(materials)
     for k, n in recipe["needs"].items():
         out[k] -= n
-    if not (recipe.get("sets_tier") or recipe.get("sets_tool")):
+    if not (recipe.get("sets_tier") or recipe.get("sets_tool") or recipe.get("sets_gear")):
         out[recipe["out"]] = out.get(recipe["out"], 0) + recipe["count"]
         if "cap" in recipe:
             out[recipe["out"]] = min(recipe["cap"], out[recipe["out"]])
@@ -2419,7 +2536,8 @@ CRAFT_BLURB = {"wall": "A block to build with.", "ball": "Catches wild monsters.
                "iron_pick": "Cracks seams.", "oil": "Fills the lamp (now %d%%).",
                "pulse": "Stuns the stalker. Have %d/%d.", "axe": "Cuts thin trees.",
                "potion": "Restores 20 HP.", "greatball": "A sturdier BALL.",
-               "smoke": "Escape any wild battle.", "build": "Place WALLs in ROCKY PASS."}
+               "smoke": "Escape any wild battle.", "club": "Softens a wild foe.",
+               "spear": "Hits harder. Lasts longer.", "build": "Place WALLs in ROCKY PASS."}
 CRAFT_MSG = {"hidden": "Find its ingredients first.", "nowall": "No WALLs yet. Craft some first."}
 
 
@@ -2434,6 +2552,8 @@ def note_found(g):
                     (g.pulses > 0, "pulse")):
         if cond:
             f.add(k)
+    if g.gear:
+        f.add(g.gear["id"])
 
 
 def clean_found(raw):
@@ -2449,6 +2569,8 @@ def recipe_owned(g, r):
         return pick_tier(g.flags.get("pick")) >= r["sets_tier"]
     if r.get("sets_tool"):
         return axe_tier(g.flags.get(r["sets_tool"][0])) >= r["sets_tool"][1]
+    if r.get("sets_gear"):
+        return gear_blocks(g.gear, r["sets_gear"])
     return False
 
 
@@ -2460,14 +2582,14 @@ def craft_cells(g):
     cells = []
     for i, r in enumerate(RECIPES):
         owned = recipe_owned(g, r)
-        loot = all(k in GOODS for k in r["needs"])
+        loot = any(k in GOODS for k in r["needs"])
         hidden = (loot and not owned and r["out"] not in g.found
                   and not any(k in g.found for k in r["needs"]))
         if hidden:
             state = "hidden"
         elif owned:
             state = "owned"
-        elif craft(have, r, tier, axe) is not None and bag_room(g, r):
+        elif craft(have, r, tier, axe, g.gear) is not None and bag_room(g, r):
             state = "ready"
         else:
             state = "locked"
@@ -2850,6 +2972,7 @@ class Game:
         self.flags = dict(starter=False, gym=False, hunt_beaten=0, gym_bonus=False, axe=0)
         self.beaten = {}
         self.picked = set()        # item-ball tiles already collected
+        self.gear = None           # the player's weapon: None or {"id": GEAR id, "dur": n}
         self.edits = {}            # sandbox overlay {(x, y): glyph}; MAP is never mutated
         self.materials = {k: 0 for k in MATERIALS}
         self.building = False      # overworld sub-state: confirm places a WALL
@@ -3850,6 +3973,12 @@ class Game:
             self.sfx("cancel")
             self.craft_msg = "You already have the %s." % craft_label(r["out"])
             return False
+        if r.get("sets_gear") and gear_blocks(self.gear, r["sets_gear"]):
+            self.sfx("cancel")
+            held = GEAR[self.gear["id"]]["name"]
+            self.craft_msg = GEAR_TEXT["craft_full" if self.gear["id"] == r["sets_gear"]
+                                       else "craft_weaker"] % held
+            return False
         if not bag_room(self, r):
             self.sfx("cancel")
             self.craft_msg = "Your BAG is full of %s." % craft_label(r["out"])
@@ -3860,7 +3989,7 @@ class Game:
             self.craft_msg = ("Your lantern is already full." if r["out"] == "lantern"
                               else "You can carry only %d %s." % (r["cap"], craft_label(r["out"])))
             return False
-        after = craft(have, r, tier, axe)
+        after = craft(have, r, tier, axe, self.gear)
         if after is None:
             self.sfx("cancel")
             self.craft_msg = "Need " + ", ".join(
@@ -3882,6 +4011,15 @@ class Game:
         elif r.get("sets_tool"):
             self.flags[r["sets_tool"][0]] = r["sets_tool"][1]
             self.craft_msg = "Crafted the %s. Thin trees give way now." % craft_label(r["out"])
+        elif r.get("sets_gear"):
+            gid, old = r["sets_gear"], self.gear
+            self.gear = dict(id=gid, dur=GEAR[gid]["dur"])
+            if old and old["id"] == gid:
+                self.craft_msg = GEAR_TEXT["craft_repair"] % GEAR[gid]["name"]
+            elif old:
+                self.craft_msg = GEAR_TEXT["craft_replace"] % (GEAR[gid]["name"], GEAR[old["id"]]["name"])
+            else:
+                self.craft_msg = GEAR_TEXT["craft_new"] % GEAR[gid]["name"]
         else:
             self.craft_msg = "Crafted %d %s." % (r["count"], craft_label(r["out"]))
         self.fx_craft(i, before)
@@ -4014,7 +4152,7 @@ class Game:
                         flags=self.flags, beaten=self.beaten, steps=self.steps,
                         picked=["%d,%d" % t for t in sorted(self.picked)],
                         edits={"%d,%d" % k: v for k, v in sorted(self.edits.items())},
-                        materials=dict(self.materials),
+                        materials=dict(self.materials), gear=self.gear,
                         cave=dict(lantern=self.lantern, tension=self.tension, pulses=self.pulses,
                                   rest=self.hunt_rest, gone=self.hunt_gone),
                         centre=list(self.last_centre), found=sorted(self.found),
@@ -4073,6 +4211,7 @@ class Game:
         self.player.py = self.player.ty * 32
         self.player.moving = False
         self.sync_cave()                   # loaded inside the cave: it spawns far away
+        self.gear = clean_gear(d.get("gear"))   # always assigned: an old save means no gear
         self.found = clean_found(d.get("found"))
         note_found(self)                   # old saves: seeded from what is held
         return True
@@ -4110,6 +4249,7 @@ class Game:
         self.flags = dict(starter=False, gym=False, hunt_beaten=0, gym_bonus=False, axe=0)
         self.beaten = {}
         self.picked = set()
+        self.gear = None
         self.edits = {}
         self.materials = {k: 0 for k in MATERIALS}
         self.building = False

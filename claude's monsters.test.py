@@ -1121,6 +1121,7 @@ ok(mt.BLOCKS[mt.TREE]["drops"] == {} and mt.BLOCKS[mt.TREE]["leaves"] == ".", "a
 ok("C" not in mt.BLOCKS, "cave wall (C) is never mineable")
 for r in mt.RECIPES:
     ok(r["out"] in mt.MATERIALS or r["out"] == "balls" or r.get("sets_tier") or r.get("sets_tool")
+       or (r.get("sets_gear") and r["out"] == r["sets_gear"] and r["out"] in mt.GEAR)
        or r["out"] in mt.GOODS or (r["out"] in ("lantern", "pulse") and "cap" in r),
        "recipe %s makes a known thing" % r["id"])
     ok(mt.craft_label(r["out"]), "recipe %s has a label" % r["id"])
@@ -1177,7 +1178,7 @@ for r in mt.RECIPES:
     ok(after is not None, "craft(%s) succeeds with enough" % r["id"])
     delta = {k: after.get(k, 0) - inv.get(k, 0) for k in set(after) | set(inv)}
     want = {k: -n for k, n in r["needs"].items()}
-    if not (r.get("sets_tier") or r.get("sets_tool")):   # a tool raises a flag, not a counter
+    if not (r.get("sets_tier") or r.get("sets_tool") or r.get("sets_gear")):   # a tool/gear is recorded by the caller
         want[r["out"]] = want.get(r["out"], 0) + r["count"]
     ok({k: v for k, v in delta.items() if v} == {k: v for k, v in want.items() if v},
        "craft(%s) moves exactly the recipe: %s" % (r["id"], delta))
@@ -1701,8 +1702,9 @@ ok(mt.can_mine("#", bx, by, 1) and not mt.can_mine("T", 20, 85, 2), "old 4-argum
 AXE_R = next(r for r in mt.RECIPES if r.get("sets_tool"))
 ok(AXE_R["id"] == "axe" and AXE_R["needs"] == {"twig": 2, "flint": 1} and tuple(AXE_R["sets_tool"]) == ("axe", 1),
    "the AXE is 2 TWIG + 1 FLINT and sets the axe to 1")
-ok([r["id"] for r in mt.RECIPES] == ["wall", "ball", "iron_pick", "oil", "pulse", "axe", "potion", "greatball", "smoke"],
-   "recipe order: the first five unchanged, then Part B's four")
+ok([r["id"] for r in mt.RECIPES] == ["wall", "ball", "iron_pick", "oil", "pulse", "axe", "potion", "greatball", "smoke",
+                                     "club", "spear"],
+   "recipe order: the first five unchanged, then Part B's four, then the two gear recipes")
 have = {"twig": 2, "flint": 1, "stone": 0}
 ok(mt.craft(have, AXE_R, 0, 0) == {"twig": 0, "flint": 0, "stone": 0}, "the AXE spends exactly its needs and stores nothing")
 ok(mt.craft(have, AXE_R, 0, 1) is None, "the AXE is refused once owned")
@@ -1869,7 +1871,7 @@ ok(not any(mt.glade_masked(x, y, mt.with_edit(cut_w, 71, 84, "."))
    "with both trees cut nothing is masked")
 # -- icons: pure 16x16 pixel art, emitted to the HTML build --
 ICON_WANT = set(mt.GOODS) | {"stone", "ore", "wall", "balls", "pick", "iron_pick", "axe",
-                             "lantern", "pulse", "coins"}
+                             "lantern", "pulse", "coins", "club", "spear"}
 ok(set(mt.ICONS) == ICON_WANT, "ICONS has exactly one icon per drawable id (%d)" % len(ICON_WANT))
 ok("." not in mt.ICON_PALETTE, "'.' is transparent and never a palette key")
 ok(all(len(k) == 1 and len(v) == 3 and all(isinstance(c, int) and 0 <= c <= 255 for c in v)
@@ -1987,6 +1989,150 @@ try:
     ok(False, "glade_masked without edits must raise (spec 1.6: edits is required)")
 except TypeError:
     ok(True, "glade_masked requires its edits argument")
+
+# --- GEAR (crafted weapons; spec docs/superpowers/specs/2026-11-14-crafted-weapons-design.md)
+ok(set(mt.GEAR) == {"club", "spear"}, "GEAR has exactly the club and the spear")
+ok(mt.GEAR["club"]["tier"] < mt.GEAR["spear"]["tier"], "the spear outranks the club")
+for gid, gd in mt.GEAR.items():
+    ok(isinstance(gd["pct"], int) and 1 <= gd["pct"] <= 50, "%s pct is a small int" % gid)
+    ok(isinstance(gd["dur"], int) and gd["dur"] >= 1, "%s has durability" % gid)
+    ok(gid in mt.ICONS and gid in mt.CRAFT_BLURB and gid in mt.MATERIAL_LABEL,
+       "%s has an icon, a blurb and a label" % gid)
+    r = next((r for r in mt.RECIPES if r.get("sets_gear") == gid), None)
+    ok(r is not None and r["out"] == gid and r["id"] == gid, "%s has one sets_gear recipe" % gid)
+ok(next(r for r in mt.RECIPES if r["id"] == "club")["needs"] == {"twig": 3}, "club = 3 TWIG")
+ok(next(r for r in mt.RECIPES if r["id"] == "spear")["needs"]
+   == {"ore": 1, "flint": 1, "stone": 2, "twig": 1}, "spear = 1 ORE + 1 FLINT + 2 STONE + 1 TWIG")
+ok([r["id"] for r in mt.RECIPES][-2:] == ["club", "spear"], "gear recipes are appended last")
+
+# gear_hit: integer, never KOs, at least 1 while the foe is above 1 HP
+for gid in mt.GEAR:
+    for maxhp in range(1, 201):
+        for hp in (maxhp, max(1, maxhp // 2), 2, 1):
+            if hp > maxhp:
+                continue
+            d = mt.gear_hit(maxhp, hp, gid)
+            ok(isinstance(d, int) and 0 <= d <= max(0, hp - 1),
+               "gear_hit(%d,%d,%s) never KOs" % (maxhp, hp, gid))
+            if hp > 1:
+                ok(d >= 1, "gear_hit(%d,%d,%s) lands" % (maxhp, hp, gid))
+ok(mt.gear_hit(80, 80, "club") == 12 and mt.gear_hit(80, 80, "spear") == 20, "15%/25% of 80")
+ok(mt.gear_hit(21, 21, "club") == 4, "rounds up: ceil(21*15/100) = 4")
+ok(mt.gear_hit(50, 1, "spear") == 0, "a foe at 1 HP takes nothing")
+
+# gear_wear / clean_gear
+ok(mt.gear_wear({"id": "club", "dur": 2}) == {"id": "club", "dur": 1}, "wear drops 1")
+ok(mt.gear_wear({"id": "club", "dur": 1}) is None, "the last swing breaks it")
+ok(mt.clean_gear({"id": "spear", "dur": 3}) == {"id": "spear", "dur": 3}, "clean keeps a good record")
+ok(mt.clean_gear({"id": "spear", "dur": 99}) == {"id": "spear", "dur": mt.GEAR["spear"]["dur"]},
+   "clean clamps dur to the max")
+for junk in (None, 3, "club", [], {"id": "axe", "dur": 2}, {"id": "club"}, {"id": "club", "dur": 0},
+             {"id": "club", "dur": -2}, {"id": "club", "dur": True}, {"id": "club", "dur": 2.5},
+             {"id": "club", "dur": "2"}, {"id": ["club"], "dur": 2},
+             {"id": "club", "dur": float("nan")}, {"id": "club", "dur": float("inf")}):
+    ok(mt.clean_gear(junk) is None, "clean_gear(%r) is None" % (junk,))
+# A whole float is a whole number in JS (Number.isInteger(2.0)), so Python agrees (plan review R8).
+ok(mt.clean_gear({"id": "club", "dur": 2.0}) == {"id": "club", "dur": 2}, "dur 2.0 loads as 2")
+
+# gear_blocks: what the craft refuses
+full_club = {"id": "club", "dur": mt.GEAR["club"]["dur"]}
+ok(not mt.gear_blocks(None, "club") and not mt.gear_blocks(None, "spear"), "nothing held: both open")
+ok(mt.gear_blocks(full_club, "club"), "same id at full: refused")
+ok(not mt.gear_blocks({"id": "club", "dur": 2}, "club"), "same id worn: repair allowed")
+ok(not mt.gear_blocks(full_club, "spear"), "upgrade allowed")
+ok(mt.gear_blocks({"id": "spear", "dur": 1}, "club"), "downgrade refused")
+
+# gear_refusal: pure, in priority order
+ok(mt.gear_refusal(None, None, False, 30) == "none", "no gear")
+ok(mt.gear_refusal(full_club, {"name": "X"}, False, 30) == "trainer", "trainer battle")
+ok(mt.gear_refusal(full_club, {"name": "X"}, True, 30) == "gym", "gym battle")
+ok(mt.gear_refusal(full_club, None, False, 1) == "floor", "foe already at 1 HP")
+ok(mt.gear_refusal(full_club, None, False, 2) is None, "wild, foe above 1 HP: allowed")
+for k in ("trainer", "gym", "floor", "swing", "soften", "hunt_hit", "hunt_break",
+          "craft_new", "craft_repair", "craft_replace", "craft_full", "craft_weaker"):
+    ok(k in mt.GEAR_TEXT and mt.GEAR_TEXT[k].isascii(), "GEAR_TEXT[%s]" % k)
+
+# craft(): sets_gear stores nothing and conserves everything else
+club_r = next(r for r in mt.RECIPES if r["id"] == "club")
+spear_r = next(r for r in mt.RECIPES if r["id"] == "spear")
+have = {"twig": 5, "stone": 4, "ore": 2, "flint": 1}
+after = mt.craft(have, club_r, 0, 0, None)
+ok(after == {"twig": 2, "stone": 4, "ore": 2, "flint": 1}, "club spends exactly 3 TWIG, adds nothing")
+ok(mt.craft(have, club_r, 0, 0, full_club) is None, "club refused at full")
+ok(mt.craft(have, club_r, 0, 0, {"id": "spear", "dur": 3}) is None, "club refused under a spear")
+ok(mt.craft(have, spear_r, 0, 0, full_club) == {"twig": 4, "stone": 2, "ore": 1, "flint": 0},
+   "spear over a club spends exactly its needs")
+ok(mt.craft({"twig": 2}, club_r, 0, 0, None) is None, "short of TWIG: refused")
+spear_have = {"twig": 1, "stone": 2, "ore": 1, "flint": 1}
+ok(mt.craft(spear_have, spear_r, 0, 0, {"id": "spear", "dur": 8}) is None, "spear refused at full spear@8, nothing spent")
+ok(spear_have == {"twig": 1, "stone": 2, "ore": 1, "flint": 1}, "the refused spear craft left the input untouched")
+ok(mt.craft(spear_have, spear_r, 0, 0, {"id": "spear", "dur": 1}) == {"twig": 0, "stone": 0, "ore": 0, "flint": 0},
+   "worn spear@1 re-craft spends exactly 1 ORE + 1 FLINT + 2 STONE + 1 TWIG and stores nothing")
+
+# Game wiring: craft_recipe, recipe_owned, craft_cells, note_found, save/load
+gg = mt.Game()
+gg.new_game()
+ok(gg.gear is None, "a new game holds no gear")
+si = [r["id"] for r in mt.RECIPES].index("spear")
+ok(mt.craft_cells(gg)[si]["state"] == "hidden", "the spear is hidden before any of its needs is found")
+gg.bag = {"twig": 4}
+mt.note_found(gg)                 # found only grows through note_found (craft_recipe never calls it)
+ok(mt.craft_cells(gg)[si]["state"] != "hidden", "the spear reveals once any of its needs is found (twig)")
+ci = [r["id"] for r in mt.RECIPES].index("club")
+ok(gg.craft_recipe(ci) and gg.gear == full_club and gg.bag == {"twig": 1}, "craft a club")
+ok(mt.recipe_owned(gg, club_r), "a full club shows as owned")
+ok(not gg.craft_recipe(ci) and gg.bag == {"twig": 1}, "crafting it again at full spends nothing")
+gg.gear = {"id": "club", "dur": 2}
+gg.bag = {"twig": 3}
+ok(gg.craft_recipe(ci) and gg.gear == full_club and gg.bag == {}, "re-crafting repairs to full")
+ok(gg.craft_msg == mt.GEAR_TEXT["craft_repair"] % "WOOD CLUB", "repairing a worn club says craft_repair")
+# craft_recipe message branches (spear materials: ORE/STONE are materials, TWIG/FLINT are BAG goods)
+gm = mt.Game()
+gm.new_game()
+gm.gear = None
+gm.materials = dict(gm.materials, ore=1, stone=2)
+gm.bag = {"twig": 4, "flint": 1}
+ok(gm.craft_recipe(ci) and gm.craft_msg == mt.GEAR_TEXT["craft_new"] % "WOOD CLUB", "crafting from nothing says craft_new")
+gm.gear = {"id": "club", "dur": 2}
+gm.materials = dict(gm.materials, ore=1, stone=2)
+gm.bag = {"twig": 1, "flint": 1}
+ok(gm.craft_recipe(si) and gm.craft_msg == mt.GEAR_TEXT["craft_replace"] % ("IRON SPEAR", "WOOD CLUB"),
+   "a worn club then the spear says craft_replace")
+ok(gm.gear == {"id": "spear", "dur": mt.GEAR["spear"]["dur"]} and gm.gear["dur"] == 8, "the spear replaces the club at spear@8")
+gm.gear = {"id": "spear", "dur": 8}
+gm.materials = dict(gm.materials, ore=1, stone=2)
+gm.bag = {"twig": 4, "flint": 1}
+held_before = (dict(gm.materials), dict(gm.bag))
+ok(not gm.craft_recipe(ci) and gm.craft_msg == mt.GEAR_TEXT["craft_weaker"] % "IRON SPEAR"
+   and (gm.materials, gm.bag) == held_before and gm.gear == {"id": "spear", "dur": 8},
+   "a spear held, trying the club: craft_weaker and nothing spent")
+gm.gear = {"id": "club", "dur": 6}
+held_before = (dict(gm.materials), dict(gm.bag))
+ok(not gm.craft_recipe(ci) and gm.craft_msg == mt.GEAR_TEXT["craft_full"] % "WOOD CLUB"
+   and (gm.materials, gm.bag) == held_before and gm.gear == {"id": "club", "dur": 6},
+   "club@6, trying the club: craft_full and nothing spent")
+mt.note_found(gg)
+ok("club" in gg.found, "a held club is found")
+gg.save_game()
+g2 = mt.Game()
+g2.load_game()
+ok(g2.gear == full_club, "gear survives save/load")
+import json
+with open(mt.SAVE_PATH) as fh:
+    raw = json.load(fh)
+raw.pop("gear", None)
+with open(mt.SAVE_PATH, "w") as fh:
+    json.dump(raw, fh)
+g2.gear = {"id": "spear", "dur": 1}
+g2.load_game()
+ok(g2.gear is None, "an old save (no gear key) loads with no gear, resetting in-memory gear")
+
+# The AXE stays craftable with weapons in the game (TWIG is shared but renewable)
+ga = mt.Game()
+ga.new_game()
+ga.bag = {"twig": 5, "flint": 1}
+ok(ga.craft_recipe(ci) and ga.craft_recipe([r["id"] for r in mt.RECIPES].index("axe")),
+   "a club then the AXE from 5 TWIG + 1 FLINT")
 os.remove(mt.SAVE_PATH)
 ok(mt.MAP == MAP_BEFORE, "MAP is byte-identical after the whole SANDBOX section")
 
@@ -7153,7 +7299,19 @@ function lootData(g) {
     strings: { sign: g.SIGNS['18,59'], nurse: g.npcById('nurse1').lines, nurse2: g.npcById('nurse2').lines },
   };
 }
+const GEAR_CASES = %GEAR_CASES%, GEAR_HELD = %GEAR_HELD%;
 console.log(JSON.stringify({
+  gear: {
+    table: g.GEAR, text: g.GEAR_TEXT,
+    hit: Object.keys(g.GEAR).map(gid => { const out = [];
+      for (let m = 1; m <= 200; m++) for (const hp of [m, Math.floor(m / 2), 2, 1]) if (hp <= m) out.push(g.gearHit(m, hp, gid));
+      return out; }),
+    clean: GEAR_CASES.map(c => g.cleanGear(c)),
+    blocks: GEAR_HELD.map(h => ['club', 'spear'].map(gid => g.gearBlocks(h, gid))),
+    refusal: GEAR_HELD.slice(0, 2).map(h => [null, { name: 'X' }].map(t =>
+      [false, true].map(gym => [1, 2].map(hp => g.gearRefusal(h, t, gym, hp))))),
+    wear: [{ id: 'club', dur: 2 }, { id: 'club', dur: 1 }, { id: 'spear', dur: 8 }].map(x => g.gearWear(x)),
+  },
   xp: { consts: [g.XP_NUM, g.XP_DEN],
         table: Object.fromEntries(Object.keys(g.SPECIES).map(sid =>
           [sid, [1, 7, 30, 100].map(lv => g.xpFromFaint(g.makeMon(sid, lv)))])) },
@@ -7194,7 +7352,7 @@ console.log(JSON.stringify({
       blocks: Object.fromEntries(Object.entries(g.BLOCKS).map(([k, b]) =>
         [k, [b.name, b.drops, b.oreOneIn, b.leaves, b.tier, !!b.authoredOnly, b.tool]])),
       recipes: g.RECIPES.map(r => [r.id, r.out, r.count, r.needs, r.setsTier || 0, 'cap' in r ? r.cap : null,
-                                   r.setsTool || null]),
+                                   r.setsTool || null, r.setsGear || null]),
       hashes: band, ore, mineable, placeable, ...seamData(g) };
   })(),
   shell: shellData(g),
@@ -7208,6 +7366,30 @@ console.log(JSON.stringify({
             g.SCARE_LUNGE_SCALE, g.SCARE_VEIL_DARK, g.SCARE_VEIL] }
 }));
 """.replace("%GLADE_PROBES%", json.dumps(GLADE_PROBES))
+GEAR_CASES = [None, {"id": "club", "dur": 6}, {"id": "club", "dur": 99}, {"id": "spear", "dur": 3},
+              {"id": "spear", "dur": 0}, {"id": "club", "dur": -2}, {"id": "club", "dur": 2.5},
+              {"id": "club", "dur": 2.0}, {"id": "club", "dur": "2"}, {"id": "club", "dur": True},
+              {"id": "axe", "dur": 2}, {"id": "club"}, [], 3, "club"]
+GEAR_HELD = [None, {"id": "club", "dur": 6}, {"id": "club", "dur": 2}, {"id": "spear", "dur": 8},
+             {"id": "spear", "dur": 1}]
+
+
+JS_DUMP = JS_DUMP.replace("%GEAR_CASES%", json.dumps(GEAR_CASES)).replace("%GEAR_HELD%", json.dumps(GEAR_HELD))
+
+
+def python_gear():
+    """The crafted-weapon tables and pure rules, mirroring `gear` in JS_DUMP."""
+    return json.loads(json.dumps({
+        "table": mt.GEAR, "text": mt.GEAR_TEXT,
+        "hit": [[mt.gear_hit(m, hp, gid) for m in range(1, 201) for hp in (m, m // 2, 2, 1) if hp <= m]
+                for gid in mt.GEAR],
+        "clean": [mt.clean_gear(c) for c in GEAR_CASES],
+        "blocks": [[mt.gear_blocks(h, gid) for gid in ("club", "spear")] for h in GEAR_HELD],
+        "refusal": [[[[mt.gear_refusal(h, t, gym, hp) for hp in (1, 2)] for gym in (False, True)]
+                     for t in (None, {"name": "X"})] for h in GEAR_HELD[:2]],
+        "wear": [mt.gear_wear(x) for x in ({"id": "club", "dur": 2}, {"id": "club", "dur": 1},
+                                           {"id": "spear", "dur": 8})],
+    }))
 
 
 def python_tables():
@@ -7230,6 +7412,7 @@ def python_tables():
                      for n in [n for n in mt.NPCS if n["kind"] == "trainer"] + [mt.GYM_LEADER]],
         "sandbox": python_sandbox(), "shell": python_shell(), "hunt": python_hunt(),
         "cave": python_cave(), "conditions": python_conditions(), "loot": python_loot(),
+        "gear": python_gear(),
         "xp": {"consts": [mt.XP_NUM, mt.XP_DEN],
                "table": {sid: [mt.xp_from_faint(mt.make_mon(sid, lv)) for lv in (1, 7, 30, 100)]
                          for sid in mt.SPECIES}},
@@ -7505,7 +7688,7 @@ def python_sandbox():
                        bool(b.get("authored_only")), b.get("tool")]
                    for k, b in mt.BLOCKS.items()},
         "recipes": [[r["id"], r["out"], r["count"], r["needs"], r.get("sets_tier", 0), r.get("cap"),
-                     list(r["sets_tool"]) if r.get("sets_tool") else None]
+                     list(r["sets_tool"]) if r.get("sets_tool") else None, r.get("sets_gear")]
                     for r in mt.RECIPES],
         "hashes": band, "ore": ore, "mineable": mineable, "placeable": placeable,
         **python_seam_data(),
@@ -7713,7 +7896,7 @@ else:
             py_tables = python_tables()
             clean = True
             for key in ("species", "moves", "zones", "map", "chart", "starters", "trainers", "sandbox", "shell", "hunt",
-                        "cave", "conditions", "loot", "xp"):
+                        "cave", "conditions", "loot", "xp", "gear"):
                 d = diff(py_tables[key], html_tables[key], key)
                 clean = clean and not d
                 ok(not d, "%s differs between builds: %s" % (key, "; ".join(d[:4])))

@@ -908,7 +908,8 @@ ok(same(Object.keys(g.BLOCKS).filter(k => g.BLOCKS[k].authoredOnly).sort(), [g.S
 ok(same(g.BLOCKS[g.TREE].drops, {}) && g.BLOCKS[g.TREE].leaves === '.', 'a thick tree drops nothing and leaves ground');
 ok(!has(g.BLOCKS, 'C'), 'cave wall (C) is never mineable');
 for (const r of g.RECIPES) {
-  ok(g.MATERIALS.includes(r.out) || r.out === 'balls' || r.setsTier || r.setsTool || has(g.GOODS, r.out) ||
+  ok(g.MATERIALS.includes(r.out) || r.out === 'balls' || r.setsTier || r.setsTool ||
+     (r.setsGear && r.out === r.setsGear && has(g.GEAR, r.out)) || has(g.GOODS, r.out) ||
      ((r.out === 'lantern' || r.out === 'pulse') && 'cap' in r), 'recipe ' + r.id + ' makes a known thing');
   ok(!!g.craftLabel(r.out), 'recipe ' + r.id + ' has a label');
   ok(r.count > 0 && Object.keys(r.needs).every(k => (g.MATERIALS.includes(k) || (has(g.GOODS, k) && g.GOODS[k].kind === 'loot')) && r.needs[k] > 0),
@@ -968,7 +969,7 @@ for (const r of g.RECIPES) {
   const delta = {}, want = {};
   for (const k of keys) { const d = (after[k] || 0) - (inv[k] || 0); if (d) delta[k] = d; }
   for (const k in r.needs) want[k] = -r.needs[k];
-  if (!(r.setsTier || r.setsTool)) want[r.out] = (want[r.out] || 0) + r.count;   // a tool raises a flag, not a counter
+  if (!(r.setsTier || r.setsTool || r.setsGear)) want[r.out] = (want[r.out] || 0) + r.count;   // a tool raises a flag, not a counter
   ok(same(Object.entries(delta).sort(), Object.entries(want).filter(([, v]) => v).sort()),
      'craft(' + r.id + ') moves exactly the recipe: ' + JSON.stringify(delta));
   const short = {};
@@ -1427,8 +1428,8 @@ for (const junk of ['yes', 7, -2, null]) {
   const AXE_R = g.RECIPES.find(r => r.setsTool);
   ok(AXE_R.id === 'axe' && same(AXE_R.needs, { twig: 2, flint: 1 }) && same(AXE_R.setsTool, ['axe', 1]),
      'the AXE is 2 TWIG + 1 FLINT and sets the axe to 1');
-  ok(same(g.RECIPES.map(r => r.id), ['wall', 'ball', 'iron_pick', 'oil', 'pulse', 'axe', 'potion', 'greatball', 'smoke']),
-     "recipe order: the first five unchanged, then Part B's four");
+  ok(same(g.RECIPES.map(r => r.id), ['wall', 'ball', 'iron_pick', 'oil', 'pulse', 'axe', 'potion', 'greatball', 'smoke', 'club', 'spear']),
+     "recipe order: the first five unchanged, then Part B's four, then the two gear recipes");
   const haveA = { twig: 2, flint: 1, stone: 0 };
   ok(same(g.craft(haveA, AXE_R, 0, 0), { twig: 0, flint: 0, stone: 0 }), 'the AXE spends exactly its needs and stores nothing');
   ok(g.craft(haveA, AXE_R, 0, 1) === null, 'the AXE is refused once owned');
@@ -1534,7 +1535,7 @@ for (const junk of ['yes', 7, -2, null]) {
 // --- visual CRAFT, chunk 3: icons, found, craftCells, gridMove, the hook (mirrors the .py SANDBOX tests) ---
 {
   const ICON_WANT = [...Object.keys(g.GOODS), 'stone', 'ore', 'wall', 'balls', 'pick', 'iron_pick', 'axe',
-                     'lantern', 'pulse', 'coins'].sort();
+                     'lantern', 'pulse', 'coins', 'club', 'spear'].sort();
   ok(same(Object.keys(g.ICONS).sort(), ICON_WANT), 'ICONS has exactly one icon per drawable id (' + ICON_WANT.length + ')');
   ok(!has(g.ICON_PALETTE, '.'), "'.' is transparent and never a palette key");
   ok(Object.entries(g.ICON_PALETTE).every(([k, v]) => k.length === 1 && v.length === 3 &&
@@ -1731,6 +1732,136 @@ ok(g.MAP.join('\n') === MAP_BEFORE, 'MAP is byte-identical after the whole SANDB
   g.update(1 / 60);
   ok(p.tx === 30 && p.ty === 44 && !p.moving && p.dir === 'up', 'closing the menu does not replay the press as a step');
   console.log('  input: one-frame taps turn and step; holds, walls and menus unchanged');
+}
+
+// --- GEAR (crafted weapons; mirrors the .py SANDBOX gear cases) ---
+{
+  ok(same(Object.keys(g.GEAR).sort(), ['club', 'spear']), 'GEAR has exactly the club and the spear');
+  ok(g.GEAR.club.tier < g.GEAR.spear.tier, 'the spear outranks the club');
+  for (const [gid, gd] of Object.entries(g.GEAR)) {
+    ok(Number.isInteger(gd.pct) && gd.pct >= 1 && gd.pct <= 50, gid + ' pct is a small int');
+    ok(Number.isInteger(gd.dur) && gd.dur >= 1, gid + ' has durability');
+    ok(has(g.ICONS, gid) && has(g.CRAFT_BLURB, gid) && has(g.MATERIAL_LABEL, gid), gid + ' has an icon, a blurb and a label');
+    const gr = g.RECIPES.filter(r => r.setsGear === gid);
+    ok(gr.length === 1 && gr[0].out === gid && gr[0].id === gid, gid + ' has one setsGear recipe');
+  }
+  ok(same(g.RECIPES.find(r => r.id === 'club').needs, { twig: 3 }), 'club = 3 TWIG');
+  ok(same(g.RECIPES.find(r => r.id === 'spear').needs, { ore: 1, flint: 1, stone: 2, twig: 1 }),
+     'spear = 1 ORE + 1 FLINT + 2 STONE + 1 TWIG');
+  ok(same(g.RECIPES.slice(-2).map(r => r.id), ['club', 'spear']), 'gear recipes are appended last');
+  let hitOk = true;
+  for (const gid of Object.keys(g.GEAR)) for (let maxhp = 1; maxhp <= 200; maxhp++)
+    for (const hp of [maxhp, Math.max(1, Math.floor(maxhp / 2)), 2, 1]) {
+      if (hp > maxhp) continue;
+      const d = g.gearHit(maxhp, hp, gid);
+      if (!(Number.isInteger(d) && d >= 0 && d <= Math.max(0, hp - 1))) hitOk = false;
+      if (hp > 1 && d < 1) hitOk = false;
+    }
+  ok(hitOk, 'gearHit never KOs and always lands above 1 HP, over maxhp 1..200 for both ids');
+  ok(g.gearHit(80, 80, 'club') === 12 && g.gearHit(80, 80, 'spear') === 20, '15%/25% of 80');
+  ok(g.gearHit(21, 21, 'club') === 4, 'rounds up: ceil(21*15/100) = 4');
+  ok(g.gearHit(50, 1, 'spear') === 0, 'a foe at 1 HP takes nothing');
+  ok(same(g.gearWear({ id: 'club', dur: 2 }), { id: 'club', dur: 1 }), 'wear drops 1');
+  ok(g.gearWear({ id: 'club', dur: 1 }) === null, 'the last swing breaks it');
+  ok(same(g.cleanGear({ id: 'spear', dur: 3 }), { id: 'spear', dur: 3 }), 'clean keeps a good record');
+  ok(same(g.cleanGear({ id: 'spear', dur: 99 }), { id: 'spear', dur: g.GEAR.spear.dur }), 'clean clamps dur to the max');
+  for (const junk of [null, undefined, 3, 'club', [], { id: 'axe', dur: 2 }, { id: 'club' }, { id: 'club', dur: 0 },
+                      { id: 'club', dur: -2 }, { id: 'club', dur: true }, { id: 'club', dur: 2.5 }, { id: 'club', dur: '2' },
+                      { id: ['club'], dur: 2 }, { id: 'club', dur: NaN }, { id: 'club', dur: Infinity },
+                      { id: 'toString', dur: 2 }])
+    ok(g.cleanGear(junk) === null, 'cleanGear(' + String(JSON.stringify(junk)) + ') is null');
+  ok(same(g.cleanGear({ id: 'club', dur: 2.0 }), { id: 'club', dur: 2 }), 'dur 2.0 loads as 2');
+  const fullClub = { id: 'club', dur: g.GEAR.club.dur };
+  ok(!g.gearBlocks(null, 'club') && !g.gearBlocks(null, 'spear'), 'nothing held: both open');
+  ok(g.gearBlocks(fullClub, 'club'), 'same id at full: refused');
+  ok(!g.gearBlocks({ id: 'club', dur: 2 }, 'club'), 'same id worn: repair allowed');
+  ok(!g.gearBlocks(fullClub, 'spear'), 'upgrade allowed');
+  ok(g.gearBlocks({ id: 'spear', dur: 1 }, 'club'), 'downgrade refused');
+  ok(g.gearRefusal(null, null, false, 30) === 'none', 'no gear');
+  ok(g.gearRefusal(fullClub, { name: 'X' }, false, 30) === 'trainer', 'trainer battle');
+  ok(g.gearRefusal(fullClub, { name: 'X' }, true, 30) === 'gym', 'gym battle');
+  ok(g.gearRefusal(fullClub, null, false, 1) === 'floor', 'foe already at 1 HP');
+  ok(g.gearRefusal(fullClub, null, false, 2) === null, 'wild, foe above 1 HP: allowed');
+  for (const k of ['trainer', 'gym', 'floor', 'swing', 'soften', 'hunt_hit', 'hunt_break',
+                   'craft_new', 'craft_repair', 'craft_replace', 'craft_full', 'craft_weaker'])
+    ok(has(g.GEAR_TEXT, k) && /^[\x00-\x7f]*$/.test(g.GEAR_TEXT[k]), 'GEAR_TEXT[' + k + ']');
+  const clubR = g.RECIPES.find(r => r.id === 'club'), spearR = g.RECIPES.find(r => r.id === 'spear');
+  const hv = { twig: 5, stone: 4, ore: 2, flint: 1 };
+  ok(same(g.craft(hv, clubR, 0, 0, null), { twig: 2, stone: 4, ore: 2, flint: 1 }), 'club spends exactly 3 TWIG, adds nothing');
+  ok(g.craft(hv, clubR, 0, 0, fullClub) === null, 'club refused at full');
+  ok(g.craft(hv, clubR, 0, 0, { id: 'spear', dur: 3 }) === null, 'club refused under a spear');
+  ok(same(g.craft(hv, spearR, 0, 0, fullClub), { twig: 4, stone: 2, ore: 1, flint: 0 }), 'spear over a club spends exactly its needs');
+  ok(g.craft({ twig: 2 }, clubR, 0, 0, null) === null, 'short of TWIG: refused');
+  const spearHave = { twig: 1, stone: 2, ore: 1, flint: 1 };
+  ok(g.craft(spearHave, spearR, 0, 0, { id: 'spear', dur: 8 }) === null, 'spear refused at full spear@8, nothing spent');
+  ok(same(spearHave, { twig: 1, stone: 2, ore: 1, flint: 1 }), 'the refused spear craft left the input untouched');
+  ok(same(g.craft(spearHave, spearR, 0, 0, { id: 'spear', dur: 1 }), { twig: 0, stone: 0, ore: 0, flint: 0 }),
+     'worn spear@1 re-craft spends exactly 1 ORE + 1 FLINT + 2 STONE + 1 TWIG and stores nothing');
+
+  // Game wiring: craftCells, craftRecipe, save/load. G fields are snapshotted and restored.
+  const keepG = { gear: G.gear, bag: G.bag, found: G.found, craftMsg: G.craftMsg, axe: G.flags.axe };
+  const saveKeyG = Object.keys(store).find(k => k.startsWith('monster-trail-save'));
+  const saveBeforeG = saveKeyG !== undefined ? store[saveKeyG] : undefined;
+  try {
+    const si = g.RECIPES.findIndex(r => r.id === 'spear'), ci = g.RECIPES.findIndex(r => r.id === 'club');
+    G.gear = null; G.bag = {}; G.found = new Set();
+    ok(g.craftCells()[si].state === 'hidden', 'the spear is hidden before any of its needs is found');
+    G.bag = { twig: 4 }; G.found = new Set(['twig']);
+    ok(g.craftCells()[si].state !== 'hidden', 'the spear reveals once any of its needs is found (twig)');
+    ok(g.craftRecipe(ci) && same(G.gear, fullClub) && same(G.bag, { twig: 1 }), 'craft a club');
+    ok(g.craftCells()[ci].state === 'owned', 'a full club shows as owned');
+    ok(!g.craftRecipe(ci) && same(G.bag, { twig: 1 }), 'crafting it again at full spends nothing');
+    G.gear = { id: 'club', dur: 2 }; G.bag = { twig: 3 };
+    ok(g.craftRecipe(ci) && same(G.gear, fullClub) && same(G.bag, {}), 're-crafting repairs to full');
+    ok(G.craftMsg === g.fmtMsg(g.GEAR_TEXT.craft_repair, 'WOOD CLUB'), 'repairing a worn club says craft_repair');
+    // craft_recipe message branches (ORE/STONE are materials, TWIG/FLINT are BAG goods)
+    const keepMats = G.materials;
+    try {
+      G.gear = null; G.materials = Object.assign({}, G.materials, { ore: 1, stone: 2 }); G.bag = { twig: 4, flint: 1 };
+      ok(g.craftRecipe(ci) && G.craftMsg === g.fmtMsg(g.GEAR_TEXT.craft_new, 'WOOD CLUB'), 'crafting from nothing says craft_new');
+      G.gear = { id: 'club', dur: 2 }; G.materials = Object.assign({}, G.materials, { ore: 1, stone: 2 }); G.bag = { twig: 1, flint: 1 };
+      ok(g.craftRecipe(si) && G.craftMsg === g.fmtMsg(g.GEAR_TEXT.craft_replace, 'IRON SPEAR', 'WOOD CLUB'),
+         'a worn club then the spear says craft_replace');
+      ok(same(G.gear, { id: 'spear', dur: 8 }) && g.GEAR.spear.dur === 8, 'the spear replaces the club at spear@8');
+      G.gear = { id: 'spear', dur: 8 }; G.materials = Object.assign({}, G.materials, { ore: 1, stone: 2 }); G.bag = { twig: 4, flint: 1 };
+      let snap = JSON.stringify([G.materials, G.bag]);
+      ok(!g.craftRecipe(ci) && G.craftMsg === g.fmtMsg(g.GEAR_TEXT.craft_weaker, 'IRON SPEAR')
+         && JSON.stringify([G.materials, G.bag]) === snap && same(G.gear, { id: 'spear', dur: 8 }),
+         'a spear held, trying the club: craft_weaker and nothing spent');
+      G.gear = { id: 'club', dur: 6 };
+      snap = JSON.stringify([G.materials, G.bag]);
+      ok(!g.craftRecipe(ci) && G.craftMsg === g.fmtMsg(g.GEAR_TEXT.craft_full, 'WOOD CLUB')
+         && JSON.stringify([G.materials, G.bag]) === snap && same(G.gear, { id: 'club', dur: 6 }),
+         'club@6, trying the club: craft_full and nothing spent');
+    } finally { G.materials = keepMats; }
+    g.giveGear('spear', 99);
+    ok(same(G.gear, { id: 'spear', dur: g.GEAR.spear.dur }), 'giveGear clamps through cleanGear');
+    g.giveGear('nosuch', 3);
+    ok(G.gear === null, 'giveGear of an unknown id leaves no gear');
+    g.giveGear('club', 6);
+    G.found = new Set();
+    ok(g.saveGame(), 'a save with gear writes');
+    const gk = Object.keys(store).find(k => k.startsWith('monster-trail-save'));
+    ok(same(JSON.parse(store[gk]).gear, fullClub), 'the save holds the gear record');
+    G.gear = { id: 'spear', dur: 1 };
+    ok(g.loadGame() && same(G.gear, fullClub), 'gear survives save/load');
+    ok(G.found.has('club'), 'a held club is found');
+    const raw = JSON.parse(store[gk]);
+    delete raw.gear;
+    store[gk] = JSON.stringify(raw);
+    G.gear = { id: 'spear', dur: 1 };
+    ok(g.loadGame() && G.gear === null, 'an old save (no gear key) loads with no gear, resetting in-memory gear');
+    // a club then the AXE from 5 TWIG + 1 FLINT
+    G.gear = null; G.flags.axe = 0; G.bag = { twig: 5, flint: 1 };
+    const ai = g.RECIPES.findIndex(r => r.id === 'axe');
+    ok(g.craftRecipe(ci) && g.craftRecipe(ai), 'a club then the AXE from 5 TWIG + 1 FLINT');
+  } finally {
+    Object.assign(G, keepG);
+    G.flags.axe = keepG.axe; delete G.axe;
+    for (const k of Object.keys(store)) if (k.startsWith('monster-trail-save')) delete store[k];
+    if (saveKeyG !== undefined) store[saveKeyG] = saveBeforeG;
+  }
+  console.log('  gear: tables, pure rules, craft, save/load');
 }
 
 /* ------------------------------------------------------- CONDITIONS */

@@ -66,12 +66,15 @@ test('RPG save round trip retains chapter and all existing campaign data', () =>
   vm.runInNewContext(fs.readFileSync("claude's monsters.html",'utf8').match(/<script>([\s\S]*)<\/script>/)[1],context);
   const g=context.__GAME__, G=g.G;
   G.flags.gym=true; G.flags.starter=true; G.party=[g.makeMon('emberling',12)]; G.balls=7;
+  G.gear={id:'spear',dur:3};
   G.chapter={v:1,unlocked:true,completed:false,active:true,stage:2};
   assert.equal(g.saveGame(),true);
   const saved=JSON.parse(store['monster-trail-save-v1']);
   assert.equal(saved.chapter.stage,2);
-  G.chapter=null; G.balls=0;
+  assert.deepEqual(saved.gear,{id:'spear',dur:3});
+  G.chapter=null; G.balls=0; G.gear=null;
   assert.equal(g.loadGame(),true); assert.equal(G.chapter.stage,2); assert.equal(G.balls,7);
+  assert.equal(JSON.stringify(G.gear),JSON.stringify({id:'spear',dur:3}));
   saved.chapter={v:99,stage:3,completed:true}; store['monster-trail-save-v1']=JSON.stringify(saved);
   assert.equal(g.loadGame(),true); assert.equal(G.chapter.completed,false); assert.equal(G.balls,7);
   delete saved.chapter; store['monster-trail-save-v1']=JSON.stringify(saved);
