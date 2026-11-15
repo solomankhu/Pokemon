@@ -2756,14 +2756,14 @@ NPCS = [
          intro="You brought a light? Shame. I like it dark.",
          defeat="Fine. Take the shaft south.",
          after="NOCTURN swarm the side galleries. And the big one? PSYCHIC tricks do nothing to it.",
-         team=[("nocturn", 23), ("umbrawing", 23), ("ironclad", 24)]),
+         team=[("nocturn", 25), ("umbrawing", 25), ("ironclad", 26)]),
     # --- SPIRE RUINS ---
     dict(id="t8", x=43, y=18, dir="down", kind="trainer", name="SEER ILVA",
          c1=(212, 188, 232), c2=(104, 76, 140), sight=4,
          intro="The stones said you would come. They also said you would lose.",
          defeat="The stones are not always right.",
          after="VOLT runs ELECTRIC. Bring something that shrugs it off.",
-         team=[("duneghast", 27), ("lanternfly", 27), ("umbrawing", 28)]),
+         team=[("duneghast", 29), ("lanternfly", 29), ("umbrawing", 30)]),
     dict(id="warden", x=46, y=8, dir="down", kind="npc", name="GYM WARDEN",
          c1=(210, 190, 150), c2=(100, 86, 60),
          lines=["Six trainers beaten and the doors open. Not before.",
@@ -2774,8 +2774,8 @@ GYM_LEADER = dict(
     id="gym", sight=0, after="", name="LEADER VOLT",
     intro="So you made it all the way up the trail. Show me what that team can do!",
     defeat="Beautiful. The trail is yours.",
-    team=[("zapmote", 28), ("galebeak", 29), ("lanternfly", 30),
-          ("ironclad", 30), ("umbrawing", 32)])
+    team=[("zapmote", 30), ("galebeak", 31), ("lanternfly", 32),
+          ("ironclad", 32), ("umbrawing", 34)])
 
 
 def npc_by_id(npc_id):

@@ -430,6 +430,26 @@ for (const z of g.ZONES) for (const [id] of z.pool) ok(g.SPECIES[id], 'encounter
 for (const n of g.NPCS) if (n.team) for (const [id] of n.team) ok(g.SPECIES[id], 'trainer ' + n.id + ' uses unknown species ' + id);
 for (const [id] of g.GYM_LEADER.team) ok(g.SPECIES[id], 'gym leader uses unknown species ' + id);
 
+// Gym rebalance after the 1.5x XP change (+2 by user choice): VOLT sits clear of the hunt
+// cap, and the late trainers step up towards him so the gym is not a cliff.
+{
+  const gymLvls = g.GYM_LEADER.team.map(([, lv]) => lv);
+  ok(JSON.stringify(gymLvls) === '[30,31,32,32,34]', "LEADER VOLT's team is L30-34: " + gymLvls);
+  ok(Math.min(...gymLvls) >= g.HUNT.lvMax + 2,
+     "the gym's lowest member (L" + Math.min(...gymLvls) + ') is at least the hunt cap + 2 (L' + (g.HUNT.lvMax + 2) + ')');
+  ok(JSON.stringify(g.npcById('t7').team.map(([, lv]) => lv)) === '[25,25,26]'
+     && JSON.stringify(g.npcById('t8').team.map(([, lv]) => lv)) === '[29,29,30]',
+     'CAVER NOX is L25-26 and SEER ILVA L29-30');
+  const late = ['t6', 't7', 't8'].map(t => Math.max(...g.npcById(t).team.map(([, lv]) => lv)));
+  ok(late[0] <= late[1] && late[1] <= late[2] && late[2] <= Math.min(...gymLvls) && late[2] < Math.max(...gymLvls),
+     'trainer tops climb t6 -> t7 -> t8, never pass the gym\'s lowest and stay under VOLT\'s ace: ' + late);
+  for (const [sid, lv] of g.GYM_LEADER.team.concat(g.npcById('t7').team, g.npcById('t8').team)) {
+    const mv = g.makeMon(sid, lv).moves;
+    ok(mv.length >= 1 && mv.length <= 4 && mv.some(m => g.MOVES[m].cat !== 'status'),
+       sid + ' L' + lv + ' has a valid moveset with a damaging move: ' + mv);
+  }
+}
+
 const probeMon = g.makeMon('dripling', 14);
 const probeFoe = g.makeMon('zapmote', 12);
 const hits = Math.ceil(probeFoe.maxhp / g.damageCalc(probeMon, probeFoe, 'waterpulse', {}, {}, fixed).dmg);
@@ -2189,7 +2209,7 @@ section('LOOT - goods, drops, coins, shop, save cleaning');
     ok(JSON.stringify(queued()) === '["You got 160 coins!"]' && G.coins === 260 && !Object.keys(G.bag).length, 'a trainer win pays coins only');
     lootRun();
     lootSetup(undefined, undefined, [g.makeMon('pyrelash', 60)]);
-    for (const want of [940, 640]) {
+    for (const want of [980, 680]) {   // 20 x VOLT's top L34, + GYM_BONUS 300 the first time
       G.fadeDir = 0; G.mode = 'overworld';
       g.startBattle(g.makeMon(g.GYM_LEADER.team[0][0], g.GYM_LEADER.team[0][1]), { trainer: g.GYM_LEADER }); lootRun();
       const c0 = G.coins;

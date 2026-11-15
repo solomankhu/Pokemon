@@ -543,6 +543,23 @@ for n in mt.NPCS:
 for sid, _ in mt.GYM_LEADER["team"]:
     ok(sid in mt.SPECIES, "gym leader uses unknown species %s" % sid)
 
+# Gym rebalance after the 1.5x XP change (+2 by user choice): VOLT sits clear of the hunt
+# cap, and the late trainers step up towards him so the gym is not a cliff.
+GYM_LVLS = [lv for _, lv in mt.GYM_LEADER["team"]]
+ok(GYM_LVLS == [30, 31, 32, 32, 34], "LEADER VOLT's team is L30-34: %s" % GYM_LVLS)
+ok(min(GYM_LVLS) >= mt.HUNT["lv_max"] + 2,
+   "the gym's lowest member (L%d) is at least the hunt cap + 2 (L%d)" % (min(GYM_LVLS), mt.HUNT["lv_max"] + 2))
+ok([lv for _, lv in mt.npc_by_id("t7")["team"]] == [25, 25, 26]
+   and [lv for _, lv in mt.npc_by_id("t8")["team"]] == [29, 29, 30],
+   "CAVER NOX is L25-26 and SEER ILVA L29-30")
+_late = [max(lv for _, lv in mt.npc_by_id(t)["team"]) for t in ("t6", "t7", "t8")]
+ok(_late == sorted(_late) and _late[-1] <= min(GYM_LVLS) and _late[-1] < max(GYM_LVLS),
+   "trainer tops climb t6 -> t7 -> t8, never pass the gym's lowest and stay under VOLT's ace: %s" % _late)
+for _sid, _lv in mt.GYM_LEADER["team"] + mt.npc_by_id("t7")["team"] + mt.npc_by_id("t8")["team"]:
+    _mv = mt.moves_for_level(_sid, _lv)
+    ok(1 <= len(_mv) <= 4 and any(mt.MOVES[m]["cat"] != "status" for m in _mv),
+       "%s L%d has a valid moveset with a damaging move: %s" % (_sid, _lv, _mv))
+
 probe = mt.make_mon("dripling", 14)
 probe_foe = mt.make_mon("zapmote", 12)
 per_hit = mt.damage_calc(probe, probe_foe, "waterpulse", {}, {}, fixed)["dmg"]
@@ -3203,7 +3220,7 @@ gt.end_battle("win")
 ok(queued(gt) == ["You got 160 coins!"] and gt.coins == 260 and gt.bag == {},
    "a trainer win pays 20 x its top level and never drops loot")
 gy = loot_game(mons=[mt.make_mon("pyrelash", 60)])
-for n, want in ((1, 940), (2, 640)):
+for n, want in ((1, 980), (2, 680)):     # 20 x VOLT's top L34, + GYM_BONUS 300 the first time
     gy.fade_dir, gy.mode = 0, "overworld"
     gy.start_battle(mt.make_mon(*mt.GYM_LEADER["team"][0]), trainer=mt.GYM_LEADER)
     loot_run(gy)
@@ -3566,7 +3583,7 @@ finally:
 ok(log_s == ["You vanished in a puff of smoke!"] and b.result == "run" and gs.bag == {"smoke": 1},
    "SMOKE ends a wild battle as a run and is used up")
 ok(n_random[0] == 0 and gs.coins == 100, "SMOKE never draws the RUN odds and pays nothing")
-print("  loot battle: seeds 1-drop %d -> %s, 2-drop + rare %d -> %s + %s, merge %d; gym pays 940 then 640; "
+print("  loot battle: seeds 1-drop %d -> %s, 2-drop + rare %d -> %s + %s, merge %d; gym pays 980 then 680; "
       "seeded wild battle %d lines" % (ST_ONE, ONE_ITEM, ST_MULTI, MULTI_ITEM, RARE_ITEM, ST_MERGE, len(log_a)))
 
 
@@ -5602,7 +5619,7 @@ def render_section():
     ok(any("Your bag is empty!" in s for s in nob["msgs"]), "an empty bag is narrated")
     ok(any("No one else" in s for s in nob["msgs"]), "swapping with no one is refused")
 
-    gym = scenario("gym battle", mt.make_mon("pyrelash", 95), mt.make_mon("zapmote", 28),
+    gym = scenario("gym battle", mt.make_mon("pyrelash", 95), mt.make_mon(*mt.GYM_LEADER["team"][0]),
                    strongest, trainer=mt.GYM_LEADER, foe_moves=None)
     ok(sg.mode == "victory" and sg.flags["gym"], "beating the gym leader lands on the victory screen")
     show("victory-after-gym")
@@ -7156,6 +7173,9 @@ console.log(JSON.stringify({
   zones: g.ZONES.map(z => [z.x1, z.y1, z.x2, z.y2, z.min, z.max,
                            z.pool.map(([a, b]) => [a, b])]),
   map: g.MAP, chart: g.TYPE_CHART, starters: g.STARTERS,
+  // NPCS and GYM_LEADER are hand-ported: every trainer's team, plus the moveset each member gets.
+  trainers: g.NPCS.filter(n => n.kind === 'trainer').concat([g.GYM_LEADER]).map(n =>
+    [n.id, n.team.map(([sid, lv]) => [sid, lv, g.makeMon(sid, lv).moves])]),
   sandbox: (() => {
     const band = [], ore = [], mineable = [], placeable = [];
     const npcs = new Set(g.NPCS.map(n => n.x + ',' + n.y));
@@ -7206,6 +7226,8 @@ def python_tables():
         "zones": [[z["x1"], z["y1"], z["x2"], z["y2"], z["min"], z["max"],
                    [[a, b] for a, b in z["pool"]]] for z in mt.ZONES],
         "map": list(mt.MAP), "chart": mt.TYPE_CHART, "starters": list(mt.STARTERS),
+        "trainers": [[n["id"], [[sid, lv, mt.moves_for_level(sid, lv)] for sid, lv in n["team"]]]
+                     for n in [n for n in mt.NPCS if n["kind"] == "trainer"] + [mt.GYM_LEADER]],
         "sandbox": python_sandbox(), "shell": python_shell(), "hunt": python_hunt(),
         "cave": python_cave(), "conditions": python_conditions(), "loot": python_loot(),
         "xp": {"consts": [mt.XP_NUM, mt.XP_DEN],
@@ -7690,7 +7712,7 @@ else:
             html_tables = json.loads(proc.stdout)
             py_tables = python_tables()
             clean = True
-            for key in ("species", "moves", "zones", "map", "chart", "starters", "sandbox", "shell", "hunt",
+            for key in ("species", "moves", "zones", "map", "chart", "starters", "trainers", "sandbox", "shell", "hunt",
                         "cave", "conditions", "loot", "xp"):
                 d = diff(py_tables[key], html_tables[key], key)
                 clean = clean and not d
@@ -7702,6 +7724,8 @@ else:
                 print("  %d species, %d moves, %d zones identical in both builds"
                       % (len(py_tables["species"]), len(py_tables["moves"]),
                          len(py_tables["zones"])))
+                print("  trainers: %d teams (%d monsters, levels and movesets) identical in both builds"
+                      % (len(py_tables["trainers"]), sum(len(t[1]) for t in py_tables["trainers"])))
                 sb = py_tables["sandbox"]
                 print("  sandbox: %d recipes, %d blocks, %d tile hashes, %d ore spots, "
                       "%d mineable, %d buildable tiles identical in both builds"
